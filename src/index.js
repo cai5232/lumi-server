@@ -44,14 +44,28 @@ async function callModel({ messages, temperature = 0.8 }) {
   if (!configuredURL || !apiKey || !model) {
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
-  const apiURL = /\/chat\/completions\/?$/i.test(configuredURL)
+  const isClaude = /anthropic|claude/i.test(model);
+  const apiURL = isClaude && /\/api\/v1\/?$/i.test(configuredURL)
+    ? configuredURL.replace(/\/api\/v1\/?$/i, "/api/anthropic/v1/messages")
+    : /\/chat\/completions\/?$/i.test(configuredURL)
     ? configuredURL
     : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
+
+  const preparedMessages = cacheMessages(messages, model);
+  const requestBody = isClaude
+    ? {
+        model: model.replace(/^anthropic\//i, ""),
+        max_tokens: Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
+        system: preparedMessages.filter((message) => message.role === "system").map((message) => message.content).flat(),
+        messages: preparedMessages.filter((message) => message.role !== "system"),
+        temperature
+      }
+    : { model, messages: preparedMessages, temperature };
 
   const response = await fetch(apiURL, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, messages: cacheMessages(messages, model), temperature })
+    body: JSON.stringify(requestBody)
   });
   const raw = await response.text();
   let data = {};
@@ -62,7 +76,9 @@ async function callModel({ messages, temperature = 0.8 }) {
   cacheStats.lastUsage = usage;
   cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
-  const content = data?.choices?.[0]?.message?.content;
+  const content = isClaude
+    ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
+    : data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
   return content.trim();
 }
