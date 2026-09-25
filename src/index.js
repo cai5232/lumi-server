@@ -68,11 +68,18 @@ async function saveCacheStats() {
   await rename(temporaryPath, cacheStatsPath);
 }
 
-function estimateTokens(text) { return Math.ceil(String(text || "").length / 4); }
-function estimateCacheTokens(text) {
+function estimateTokens(text) {
   const value = String(text || "");
   const cjkCharacters = (value.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) || []).length;
   return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
+}
+function estimateCacheTokens(text) { return estimateTokens(text); }
+function contextMessages(thread) {
+  const messages = thread.messages || [];
+  const boundaryId = thread.compactedThroughMessageId;
+  if (!boundaryId) return messages;
+  const boundaryIndex = messages.findIndex((message) => message.id === boundaryId);
+  return boundaryIndex >= 0 ? messages.slice(boundaryIndex + 1) : messages;
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
 
@@ -262,7 +269,7 @@ async function writeMemory(content, threadId) {
 }
 
 async function compactThread(thread) {
-  const messages = thread.messages || [];
+  const messages = contextMessages(thread);
   if (messageTokens(messages) < contextLimit * compactAt) return false;
   let tail = [];
   let tailCount = 0;
@@ -305,7 +312,7 @@ async function generateReply({ input, systemPrompt, thread }) {
   const retrieved = memories.length
     ? `\n\n<retrieved_memories>\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
-  const history = (thread.messages || []).slice(-20).map((message) => ({ role: message.role, content: message.content }));
+  const history = contextMessages(thread).map((message) => ({ role: message.role, content: message.content }));
   const dynamicContext = `${summary}${retrieved}`.trim();
   const userContent = dynamicContext
     ? `${dynamicContext}\n\n${input}`
