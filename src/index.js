@@ -9,7 +9,7 @@ const threadPath = join(dataDir, "threads.json");
 
 const seed = () => ({
   id: "default",
-  title: "沉小岑",
+  title: "沈屿",
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }]
 });
 
@@ -20,6 +20,31 @@ async function readThreads() {
 }
 
 async function saveThreads(threads) { await writeFile(threadPath, JSON.stringify(threads, null, 2)); }
+
+async function generateReply({ input, systemPrompt, history }) {
+  const apiURL = process.env.LUMI_MODEL_API_URL;
+  const apiKey = process.env.LUMI_MODEL_API_KEY;
+  const model = process.env.LUMI_MODEL_NAME;
+  if (!apiURL || !apiKey || !model) {
+    throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
+  }
+
+  const messages = [
+    { role: "system", content: process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。" },
+    ...history.slice(-20).map((message) => ({ role: message.role, content: message.content })),
+    { role: "user", content: input }
+  ];
+  const response = await fetch(apiURL, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model, messages, temperature: 0.8 })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
+  return content.trim();
+}
 
 function send(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*" });
@@ -47,7 +72,12 @@ const server = createServer(async (req, res) => {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const userMessage = { id: randomUUID(), role: "user", content: input.content.trim(), createdAt: new Date().toISOString() };
-      const assistantMessage = { id: randomUUID(), role: "assistant", content: "我想先听你说的这一句。", createdAt: new Date().toISOString() };
+      const assistantMessage = {
+        id: randomUUID(),
+        role: "assistant",
+        content: await generateReply({ input: userMessage.content, systemPrompt: input.systemPrompt, history: threads[id].messages }),
+        createdAt: new Date().toISOString()
+      };
       threads[id].messages.push(userMessage, assistantMessage);
       await saveThreads(threads);
       return send(res, 200, { userMessage, assistantMessage });
