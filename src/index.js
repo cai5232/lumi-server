@@ -16,7 +16,7 @@ const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
-const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0 };
+const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
 let memoryCookie = "";
 
 const seed = () => ({
@@ -58,6 +58,7 @@ async function callModel({ messages, temperature = 0.8 }) {
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
+  cacheStats.lastUsage = usage;
   cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
   const content = data?.choices?.[0]?.message?.content;
@@ -261,7 +262,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, {
       ok: true,
       cache: {
-        prompt: { enabled: promptCacheEnabled, modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, lastUsage: cacheStats.lastUsage },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, ttlMs: memoryCacheTTL }
       }
     });
