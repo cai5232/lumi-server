@@ -22,10 +22,10 @@ Zeabur 环境变量：
 - `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.86`
 - `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
-- `LUMI_MEMORY_API_KEY`：记忆库 Bearer Token；如果 memorycore 开启鉴权则必须填写
+- `LUMI_MEMORY_API_KEY`：记忆库内部 Nook Token，填 memorycore 的 `OMBRE_NOOK_API_TOKEN`；用于检索/写入接口
 - `LUMI_MEMORY_PASSWORD`：如果 memorycore 只提供密码登录，可填记忆库密码，后端会自动登录并复用会话
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
-- `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/latent-notes`
+- `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/integrations/nook/memories`；该路径会写入可被 `/api/search` 检索的 buckets
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
 - `LUMI_MEMORY_KEYWORD_MODEL`：可选，设为 `true` 才用模型提取记忆关键词；默认关闭，使用本地提取，避免每条消息额外产生一次模型费用
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
