@@ -34,7 +34,10 @@ async function generateReply({ input, systemPrompt, history }) {
     ...history.slice(-20).map((message) => ({ role: message.role, content: message.content })),
     { role: "user", content: input }
   ];
-  const response = await fetch(apiURL, {
+  const endpoint = /\/chat\/completions\/?$/i.test(apiURL)
+    ? apiURL
+    : `${apiURL.replace(/\/+$/, "")}/chat/completions`;
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, messages, temperature: 0.8 })

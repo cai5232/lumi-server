@@ -13,7 +13,7 @@ npm run dev
 
 Zeabur 环境变量：
 
-- `LUMI_MODEL_API_URL`：OpenAI 兼容的 Chat Completions 完整地址
+- `LUMI_MODEL_API_URL`：OpenAI 兼容地址；可填完整的 `/chat/completions`，也可填到 `/v1`，服务会自动补齐路径
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
