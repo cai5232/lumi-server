@@ -76,7 +76,10 @@ function cacheMessages(messages, model) {
   }
   const lastUser = cloned.map((message) => message.role).lastIndexOf("user");
   const cacheBoundary = lastUser > 0 ? cloned.slice(0, lastUser).map((message) => message.role).lastIndexOf("user") : -1;
-  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && estimateTokens(cloned[cacheBoundary].content) >= 64) {
+  const prefixTokens = cacheBoundary >= 0
+    ? cloned.slice(0, cacheBoundary + 1).reduce((total, message) => total + estimateTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0)
+    : 0;
+  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
   }
   return cloned;
