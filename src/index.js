@@ -29,8 +29,9 @@ async function generateReply({ input, systemPrompt, history }) {
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
 
+  const basePrompt = process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
   const messages = [
-    { role: "system", content: process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。" },
+    { role: "system", content: `${basePrompt}\n\n请严格按以下格式输出：先输出 <thinking>...</thinking>，其中写你的简短思考；然后换行输出给用户看的最终回复。不要把 thinking 内容重复到最终回复中。` },
     ...history.slice(-20).map((message) => ({ role: message.role, content: message.content })),
     { role: "user", content: input }
   ];
@@ -71,6 +72,11 @@ const server = createServer(async (req, res) => {
     const threads = await readThreads();
     if (!threads[id]) threads[id] = { id, title: "新聊天", messages: [] };
     if (req.method === "GET" && !match[2]) return send(res, 200, threads[id]);
+    if (req.method === "DELETE" && !match[2]) {
+      threads[id] = { id, title: id === "default" ? "沈屿" : "新聊天", messages: [] };
+      await saveThreads(threads);
+      return send(res, 200, threads[id]);
+    }
     if (req.method === "POST" && match[2]) {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
