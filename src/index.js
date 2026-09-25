@@ -10,8 +10,8 @@ const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.86);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
-const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/search";
-const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/memories";
+const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
+const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
 
 const seed = () => ({
   id: "default",
@@ -64,6 +64,18 @@ async function memoryRequest(path, payload) {
   return data;
 }
 
+async function memorySearchRequest(query) {
+  const headers = {};
+  if (process.env.LUMI_MEMORY_API_KEY) headers.authorization = `Bearer ${process.env.LUMI_MEMORY_API_KEY}`;
+  const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
+    headers,
+    signal: AbortSignal.timeout(4000)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.error?.message || data?.error || `记忆库返回 ${response.status}`);
+  return data;
+}
+
 function fallbackKeywords(input) {
   return [...new Set(String(input).split(/[^\p{L}\p{N}]+/u).map((part) => part.trim()).filter((part) => part.length > 1))].slice(0, 8);
 }
@@ -94,31 +106,25 @@ function normalizeMemories(data) {
 async function searchMemories(input) {
   const keywords = await extractMemoryKeywords(input);
   if (!keywords.length) return [];
-  const paths = [...new Set([memorySearchPath, "/search", "/api/search", "/v1/memories/search", "/api/memories/search"])]
-    .filter(Boolean);
-  for (const path of paths) {
-    try {
-      const data = await memoryRequest(path, { query: keywords.join(" "), text: keywords.join(" "), keywords, limit: 8, topK: 8 });
-      return normalizeMemories(data);
-    } catch (error) {
-      if (path === paths.at(-1)) console.warn(`memory search skipped: ${error.message}`);
-    }
-  }
-  return [];
+  try { return normalizeMemories(await memorySearchRequest(keywords.join(" "))); }
+  catch (error) { console.warn(`memory search skipped: ${error.message}`); return []; }
 }
 
 async function writeMemory(content, threadId) {
-  const paths = [...new Set([memoryWritePath, "/memories", "/api/memories", "/v1/memories", "/api/memory"])]
-    .filter(Boolean);
-  for (const path of paths) {
-    try {
-      await memoryRequest(path, { content, memory: content, text: content, source: "lumi", threadId });
-      return true;
-    } catch (error) {
-      if (path === paths.at(-1)) console.warn(`memory write skipped: ${error.message}`);
-    }
-  }
-  return false;
+  try {
+    await memoryRequest(memoryWritePath, {
+      dream_line: content,
+      content,
+      memory: content,
+      text: content,
+      status: "draft",
+      note_type: "inward",
+      drive_tag: "lumi",
+      source: "lumi",
+      threadId
+    });
+    return true;
+  } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
 async function compactThread(thread) {
