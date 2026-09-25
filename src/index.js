@@ -242,7 +242,7 @@ function contextMessages(thread) {
   const boundaryIndex = messages.findIndex((message) => message.id === boundaryId);
   return boundaryIndex >= 0 ? messages.slice(boundaryIndex + 1) : messages;
 }
-function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
+function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
 
 async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
   const configuredURL = process.env.LUMI_MODEL_API_URL;
@@ -328,7 +328,7 @@ function cacheMessages(messages, model) {
   const prefixTokens = cacheBoundary >= 0
     ? cloned.slice(0, cacheBoundary + 1).reduce((total, message) => total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0)
     : 0;
-  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
+  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && estimateCacheTokens(cloned[cacheBoundary].content) >= 64 && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
   }
   return cloned;
@@ -459,7 +459,7 @@ async function compactThread(thread, pendingInput = "") {
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return false;
   const previous = thread.contextSummary ? `已有摘要：\n${thread.contextSummary}\n\n` : "";
-  const prompt = `${previous}请把下面的聊天历史压缩成长期上下文摘要。只输出 XML，不要解释：
+  const prompt = `${previous}请把下面的聊天历史压缩成长期上下文摘要。保留用户画像、关系变化、已确认事实和当前未完成事项；用具体内容填充每个字段，不要复述字段说明。只输出 XML，不要解释：
 <context_summary>
   <user_profile>称呼、偏好、语言习惯与长期信息</user_profile>
   <relationship_dynamic>关系背景、相处氛围与角色状态</relationship_dynamic>
@@ -473,12 +473,32 @@ ${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
       { role: "system", content: "你是上下文压缩器。保持事实，不编造，不输出聊天回复。" },
       { role: "user", content: prompt }
     ],
-    temperature: 0.2
+    temperature: 0.2,
+    maxOutputTokens: Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000)
   });
   thread.compactionCount = (thread.compactionCount || 0) + 1;
   thread.compactedAt = new Date().toISOString();
   thread.compactedThroughMessageId = older[older.length - 1].id;
   return true;
+}
+
+async function chooseEmojiFromMood(mood, faces, reply) {
+  const candidates = [...new Set(faces.filter((face) => typeof face === "string").map((face) => face.trim()).filter(Boolean))].slice(0, 40);
+  if (!candidates.length) return "";
+  try {
+    const selection = await callModel({
+      messages: [
+        { role: "system", content: "你只负责从指定心情的候选颜文字中选一个最适合回复的。只原样输出一个候选颜文字，不要解释，不要改写。" },
+        { role: "user", content: `心情：${mood}\n回复：${reply.slice(-1200)}\n候选颜文字：\n${candidates.join("\n")}` }
+      ],
+      maxOutputTokens: 64,
+      temperature: 0.6
+    });
+    return candidates.find((face) => selection.trim() === face) || "";
+  } catch (error) {
+    console.warn(`emoji selection skipped: ${(error.message || String(error)).slice(0, 200)}`);
+    return "";
+  }
 }
 
 async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false }) {
@@ -500,26 +520,35 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const relevantMessages = contextMessages(thread);
   const history = (proactive ? relevantMessages.slice(-8) : relevantMessages).map((message) => ({
     role: message.role,
-    content: message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content
+    // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
+    // from history and the previous request's Anthropic cache prefix can never match again.
+    content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
   }));
-  const catalog = Object.entries(emojiCatalog || {}).filter(([, values]) => Array.isArray(values) && values.length)
-    .map(([mood, values]) => `${mood}: ${values.filter((value) => typeof value === "string").join(" ")}`).join("\n");
-  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${catalog ? `\n<emoji_mood_catalog>\n${catalog}\n</emoji_mood_catalog>` : ""}\n</system_context>`;
+  const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
+  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const userModelContent = `${systemContext}\n\n${input}`;
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
     messages: [
-      { role: "system", content: `${system}\n\n你可以使用颜文字，随心所欲，根据心情搭配。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的简短内容</speech>。通常文字回复照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}` },
+      { role: "system", content: `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的简短内容</speech>。通常文字回复照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}` },
       ...history,
-      { role: "system", content: systemContext },
-      { role: "user", content: input, images }
+      // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
+      // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
+      // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
+      { role: "user", content: userModelContent, images }
     ]
   });
   const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const speechMatch = allowSpeech ? raw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
+  const emojiMood = raw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const memoryContent = memoryMatch?.[1]?.trim();
-  const content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").trim();
+  let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").trim();
+  if (emojiMoods.includes(emojiMood) && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(content)) {
+    const chosen = await chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
+    if (chosen) content = `${content} ${chosen}`;
+  }
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
-  return { content, speechText: speechMatch?.[1]?.trim() || "", memorySaved };
+  return { content, speechText: speechMatch?.[1]?.trim() || "", memorySaved, userModelContent };
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
@@ -546,7 +575,7 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization,x-minimax-api-key,x-minimax-api-host" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization" });
   res.end(JSON.stringify(body));
 }
 
@@ -593,41 +622,22 @@ const server = createServer(async (req, res) => {
       await saveProactiveSettings();
       return send(res, 200, proactiveSettings);
     }
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, {
+    if (req.method === "GET" && url.pathname === "/health") {
+      const activeThread = (await readThreads()).default;
+      return send(res, 200, {
       ok: true,
       cache: {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
-      }
-    });
+      },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: Math.round(contextLimit * compactAt), preservedTailTokens: tailTokens }
+      });
+    }
     if (req.method === "POST" && url.pathname === "/v1/memories") {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
-    }
-    if (req.method === "GET" && url.pathname === "/v1/tts/catalog") {
-      const apiKey = String(req.headers["x-minimax-api-key"] || "").trim();
-      const host = req.headers["x-minimax-api-host"] === "https://api.minimax.io" ? "https://api.minimax.io" : "https://api.minimaxi.com";
-      if (!apiKey) return send(res, 200, { models: ttsModels, voices: [], customVoicesAvailable: false });
-      try {
-        const response = await fetch(`${host}/v1/get_voice`, {
-          method: "POST",
-          headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-          body: JSON.stringify({ voice_type: "all" }),
-          signal: AbortSignal.timeout(12000)
-        });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || Number(data?.base_resp?.status_code || 0) !== 0) {
-          return send(res, 502, { error: data?.base_resp?.status_msg || `MiniMax 音色目录返回 ${response.status}` });
-        }
-        const voices = ["system_voice", "voice_cloning", "voice_generation"]
-          .flatMap((group) => (Array.isArray(data[group]) ? data[group] : []).map((voice) => ({ id: String(voice.voice_id || ""), name: String(voice.voice_name || voice.voice_id || ""), type: group })))
-          .filter((voice) => voice.id);
-        return send(res, 200, { models: ttsModels, voices, customVoicesAvailable: voices.some((voice) => voice.type !== "system_voice") });
-      } catch (error) {
-        return send(res, 502, { error: `无法读取 MiniMax 音色：${error.message}` });
-      }
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -646,6 +656,7 @@ const server = createServer(async (req, res) => {
       activeChatThreads.add(id);
       try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
+      storedUserMessage.modelContent = generated.userModelContent;
       let speech = null;
       if (input.tts?.enabled && generated.speechText && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(generated.content)) {
         try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
