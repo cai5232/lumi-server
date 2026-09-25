@@ -7,6 +7,7 @@ const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const threadPath = join(dataDir, "threads.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
+const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.85);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -19,6 +20,8 @@ const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
+const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null };
+let proactiveCheckInFlight = false;
 let memoryCookie = "";
 
 const seed = () => ({
@@ -66,6 +69,67 @@ async function saveCacheStats() {
   const temporaryPath = `${cacheStatsPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(cacheStats));
   await rename(temporaryPath, cacheStatsPath);
+}
+
+async function loadProactiveSettings() {
+  await mkdir(dataDir, { recursive: true });
+  try { Object.assign(proactiveSettings, JSON.parse(await readFile(proactiveSettingsPath, "utf8"))); }
+  catch (error) { if (error?.code !== "ENOENT") console.warn(`proactive settings unavailable: ${error.message}`); }
+}
+
+async function saveProactiveSettings() {
+  const temporaryPath = `${proactiveSettingsPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(proactiveSettings, null, 2));
+  await rename(temporaryPath, proactiveSettingsPath);
+}
+
+function chooseNudgeIntervalMs() {
+  const min = Math.max(10, Number(proactiveSettings.intervalMin) || 60);
+  const max = Math.max(min, Number(proactiveSettings.intervalMax) || min);
+  return (min + Math.random() * (max - min)) * 60_000;
+}
+
+async function checkProactiveNudge() {
+  if (proactiveCheckInFlight || !proactiveSettings.enabled || !String(proactiveSettings.message || "").trim()) return;
+  proactiveCheckInFlight = true;
+  try {
+    const threads = await readThreads();
+    const threadId = proactiveSettings.threadId || "default";
+    const thread = threads[threadId];
+    if (!thread) return;
+    const messages = thread.messages || [];
+    const lastUser = [...messages].reverse().find((message) => message.role === "user");
+    if (!lastUser) return;
+    if (proactiveSettings.scheduledForUserMessageId !== lastUser.id || !proactiveSettings.nextDueAt) {
+      proactiveSettings.scheduledForUserMessageId = lastUser.id;
+      proactiveSettings.nextDueAt = new Date(new Date(lastUser.createdAt).getTime() + chooseNudgeIntervalMs()).toISOString();
+      await saveProactiveSettings();
+      return;
+    }
+    if (Date.now() < new Date(proactiveSettings.nextDueAt).getTime()) return;
+
+    // Reserve the next interval before calling the model so a restart cannot duplicate a paid nudge.
+    proactiveSettings.scheduledForUserMessageId = null;
+    proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+    await saveProactiveSettings();
+    const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
+    const generated = await generateReply({ input, systemPrompt: "", thread });
+    const now = new Date().toISOString();
+    thread.messages.push(
+      { id: randomUUID(), role: "user", content: input, createdAt: now },
+      { id: randomUUID(), role: "assistant", content: generated.content, createdAt: new Date().toISOString() }
+    );
+    await saveThreads(threads);
+    proactiveSettings.scheduledForUserMessageId = thread.messages.at(-2).id;
+    proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+    await saveProactiveSettings();
+    console.log(`proactive nudge saved for chat ${threadId}`);
+  } catch (error) {
+    console.warn(`proactive nudge skipped: ${error.message}`);
+    // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
+    proactiveSettings.enabled = false;
+    await saveProactiveSettings().catch(() => {});
+  } finally { proactiveCheckInFlight = false; }
 }
 
 function estimateTokens(text) {
@@ -353,6 +417,23 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
+    if (url.pathname === "/v1/settings/proactive" && req.method === "PUT") {
+      const input = await body(req);
+      if (typeof input.enabled !== "boolean") return send(res, 400, { error: "enabled_must_be_boolean" });
+      const min = Number(input.intervalMin);
+      const max = Number(input.intervalMax ?? min);
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min < 10 || max < min || max > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
+      proactiveSettings.enabled = input.enabled;
+      proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
+      proactiveSettings.message = typeof input.message === "string" ? input.message.slice(0, 1000) : "";
+      proactiveSettings.intervalMin = min;
+      proactiveSettings.intervalMax = max;
+      proactiveSettings.scheduledForUserMessageId = null;
+      proactiveSettings.nextDueAt = null;
+      await saveProactiveSettings();
+      return send(res, 200, proactiveSettings);
+    }
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, {
       ok: true,
       cache: {
@@ -385,6 +466,11 @@ const server = createServer(async (req, res) => {
       };
       threads[id].messages.push(userMessage, assistantMessage);
       await saveThreads(threads);
+      if (proactiveSettings.threadId === id) {
+        proactiveSettings.scheduledForUserMessageId = userMessage.id;
+        proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+        await saveProactiveSettings();
+      }
       return send(res, 200, { userMessage, assistantMessage, memorySaved: generated.memorySaved });
     }
     return send(res, 405, { error: "method_not_allowed" });
@@ -392,4 +478,6 @@ const server = createServer(async (req, res) => {
 });
 
 await loadCacheStats();
+await loadProactiveSettings();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
+setInterval(() => { void checkProactiveNudge(); }, 60_000);
