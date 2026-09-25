@@ -138,7 +138,7 @@ async function writeMemory(content, threadId) {
       content,
       memory: content,
       text: content,
-      status: "draft",
+      status: "approved",
       note_type: "inward",
       drive_tag: "lumi",
       source: "lumi",
