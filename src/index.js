@@ -12,6 +12,8 @@ const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
+const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
+const memorySearchCache = new Map();
 let memoryCookie = "";
 
 const seed = () => ({
@@ -87,6 +89,10 @@ async function memoryRequest(path, payload) {
 }
 
 async function memorySearchRequest(query) {
+  const cacheKey = String(query).trim().toLowerCase();
+  const cached = memorySearchCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (cached) memorySearchCache.delete(cacheKey);
   const headers = await memoryHeaders(false);
   const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
     headers,
@@ -94,6 +100,7 @@ async function memorySearchRequest(query) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `记忆库返回 ${response.status}`);
+  memorySearchCache.set(cacheKey, { data, expiresAt: Date.now() + memoryCacheTTL });
   return data;
 }
 
@@ -144,6 +151,7 @@ async function writeMemory(content, threadId) {
       source: "lumi",
       threadId
     });
+    memorySearchCache.clear();
     return true;
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
