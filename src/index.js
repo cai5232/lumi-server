@@ -265,12 +265,15 @@ async function generateReply({ input, systemPrompt, thread }) {
     ? `\n\n<retrieved_memories>\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
   const history = (thread.messages || []).slice(-20).map((message) => ({ role: message.role, content: message.content }));
+  const dynamicContext = `${summary}${retrieved}`.trim();
+  const userContent = dynamicContext
+    ? `${dynamicContext}\\n\\n${input}`
+    : input;
   const raw = await callModel({
     messages: [
-      { role: "system", content: `${system}\n\n如果这条对话包含值得长期保留的新事实、偏好或约定，你可以在回复末尾添加 <memory>要记住的内容</memory>；不值得记忆时不要添加。不要向用户解释这个标签。` },
-      { role: "system", content: `${summary}${retrieved}`.trim() || "当前没有额外上下文。" },
+      { role: "system", content: `${system}\\n\\n如果这条对话包含值得长期保留的新事实、偏好或约定，你可以在回复末尾添加 <memory>要记住的内容</memory>；不值得记忆时不要添加。不要向用户解释这个标签。` },
       ...history,
-      { role: "user", content: input }
+      { role: "user", content: userContent }
     ]
   });
   const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
