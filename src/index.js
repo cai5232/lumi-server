@@ -46,7 +46,7 @@ async function generateReply({ input, systemPrompt, history }) {
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
-  return content.trim();
+  return content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").replace(/<\/?thinking>/gi, "").trim();
 }
 
 function send(res, status, body) {
