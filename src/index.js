@@ -32,19 +32,24 @@ function estimateTokens(text) { return Math.ceil(String(text || "").length / 4);
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
 
 async function callModel({ messages, temperature = 0.8 }) {
-  const apiURL = process.env.LUMI_MODEL_API_URL;
+  const configuredURL = process.env.LUMI_MODEL_API_URL;
   const apiKey = process.env.LUMI_MODEL_API_KEY;
   const model = process.env.LUMI_MODEL_NAME;
-  if (!apiURL || !apiKey || !model) {
+  if (!configuredURL || !apiKey || !model) {
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
+  const apiURL = /\/chat\/completions\/?$/i.test(configuredURL)
+    ? configuredURL
+    : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
 
   const response = await fetch(apiURL, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model, messages, temperature })
   });
-  const data = await response.json().catch(() => ({}));
+  const raw = await response.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
@@ -246,4 +251,3 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
-
