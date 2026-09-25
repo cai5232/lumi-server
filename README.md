@@ -27,9 +27,8 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/integrations/nook/memories`；该路径会写入可被 `/api/search` 检索的 buckets
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
-- `LUMI_MEMORY_KEYWORD_MODEL`：可选，设为 `true` 才用模型提取记忆关键词；默认关闭，使用本地提取，避免每条消息额外产生一次模型费用
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
-- `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `5m`，也可填 `1h`
+- `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `1h`，也可填 `5m`；Zeabur 中显式设置的变量优先于代码默认值
 - `LUMI_COMPACT_TAIL_TOKENS`：上下文压缩后保留的完整最近对话轮 token 预算，默认 `20000`
 - `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
 - `LUMI_APNS_KEY_ID`、`LUMI_APNS_TEAM_ID`、`LUMI_APNS_PRIVATE_KEY_BASE64`：Apple 推送凭据
@@ -43,6 +42,8 @@ Zeabur 环境变量：
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
+- `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和可选 `tts`；TTS Key 只随本次请求传入、不落盘
+- `GET /v1/tts/catalog`：返回可选 MiniMax TTS 模型及示例 Voice ID
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `GET /v1/settings/proactive` / `PUT /v1/settings/proactive`，需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`，用于读取/保存主动联系设置（默认关闭）
 - `GET /v1/push/status`，查看 APNs 是否已配置及登记设备数量
@@ -55,4 +56,4 @@ Zeabur 环境变量：
 当窗口估算 Token（包含当前输入）达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
-每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。
+每条消息只调用一次聊天模型；记忆关键词由后端本地提取，避免为检索另付一次模型调用。关键词只送给记忆库，不会塞进聊天提示词；返回的记忆原文和系统时间戳作为独立的 system context 发送，并从 `/health` 暴露搜索结果数与最近错误。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。

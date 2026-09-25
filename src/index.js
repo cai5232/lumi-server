@@ -17,11 +17,10 @@ const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
-const modelKeywordExtraction = process.env.LUMI_MEMORY_KEYWORD_MODEL === "true";
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
-const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
-const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
+const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
+const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null };
 let proactiveCheckInFlight = false;
 let pushTokens = [];
@@ -60,10 +59,11 @@ async function loadCacheStats() {
   await mkdir(dataDir, { recursive: true });
   try {
     const saved = JSON.parse(await readFile(cacheStatsPath, "utf8"));
-    for (const key of ["modelCalls", "cacheReadTokens", "cacheWriteTokens", "memorySearches", "memoryCacheHits"]) {
+    for (const key of ["modelCalls", "cacheReadTokens", "cacheWriteTokens", "memorySearches", "memoryCacheHits", "memoryResults"]) {
       const value = Number(saved[key]);
       if (Number.isFinite(value) && value >= 0) cacheStats[key] = value;
     }
+    if (typeof saved.memoryLastError === "string") cacheStats.memoryLastError = saved.memoryLastError;
     if (saved.lastUsage && typeof saved.lastUsage === "object") cacheStats.lastUsage = saved.lastUsage;
   } catch (error) {
     if (error?.code !== "ENOENT") console.warn(`cache stats unavailable: ${error.message}`);
@@ -259,7 +259,19 @@ async function callModel({ messages, temperature = 0.8 }) {
     ? configuredURL
     : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
 
-  const preparedMessages = cacheMessages(messages, model);
+  const providerMessages = messages.map((message) => {
+    if (message.role !== "user" || !Array.isArray(message.images) || !message.images.length) return message;
+    const imageBlocks = message.images.map((image) => {
+      const match = String(image).match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([\s\S]+)$/i);
+      if (!match) return null;
+      return nativeAnthropic
+        ? { type: "image", source: { type: "base64", media_type: match[1].toLowerCase(), data: match[2] } }
+        : { type: "image_url", image_url: { url: image } };
+    }).filter(Boolean);
+    const { images: _images, ...rest } = message;
+    return { ...rest, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
+  });
+  const preparedMessages = cacheMessages(providerMessages, model);
   const requestBody = nativeAnthropic
     ? {
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
@@ -374,24 +386,11 @@ function fallbackKeywords(input) {
   return [...new Set(String(input).split(/[^\p{L}\p{N}]+/u).map((part) => part.trim()).filter((part) => part.length > 1))].slice(0, 8);
 }
 
-async function extractMemoryKeywords(input) {
-  if (!modelKeywordExtraction) return fallbackKeywords(input);
-  try {
-    const raw = await callModel({
-      messages: [
-        { role: "system", content: "从用户这条消息中提取用于检索长期记忆的关键词。只输出 JSON 数组，例如 [\"称呼\",\"偏好\"]，不要解释，不要复述原句。" },
-        { role: "user", content: input }
-      ],
-      temperature: 0
-    });
-    const parsed = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || "[]");
-    if (Array.isArray(parsed)) return parsed.filter((item) => typeof item === "string" && item.trim()).slice(0, 8);
-  } catch {}
-  return fallbackKeywords(input);
-}
+function extractMemoryKeywords(input) { return fallbackKeywords(input); }
 
 function normalizeMemories(data) {
-  const list = Array.isArray(data) ? data : data.memories || data.results || data.data || [];
+  const container = data?.data && !Array.isArray(data.data) ? data.data : data;
+  const list = Array.isArray(data) ? data : container.memories || container.results || container.items || container.data || [];
   return list.map((item) => {
     if (typeof item === "string") return item;
     return item.content || item.text || item.memory || item.value || item.summary || item.content_preview || "";
@@ -403,8 +402,18 @@ async function searchMemories(input) {
   const source = String(input || "").trim().slice(0, 1200);
   if (!source) return [];
   const query = [source, ...keywords].filter(Boolean).join(" ");
-  try { return normalizeMemories(await memorySearchRequest(query)); }
-  catch (error) { console.warn(`memory search skipped: ${error.message}`); return []; }
+  try {
+    const memories = normalizeMemories(await memorySearchRequest(query));
+    cacheStats.memoryResults += memories.length;
+    cacheStats.memoryLastError = "";
+    await saveCacheStats().catch(() => {});
+    return memories;
+  } catch (error) {
+    cacheStats.memoryLastError = (error.message || String(error)).slice(0, 240);
+    console.warn(`memory search skipped: ${cacheStats.memoryLastError}`);
+    await saveCacheStats().catch(() => {});
+    return [];
+  }
 }
 
 async function writeMemory(content, threadId) {
@@ -472,24 +481,32 @@ ${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
   return true;
 }
 
-async function generateReply({ input, systemPrompt, thread }) {
+async function generateReply({ input, images = [], emojiCatalog = {}, spatialVoice = false, systemPrompt, thread }) {
   await compactThread(thread, input);
-  const system = process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
-  const summary = thread.contextSummary ? `\n\n<context_summary>\n${thread.contextSummary}\n</context_summary>` : "";
+  const configuredSystem = process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
+  const system = configuredSystem
+    .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
+    .replace(/你最喜欢最像你自己最常用的颜文字[^\n]*/g, "")
+    .trim();
+  const summary = thread.contextSummary ? `<context_summary source="system">\n${thread.contextSummary}\n</context_summary>` : "";
   const memories = await searchMemories(input);
+  const timestamp = new Date().toISOString();
   const retrieved = memories.length
-    ? `\n\n<retrieved_memories>\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
+    ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
-  const history = contextMessages(thread).map((message) => ({ role: message.role, content: message.content }));
-  const dynamicContext = `${summary}${retrieved}`.trim();
-  const userContent = dynamicContext
-    ? `${dynamicContext}\n\n${input}`
-    : input;
+  const history = contextMessages(thread).map((message) => ({
+    role: message.role,
+    content: message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content
+  }));
+  const catalog = Object.entries(emojiCatalog || {}).filter(([, values]) => Array.isArray(values) && values.length)
+    .map(([mood, values]) => `${mood}: ${values.filter((value) => typeof value === "string").join(" ")}`).join("\n");
+  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${catalog ? `\n<emoji_mood_catalog>\n${catalog}\n</emoji_mood_catalog>` : ""}\n</system_context>`;
   const raw = await callModel({
     messages: [
-      { role: "system", content: `${system}\n\n如果这条对话包含值得长期保留的新事实、偏好或约定，你可以在回复末尾添加 <memory>要记住的内容</memory>；不值得记忆时不要添加。不要向用户解释这个标签。` },
+      { role: "system", content: `${system}\n\n你可以使用颜文字，随心所欲，根据心情搭配。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${spatialVoice ? "\n如果语义合适，可少量使用位置标签 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开]；标签只描述声音移动，不要读出来，也不要无关堆叠。" : ""}` },
       ...history,
-      { role: "user", content: userContent }
+      { role: "system", content: systemContext },
+      { role: "user", content: input, images }
     ]
   });
   const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
@@ -497,6 +514,38 @@ async function generateReply({ input, systemPrompt, thread }) {
   const content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").trim();
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
   return { content, memorySaved };
+}
+
+const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
+const ttsVoices = [
+  { id: "male-qn-qingse", name: "青涩男声" },
+  { id: "male-qn-jingying", name: "精英男声" },
+  { id: "female-shaonv", name: "少女音" },
+  { id: "female-yujie", name: "御姐音" },
+  { id: "female-chengshu", name: "成熟女声" },
+  { id: "presenter_male", name: "男主持" },
+  { id: "presenter_female", name: "女主持" }
+];
+
+async function synthesizeSpeech(text, settings) {
+  if (!settings?.apiKey || !settings?.voiceID || !ttsModels.includes(settings.model)) return null;
+  const response = await fetch("https://api.minimax.cn/v1/t2a_v2", {
+    method: "POST",
+    headers: { authorization: `Bearer ${settings.apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: settings.model,
+      text: String(text).replace(/\[(?:左耳|右耳|脑后|面前|贴近|退开)\]/g, "").slice(0, 9000),
+      stream: false,
+      voice_setting: { voice_id: settings.voiceID, speed: 1, vol: 1, pitch: 0 },
+      audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
+    }),
+    signal: AbortSignal.timeout(60000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.base_resp?.status_code) throw new Error(result?.base_resp?.status_msg || `MiniMax TTS 返回 ${response.status}`);
+  const audioHex = result?.data?.audio;
+  if (typeof audioHex !== "string" || !audioHex.length) throw new Error("MiniMax 没有返回音频");
+  return { audioBase64: Buffer.from(audioHex, "hex").toString("base64"), duration: Number(result?.extra_info?.audio_length || 0) / 1000 };
 }
 
 function send(res, status, body) {
@@ -551,7 +600,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       cache: {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
-        memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, ttlMs: memoryCacheTTL }
+        memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       }
     });
     if (req.method === "POST" && url.pathname === "/v1/memories") {
@@ -559,6 +608,9 @@ const server = createServer(async (req, res) => {
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
+    }
+    if (req.method === "GET" && url.pathname === "/v1/tts/catalog") {
+      return send(res, 200, { models: ttsModels, voices: ttsVoices });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -568,26 +620,34 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && !match[2]) return send(res, 200, threads[id]);
     if (req.method === "POST" && match[2]) {
       const input = await body(req);
-      if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
-      const userMessage = { id: randomUUID(), role: "user", content: input.content.trim(), createdAt: new Date().toISOString() };
+      const images = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : [];
+      if ((!input.content || !String(input.content).trim()) && !images.length) return send(res, 400, { error: "content_or_image_required" });
+      const messageText = String(input.content || "").trim();
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || "（发送了图片）", createdAt: new Date().toISOString() };
+      const storedUserMessage = images.length ? { ...userMessage, imageAttachmentCount: images.length } : userMessage;
       let generated;
       activeChatThreads.add(id);
-      try { generated = await generateReply({ input: userMessage.content, systemPrompt: input.systemPrompt, thread: threads[id] }); }
+      try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, spatialVoice: Boolean(input.tts?.apiKey), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
+      let speech = null;
+      if (input.tts && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(generated.content)) {
+        try { speech = await synthesizeSpeech(generated.content, input.tts); }
+        catch (error) { console.warn(`speech synthesis skipped: ${(error.message || String(error)).slice(0, 200)}`); }
+      }
       const assistantMessage = {
         id: randomUUID(),
         role: "assistant",
         content: generated.content,
         createdAt: new Date().toISOString()
       };
-      threads[id].messages.push(userMessage, assistantMessage);
+      threads[id].messages.push(storedUserMessage, assistantMessage);
       await saveThreads(threads);
       if (proactiveSettings.threadId === id) {
         proactiveSettings.scheduledForUserMessageId = userMessage.id;
         proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
         await saveProactiveSettings();
       }
-      return send(res, 200, { userMessage, assistantMessage, memorySaved: generated.memorySaved });
+      return send(res, 200, { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null });
     }
     return send(res, 405, { error: "method_not_allowed" });
   } catch (error) { return send(res, 500, { error: error.message }); }
