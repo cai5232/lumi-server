@@ -34,7 +34,7 @@ Zeabur 环境变量：
 - `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
 - `LUMI_APNS_KEY_ID`、`LUMI_APNS_TEAM_ID`、`LUMI_APNS_PRIVATE_KEY_BASE64`：Apple 推送凭据
 - `LUMI_APNS_TOPIC`：可选，默认 `com.cai5232.LumiPush`
-- `LUMI_PUSH_API_TOKEN`：必填随机长口令，保护推送登记和保活设置接口
+- `LUMI_PUSH_API_TOKEN`：必填随机长口令，保护推送登记和保活设置接口（若 Zeabur 新增变量时自动去掉下划线，也可使用 `LUMIPUSHAPITOKEN`）
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 

@@ -109,7 +109,9 @@ function apnsConfigured() {
 }
 
 function pushRequestAuthorized(req) {
-  const expected = String(process.env.LUMI_PUSH_API_TOKEN || "");
+  // Some Zeabur UI entry flows normalize underscores out of newly-added keys.
+  // Keep the canonical name first, with that UI-normalized alias as fallback.
+  const expected = String(process.env.LUMI_PUSH_API_TOKEN || process.env.LUMIPUSHAPITOKEN || "");
   const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (!expected || !supplied) return false;
   const expectedBytes = Buffer.from(expected);
