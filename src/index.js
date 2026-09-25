@@ -159,8 +159,10 @@ function normalizeMemories(data) {
 
 async function searchMemories(input) {
   const keywords = await extractMemoryKeywords(input);
-  if (!keywords.length) return [];
-  try { return normalizeMemories(await memorySearchRequest(keywords.join(" "))); }
+  const source = String(input || "").trim().slice(0, 1200);
+  if (!source) return [];
+  const query = [source, ...keywords].filter(Boolean).join(" ");
+  try { return normalizeMemories(await memorySearchRequest(query)); }
   catch (error) { console.warn(`memory search skipped: ${error.message}`); return []; }
 }
 
