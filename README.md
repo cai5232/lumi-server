@@ -23,6 +23,7 @@ Zeabur 环境变量：
 - `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：记忆库 Bearer Token；如果 memorycore 开启鉴权则必须填写
+- `LUMI_MEMORY_PASSWORD`：如果 memorycore 只提供密码登录，可填记忆库密码，后端会自动登录并复用会话
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/latent-notes`
 
