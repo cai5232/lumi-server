@@ -12,6 +12,7 @@ const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
+let memoryCookie = "";
 
 const seed = () => ({
   id: "default",
@@ -50,9 +51,25 @@ async function callModel({ messages, temperature = 0.8 }) {
   return content.trim();
 }
 
-async function memoryRequest(path, payload) {
-  const headers = { "content-type": "application/json" };
+async function memoryHeaders(contentType = true) {
+  const headers = contentType ? { "content-type": "application/json" } : {};
   if (process.env.LUMI_MEMORY_API_KEY) headers.authorization = `Bearer ${process.env.LUMI_MEMORY_API_KEY}`;
+  if (!process.env.LUMI_MEMORY_API_KEY && process.env.LUMI_MEMORY_PASSWORD && !memoryCookie) {
+    const login = await fetch(`${memoryAPI}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: process.env.LUMI_MEMORY_PASSWORD }),
+      signal: AbortSignal.timeout(4000)
+    });
+    const cookie = login.headers.get("set-cookie");
+    if (login.ok && cookie) memoryCookie = cookie.split(";")[0];
+  }
+  if (memoryCookie) headers.cookie = memoryCookie;
+  return headers;
+}
+
+async function memoryRequest(path, payload) {
+  const headers = await memoryHeaders();
   const response = await fetch(`${memoryAPI}${path.startsWith("/") ? path : `/${path}`}`, {
     method: "POST",
     headers,
@@ -65,8 +82,7 @@ async function memoryRequest(path, payload) {
 }
 
 async function memorySearchRequest(query) {
-  const headers = {};
-  if (process.env.LUMI_MEMORY_API_KEY) headers.authorization = `Bearer ${process.env.LUMI_MEMORY_API_KEY}`;
+  const headers = await memoryHeaders(false);
   const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
     headers,
     signal: AbortSignal.timeout(4000)
