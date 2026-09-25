@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createPrivateKey, createSign, randomUUID } from "node:crypto";
+import { connect } from "node:http2";
 import { createServer } from "node:http";
 
 const port = Number(process.env.PORT || 8787);
@@ -8,6 +9,7 @@ const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const threadPath = join(dataDir, "threads.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
+const pushTokensPath = join(dataDir, "push-tokens.json");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.85);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -22,6 +24,8 @@ const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null };
 let proactiveCheckInFlight = false;
+let pushTokens = [];
+let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 let memoryCookie = "";
 
@@ -84,6 +88,87 @@ async function saveProactiveSettings() {
   await rename(temporaryPath, proactiveSettingsPath);
 }
 
+async function loadPushTokens() {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const saved = JSON.parse(await readFile(pushTokensPath, "utf8"));
+    pushTokens = Array.isArray(saved) ? saved.filter((item) => item && typeof item.token === "string") : [];
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn(`push tokens unavailable: ${error.message}`);
+  }
+}
+
+async function savePushTokens() {
+  const temporaryPath = `${pushTokensPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(pushTokens, null, 2));
+  await rename(temporaryPath, pushTokensPath);
+}
+
+function apnsConfigured() {
+  return Boolean(process.env.LUMI_APNS_KEY_ID && process.env.LUMI_APNS_TEAM_ID && process.env.LUMI_APNS_PRIVATE_KEY_BASE64);
+}
+
+function apnsBearerToken() {
+  if (!apnsConfigured()) throw new Error("APNs credentials are not configured");
+  if (apnsJwtCache.token && Date.now() - apnsJwtCache.createdAt < 45 * 60_000) return apnsJwtCache.token;
+  const key = createPrivateKey(Buffer.from(process.env.LUMI_APNS_PRIVATE_KEY_BASE64.replace(/\\s/g, ""), "base64"));
+  const header = Buffer.from(JSON.stringify({ alg: "ES256", kid: process.env.LUMI_APNS_KEY_ID })).toString("base64url");
+  const claims = Buffer.from(JSON.stringify({ iss: process.env.LUMI_APNS_TEAM_ID, iat: Math.floor(Date.now() / 1000) })).toString("base64url");
+  const unsigned = `${header}.${claims}`;
+  const signer = createSign("sha256");
+  signer.update(unsigned);
+  signer.end();
+  const signature = signer.sign({ key, dsaEncoding: "ieee-p1363" }).toString("base64url");
+  apnsJwtCache = { token: `${unsigned}.${signature}`, createdAt: Date.now() };
+  return apnsJwtCache.token;
+}
+
+async function sendAPNs(device, message) {
+  const host = device.environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
+  const client = connect(host);
+  return await new Promise((resolve, reject) => {
+    let status = 0;
+    let responseBody = "";
+    const timeout = setTimeout(() => client.destroy(new Error("APNs request timed out")), 12000);
+    client.on("error", (error) => { clearTimeout(timeout); reject(error); });
+    const request = client.request({
+      ":method": "POST",
+      ":path": `/3/device/${device.token}`,
+      authorization: `bearer ${apnsBearerToken()}`,
+      "apns-topic": process.env.LUMI_APNS_TOPIC || "com.cai5232.Lumi",
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "content-type": "application/json"
+    });
+    request.on("response", (headers) => { status = Number(headers[":status"] || 0); });
+    request.on("data", (chunk) => { responseBody += chunk; });
+    request.on("end", () => {
+      clearTimeout(timeout);
+      client.close();
+      resolve({ status, body: responseBody });
+    });
+    request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
+    request.end(JSON.stringify({ aps: { alert: { title: "沈屿", body: String(message || "有一条新消息").replace(/<[^>]*>/g, "").slice(0, 220) }, sound: "default" } }));
+  });
+}
+
+async function sendProactivePush(threadId, message) {
+  if (!apnsConfigured()) { console.warn("proactive push skipped: APNs credentials are not configured"); return; }
+  const targets = pushTokens.filter((item) => item.threadId === threadId);
+  for (const device of targets) {
+    try {
+      const result = await sendAPNs(device, message);
+      if (result.status < 200 || result.status >= 300) {
+        console.warn(`APNs delivery failed (${result.status}): ${result.body}`);
+        if (result.status === 410 || /BadDeviceToken|Unregistered/.test(result.body)) {
+          pushTokens = pushTokens.filter((item) => item.token !== device.token);
+          await savePushTokens();
+        }
+      }
+    } catch (error) { console.warn(`APNs delivery failed: ${error.message}`); }
+  }
+}
+
 function chooseNudgeIntervalMs() {
   const min = Math.max(10, Number(proactiveSettings.intervalMin) || 60);
   const max = Math.max(min, Number(proactiveSettings.intervalMax) || min);
@@ -125,6 +210,7 @@ async function checkProactiveNudge() {
     proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
+    await sendProactivePush(threadId, generated.content);
   } catch (error) {
     console.warn(`proactive nudge skipped: ${error.message}`);
     // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
@@ -419,6 +505,19 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
+    if (url.pathname === "/v1/push/status" && req.method === "GET") {
+      return send(res, 200, { apnsConfigured: apnsConfigured(), registeredDevices: pushTokens.length });
+    }
+    if (url.pathname === "/v1/push/register" && req.method === "POST") {
+      const input = await body(req);
+      const token = String(input.token || "").toLowerCase();
+      const environment = input.environment === "sandbox" ? "sandbox" : input.environment === "production" ? "production" : "";
+      if (!/^[a-f0-9]{64,256}$/.test(token) || !environment) return send(res, 400, { error: "invalid_push_token" });
+      const item = { token, environment, threadId: typeof input.threadId === "string" && input.threadId ? input.threadId : "default", updatedAt: new Date().toISOString() };
+      pushTokens = [item, ...pushTokens.filter((entry) => entry.token !== token)];
+      await savePushTokens();
+      return send(res, 200, { registered: true });
+    }
     if (url.pathname === "/v1/settings/proactive" && req.method === "PUT") {
       const input = await body(req);
       if (typeof input.enabled !== "boolean") return send(res, 400, { error: "enabled_must_be_boolean" });
@@ -483,5 +582,6 @@ const server = createServer(async (req, res) => {
 
 await loadCacheStats();
 await loadProactiveSettings();
+await loadPushTokens();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 setInterval(() => { void checkProactiveNudge(); }, 60_000);
