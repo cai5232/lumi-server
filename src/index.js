@@ -45,14 +45,15 @@ async function callModel({ messages, temperature = 0.8 }) {
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
   const isClaude = /anthropic|claude/i.test(model);
-  const apiURL = isClaude && /\/api\/v1\/?$/i.test(configuredURL)
+  const nativeAnthropic = isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
+  const apiURL = nativeAnthropic && /\/api\/v1\/?$/i.test(configuredURL)
     ? configuredURL.replace(/\/api\/v1\/?$/i, "/api/anthropic/v1/messages")
     : /\/chat\/completions\/?$/i.test(configuredURL)
     ? configuredURL
     : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
 
   const preparedMessages = cacheMessages(messages, model);
-  const requestBody = isClaude
+  const requestBody = nativeAnthropic
     ? {
         model: model.replace(/^anthropic\//i, ""),
         max_tokens: Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
@@ -76,7 +77,7 @@ async function callModel({ messages, temperature = 0.8 }) {
   cacheStats.lastUsage = usage;
   cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
-  const content = isClaude
+  const content = nativeAnthropic
     ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
     : data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
