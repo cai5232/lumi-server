@@ -11,7 +11,7 @@ const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
-const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.85);
+const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 100000), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
@@ -235,6 +235,14 @@ function estimateTokens(text) {
   return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
 }
 function estimateCacheTokens(text) { return estimateTokens(text); }
+function isHTMLContent(content) {
+  const source = String(content || "").trim().replace(/^```(?:html|xml)?\s*/i, "").replace(/\s*```$/, "").trim();
+  if (/^(?:<!doctype\s+html\b|<(?:html|svg)\b)/i.test(source)) return true;
+  const tags = "html|head|body|title|meta|link|div|span|p|a|ul|ol|li|h[1-6]|table|thead|tbody|tr|td|th|svg|path|iframe|section|article|main|header|footer|nav|button|input|textarea|label|form|select|option|canvas|video|audio|pre|code|blockquote|br|hr|style|script|details|summary";
+  const tagPattern = new RegExp(`<\\/?(?:${tags})\\b[^>]*>`, "gi");
+  const matches = source.match(tagPattern) || [];
+  return matches.length >= 2 && new RegExp(`</(?:${tags})\\s*>`, "i").test(source);
+}
 function contextMessages(thread) {
   const messages = thread.messages || [];
   const boundaryId = thread.compactedThroughMessageId;
@@ -444,7 +452,7 @@ async function writeMemory(content, threadId) {
 async function compactThread(thread, pendingInput = "") {
   const messages = contextMessages(thread);
   const pendingTokens = pendingInput ? estimateTokens(pendingInput) + 8 : 0;
-  if (messageTokens(messages) + pendingTokens < contextLimit * compactAt) return false;
+  if (messageTokens(messages) + pendingTokens < compactAtTokens) return false;
 
   // Preserve whole user/assistant turns in the recent cache-friendly tail.
   let tail = [];
@@ -546,18 +554,15 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMood = raw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const memoryContent = memoryMatch?.[1]?.trim();
   let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").trim();
-  if (emojiMoods.includes(emojiMood) && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(content)) {
+  if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = await chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
   }
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
-  let speechText = speechMatch?.[1]?.trim() || "";
-  const spokenLength = speechText.replace(/\[(?:左耳|右耳|脑后|面前|贴近|退开)\]/g, "").replace(/\s/g, "").length;
   const replyForSpeech = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
-  const replyLength = replyForSpeech.replace(/\s/g, "").length;
-  // The <speech> block opts in to audio, but models may accidentally put only a salutation
-  // there. Keep voice paired with the complete visible reply when that block is just a fragment.
-  if (speechText && replyLength >= 8 && spokenLength < replyLength * 0.65) speechText = replyForSpeech;
+  // <speech> is the model's opt-in signal only. Always speak the complete visible reply;
+  // the speech tag itself can accidentally contain just the greeting or first clause.
+  const speechText = speechMatch ? replyForSpeech : "";
   return { content, speechText, memorySaved, userModelContent };
 }
 
@@ -637,10 +642,10 @@ const server = createServer(async (req, res) => {
       return send(res, 200, {
       ok: true,
       cache: {
-      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v2", ttl: cacheTTL, speechFallback: "full-reply-v1", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v2", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: Math.round(contextLimit * compactAt), preservedTailTokens: tailTokens }
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
       });
     }
     if (req.method === "POST" && url.pathname === "/v1/memories") {
@@ -667,8 +672,9 @@ const server = createServer(async (req, res) => {
       try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
       storedUserMessage.modelContent = generated.userModelContent;
+      const contentType = isHTMLContent(generated.content) ? "html" : "text";
       let speech = null;
-      if (input.tts?.enabled && generated.speechText && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(generated.content)) {
+      if (input.tts?.enabled && generated.speechText && contentType !== "html") {
         try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
         catch (error) { console.warn(`speech synthesis skipped: ${(error.message || String(error)).slice(0, 200)}`); }
       }
@@ -676,6 +682,7 @@ const server = createServer(async (req, res) => {
         id: randomUUID(),
         role: "assistant",
         content: generated.content,
+        contentType,
         createdAt: new Date().toISOString()
       };
       threads[id].messages.push(storedUserMessage, assistantMessage);
