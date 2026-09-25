@@ -19,7 +19,7 @@ Zeabur 环境变量：
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
 - `LUMI_CONTEXT_LIMIT`：可选，单个聊天窗口的估算 Token 上限，默认 `200000`
-- `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.86`
+- `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.85`
 - `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：记忆库内部 Nook Token，填 memorycore 的 `OMBRE_NOOK_API_TOKEN`；用于检索/写入接口
@@ -30,6 +30,7 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_KEYWORD_MODEL`：可选，设为 `true` 才用模型提取记忆关键词；默认关闭，使用本地提取，避免每条消息额外产生一次模型费用
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
 - `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `5m`，也可填 `1h`
+- `LUMI_COMPACT_TAIL_TOKENS`：上下文压缩后保留的完整最近对话轮 token 预算，默认 `20000`
 - `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
@@ -40,10 +41,13 @@ Zeabur 环境变量：
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
+- `GET /v1/settings/proactive` / `PUT /v1/settings/proactive`，用于读取/保存主动联系设置（默认关闭）
 
-`GET /health` 会返回 Prompt Cache 的读写 token 和记忆检索缓存命中次数，便于确认缓存是否真正生效。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
+`GET /health` 会返回 Prompt Cache 的读写 token、缓存命中率和记忆检索缓存命中次数，便于确认缓存是否真正生效。缓存命中率按 `cache_read / (cache_read + cache_creation)` 计算，没有样本时返回 `null`。
 
-当窗口估算 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
+主动联系设置由 `/v1/settings/proactive` 保存到 `LUMI_DATA_DIR`，默认关闭。开启后，后端会在所选静默时长后向默认聊天注入 `[nudge]` 并走正常模型链路，每次触发会产生一次模型调用/费用。回复保存在聊天历史；锁屏推送需要额外配置 APNs，目前未接通。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
+
+当窗口估算 Token（包含当前输入）达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
 每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。
