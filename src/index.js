@@ -243,6 +243,36 @@ function isHTMLContent(content) {
   const matches = source.match(tagPattern) || [];
   return matches.length >= 2 && new RegExp(`</(?:${tags})\\s*>`, "i").test(source);
 }
+function extractHTMLBlock(content, preferredTitle = "") {
+  const source = String(content || "").trim();
+  const titled = String(preferredTitle || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  const titleFrom = (html) => {
+    const match = html.match(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i) || html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1\s*>/i);
+    const inferred = match?.[1]?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return (titled || inferred || "AI 生成页面").slice(0, 64);
+  };
+  const fencePattern = /```(?:html|htm|xml)?[ \t]*\r?\n([\s\S]*?)```/gi;
+  for (const match of source.matchAll(fencePattern)) {
+    const html = match[1].trim();
+    if (!isHTMLContent(html)) continue;
+    const start = match.index ?? 0;
+    return { content: `${source.slice(0, start)} ${source.slice(start + match[0].length)}`.trim(), htmlContent: html, htmlTitle: titleFrom(html) };
+  }
+  const startMatch = /<!doctype\s+html\b|<(?:html|svg|main|section|article|div|table|form|button)\b/i.exec(source);
+  if (!startMatch) return null;
+  const start = startMatch.index;
+  const tail = source.slice(start);
+  const root = /^<(?:!doctype\s+html\b[^>]*>\s*)?<([a-z][a-z0-9:-]*)\b[^>]*>/i.exec(tail)?.[1];
+  if (!root) return null;
+  const closeTag = new RegExp(`</${root}\\s*>`, "ig");
+  let lastClose;
+  for (const match of tail.matchAll(closeTag)) lastClose = match;
+  if (!lastClose) return null;
+  const end = (lastClose.index ?? 0) + lastClose[0].length;
+  const htmlContent = tail.slice(0, end).trim();
+  if (!isHTMLContent(htmlContent)) return null;
+  return { content: `${source.slice(0, start)} ${source.slice(start + end)}`.trim(), htmlContent, htmlTitle: titleFrom(htmlContent) };
+}
 function contextMessages(thread) {
   const messages = thread.messages || [];
   const boundaryId = thread.compactedThroughMessageId;
@@ -553,17 +583,20 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const speechMatch = allowSpeech ? raw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
   const emojiMood = raw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const memoryContent = memoryMatch?.[1]?.trim();
-  let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").trim();
+  const titleMatch = raw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
+  let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = await chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
   }
+  const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
+  if (htmlBlock) content = htmlBlock.content;
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
   const replyForSpeech = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
   // <speech> is the model's opt-in signal only. Always speak the complete visible reply;
   // the speech tag itself can accidentally contain just the greeting or first clause.
   const speechText = speechMatch ? replyForSpeech : "";
-  return { content, speechText, memorySaved, userModelContent };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, userModelContent };
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
@@ -672,9 +705,9 @@ const server = createServer(async (req, res) => {
       try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
       storedUserMessage.modelContent = generated.userModelContent;
-      const contentType = isHTMLContent(generated.content) ? "html" : "text";
+      const contentType = generated.htmlContent ? (generated.content ? "mixed" : "html") : "text";
       let speech = null;
-      if (input.tts?.enabled && generated.speechText && contentType !== "html") {
+      if (input.tts?.enabled && generated.speechText && !generated.htmlContent) {
         try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
         catch (error) { console.warn(`speech synthesis skipped: ${(error.message || String(error)).slice(0, 200)}`); }
       }
@@ -683,6 +716,8 @@ const server = createServer(async (req, res) => {
         role: "assistant",
         content: generated.content,
         contentType,
+        htmlContent: generated.htmlContent,
+        htmlTitle: generated.htmlTitle,
         createdAt: new Date().toISOString()
       };
       threads[id].messages.push(storedUserMessage, assistantMessage);
