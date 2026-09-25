@@ -22,6 +22,7 @@ const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null };
 let proactiveCheckInFlight = false;
+const activeChatThreads = new Set();
 let memoryCookie = "";
 
 const seed = () => ({
@@ -96,7 +97,7 @@ async function checkProactiveNudge() {
     const threads = await readThreads();
     const threadId = proactiveSettings.threadId || "default";
     const thread = threads[threadId];
-    if (!thread) return;
+    if (!thread || activeChatThreads.has(threadId)) return;
     const messages = thread.messages || [];
     const lastUser = [...messages].reverse().find((message) => message.role === "user");
     if (!lastUser) return;
@@ -457,7 +458,10 @@ const server = createServer(async (req, res) => {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const userMessage = { id: randomUUID(), role: "user", content: input.content.trim(), createdAt: new Date().toISOString() };
-      const generated = await generateReply({ input: userMessage.content, systemPrompt: input.systemPrompt, thread: threads[id] });
+      let generated;
+      activeChatThreads.add(id);
+      try { generated = await generateReply({ input: userMessage.content, systemPrompt: input.systemPrompt, thread: threads[id] }); }
+      finally { activeChatThreads.delete(id); }
       const assistantMessage = {
         id: randomUUID(),
         role: "assistant",
