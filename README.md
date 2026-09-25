@@ -42,8 +42,8 @@ Zeabur 环境变量：
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
-- `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和可选 `tts`；TTS Key 只随本次请求传入、不落盘
-- `GET /v1/tts/catalog`：返回可选 MiniMax TTS 模型及示例 Voice ID
+- `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和语音授权；只有 AI 明确选择 `<speech>...</speech>` 才生成语音，TTS Key 只随本次请求传入、不落盘
+- `GET /v1/tts/catalog`：用本次请求传来的 MiniMax Key 拉取该账户真实可用的系统、克隆及生成音色；Key 不落盘
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `GET /v1/settings/proactive` / `PUT /v1/settings/proactive`，需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`，用于读取/保存主动联系设置（默认关闭）
 - `GET /v1/push/status`，查看 APNs 是否已配置及登记设备数量
@@ -51,7 +51,7 @@ Zeabur 环境变量：
 
 `GET /health` 会返回 Prompt Cache 的读写 token、缓存命中率和记忆检索缓存命中次数，便于确认缓存是否真正生效。缓存命中率按 `cache_read / (cache_read + cache_creation)` 计算，没有样本时返回 `null`。
 
-主动联系设置由 `/v1/settings/proactive` 保存到 `LUMI_DATA_DIR`，默认关闭。开启后，只有 APNs 已配置且至少有一台登记设备时，后端才会在用户最后一条消息后的静默时长届满时发起一次模型调用；同一条用户消息不会重复收费，直到用户再次发消息才重新计时。回复保存在聊天历史并经 Apple Push Notification service 发送系统通知。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
+主动联系设置由 `/v1/settings/proactive` 保存到 `LUMI_DATA_DIR`，默认关闭。开启后，只有 APNs 已配置且至少有一台登记设备时，后端才会在静默时长届满时发起一次模型调用；该调用只带最近 8 条对话、摘要最多 4000 字符、最多生成 256 tokens，以控制冷启动账单。同一条用户消息不会重复收费，直到用户再次发消息才重新计时。它不是缓存保活请求；Anthropic 的缓存过期后，不能无成本地维持命中率。回复保存在聊天历史并经 Apple Push Notification service 发送系统通知。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
 
 当窗口估算 Token（包含当前输入）达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。

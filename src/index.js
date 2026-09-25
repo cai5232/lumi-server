@@ -213,7 +213,7 @@ async function checkProactiveNudge() {
     proactiveSettings.nextDueAt = null;
     await saveProactiveSettings();
     const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
-    const generated = await generateReply({ input, systemPrompt: "", thread });
+    const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
     const now = new Date().toISOString();
     thread.messages.push({ id: randomUUID(), role: "assistant", content: generated.content, createdAt: new Date().toISOString() });
     await saveThreads(threads);
@@ -244,7 +244,7 @@ function contextMessages(thread) {
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
 
-async function callModel({ messages, temperature = 0.8 }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
   const configuredURL = process.env.LUMI_MODEL_API_URL;
   const apiKey = process.env.LUMI_MODEL_API_KEY;
   const model = process.env.LUMI_MODEL_NAME;
@@ -260,27 +260,27 @@ async function callModel({ messages, temperature = 0.8 }) {
     : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
 
   const providerMessages = messages.map((message) => {
-    if (message.role !== "user" || !Array.isArray(message.images) || !message.images.length) return message;
-    const imageBlocks = message.images.map((image) => {
+    const { images = [], ...cleanMessage } = message;
+    if (message.role !== "user" || !Array.isArray(images) || !images.length) return cleanMessage;
+    const imageBlocks = images.map((image) => {
       const match = String(image).match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([\s\S]+)$/i);
       if (!match) return null;
       return nativeAnthropic
         ? { type: "image", source: { type: "base64", media_type: match[1].toLowerCase(), data: match[2] } }
         : { type: "image_url", image_url: { url: image } };
     }).filter(Boolean);
-    const { images: _images, ...rest } = message;
-    return { ...rest, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
+    return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
   const preparedMessages = cacheMessages(providerMessages, model);
   const requestBody = nativeAnthropic
     ? {
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
-        max_tokens: Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
+        max_tokens: Number(maxOutputTokens || process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         temperature
       }
-    : { model, messages: preparedMessages, temperature };
+    : { model, messages: preparedMessages, temperature, ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
   const response = await fetch(apiURL, {
     method: "POST",
@@ -481,20 +481,24 @@ ${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
   return true;
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, spatialVoice = false, systemPrompt, thread }) {
-  await compactThread(thread, input);
-  const configuredSystem = process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
+async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false }) {
+  if (!proactive) await compactThread(thread, input);
+  const configuredSystem = proactive
+    ? process.env.LUMI_NUDGE_SYSTEM_PROMPT || "你是沈屿，在和言言延续一段熟悉、亲近的聊天。根据最近几条对话，自然地发一条简短、不催促的消息；不要复述整段历史，也不要提及你是定时任务。"
+    : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
   const system = configuredSystem
     .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
     .replace(/你最喜欢最像你自己最常用的颜文字[^\n]*/g, "")
     .trim();
-  const summary = thread.contextSummary ? `<context_summary source="system">\n${thread.contextSummary}\n</context_summary>` : "";
+  const summaryText = proactive ? String(thread.contextSummary || "").slice(-4000) : thread.contextSummary;
+  const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const memories = await searchMemories(input);
   const timestamp = new Date().toISOString();
   const retrieved = memories.length
     ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
-  const history = contextMessages(thread).map((message) => ({
+  const relevantMessages = contextMessages(thread);
+  const history = (proactive ? relevantMessages.slice(-8) : relevantMessages).map((message) => ({
     role: message.role,
     content: message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content
   }));
@@ -502,34 +506,27 @@ async function generateReply({ input, images = [], emojiCatalog = {}, spatialVoi
     .map(([mood, values]) => `${mood}: ${values.filter((value) => typeof value === "string").join(" ")}`).join("\n");
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${catalog ? `\n<emoji_mood_catalog>\n${catalog}\n</emoji_mood_catalog>` : ""}\n</system_context>`;
   const raw = await callModel({
+    maxOutputTokens: proactive ? 256 : undefined,
     messages: [
-      { role: "system", content: `${system}\n\n你可以使用颜文字，随心所欲，根据心情搭配。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${spatialVoice ? "\n如果语义合适，可少量使用位置标签 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开]；标签只描述声音移动，不要读出来，也不要无关堆叠。" : ""}` },
+      { role: "system", content: `${system}\n\n你可以使用颜文字，随心所欲，根据心情搭配。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的简短内容</speech>。通常文字回复照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}` },
       ...history,
       { role: "system", content: systemContext },
       { role: "user", content: input, images }
     ]
   });
   const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
+  const speechMatch = allowSpeech ? raw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
   const memoryContent = memoryMatch?.[1]?.trim();
-  const content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").trim();
+  const content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").trim();
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
-  return { content, memorySaved };
+  return { content, speechText: speechMatch?.[1]?.trim() || "", memorySaved };
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
-const ttsVoices = [
-  { id: "male-qn-qingse", name: "青涩男声" },
-  { id: "male-qn-jingying", name: "精英男声" },
-  { id: "female-shaonv", name: "少女音" },
-  { id: "female-yujie", name: "御姐音" },
-  { id: "female-chengshu", name: "成熟女声" },
-  { id: "presenter_male", name: "男主持" },
-  { id: "presenter_female", name: "女主持" }
-];
-
 async function synthesizeSpeech(text, settings) {
   if (!settings?.apiKey || !settings?.voiceID || !ttsModels.includes(settings.model)) return null;
-  const response = await fetch("https://api.minimax.cn/v1/t2a_v2", {
+  const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
+  const response = await fetch(`${minimaxHost}/v1/t2a_v2`, {
     method: "POST",
     headers: { authorization: `Bearer ${settings.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -549,7 +546,7 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization,x-minimax-api-key,x-minimax-api-host" });
   res.end(JSON.stringify(body));
 }
 
@@ -610,7 +607,27 @@ const server = createServer(async (req, res) => {
       return send(res, saved ? 201 : 502, { saved });
     }
     if (req.method === "GET" && url.pathname === "/v1/tts/catalog") {
-      return send(res, 200, { models: ttsModels, voices: ttsVoices });
+      const apiKey = String(req.headers["x-minimax-api-key"] || "").trim();
+      const host = req.headers["x-minimax-api-host"] === "https://api.minimax.io" ? "https://api.minimax.io" : "https://api.minimaxi.com";
+      if (!apiKey) return send(res, 200, { models: ttsModels, voices: [], customVoicesAvailable: false });
+      try {
+        const response = await fetch(`${host}/v1/get_voice`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+          body: JSON.stringify({ voice_type: "all" }),
+          signal: AbortSignal.timeout(12000)
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || Number(data?.base_resp?.status_code || 0) !== 0) {
+          return send(res, 502, { error: data?.base_resp?.status_msg || `MiniMax 音色目录返回 ${response.status}` });
+        }
+        const voices = ["system_voice", "voice_cloning", "voice_generation"]
+          .flatMap((group) => (Array.isArray(data[group]) ? data[group] : []).map((voice) => ({ id: String(voice.voice_id || ""), name: String(voice.voice_name || voice.voice_id || ""), type: group })))
+          .filter((voice) => voice.id);
+        return send(res, 200, { models: ttsModels, voices, customVoicesAvailable: voices.some((voice) => voice.type !== "system_voice") });
+      } catch (error) {
+        return send(res, 502, { error: `无法读取 MiniMax 音色：${error.message}` });
+      }
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -627,11 +644,11 @@ const server = createServer(async (req, res) => {
       const storedUserMessage = images.length ? { ...userMessage, imageAttachmentCount: images.length } : userMessage;
       let generated;
       activeChatThreads.add(id);
-      try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, spatialVoice: Boolean(input.tts?.apiKey), systemPrompt: input.systemPrompt, thread: threads[id] }); }
+      try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
       let speech = null;
-      if (input.tts && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(generated.content)) {
-        try { speech = await synthesizeSpeech(generated.content, input.tts); }
+      if (input.tts?.enabled && generated.speechText && !/<\/?(?:html|body|div|table|svg|iframe)\b/i.test(generated.content)) {
+        try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
         catch (error) { console.warn(`speech synthesis skipped: ${(error.message || String(error)).slice(0, 200)}`); }
       }
       const assistantMessage = {
@@ -647,7 +664,7 @@ const server = createServer(async (req, res) => {
         proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
         await saveProactiveSettings();
       }
-      return send(res, 200, { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null });
+      return send(res, 200, { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null });
     }
     return send(res, 405, { error: "method_not_allowed" });
   } catch (error) { return send(res, 500, { error: error.message }); }
