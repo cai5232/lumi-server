@@ -35,6 +35,11 @@ async function readThreads() {
 async function saveThreads(threads) { await writeFile(threadPath, JSON.stringify(threads, null, 2)); }
 
 function estimateTokens(text) { return Math.ceil(String(text || "").length / 4); }
+function estimateCacheTokens(text) {
+  const value = String(text || "");
+  const cjkCharacters = (value.match(/[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]/gu) || []).length;
+  return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
+}
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
 
 async function callModel({ messages, temperature = 0.8 }) {
@@ -100,13 +105,13 @@ function cacheMessages(messages, model) {
   if (!promptCacheEnabled || !/anthropic|claude/i.test(String(model))) return messages;
   const cloned = messages.map((message) => ({ ...message }));
   const firstSystem = cloned.findIndex((message) => message.role === "system");
-  if (firstSystem >= 0 && estimateTokens(cloned[firstSystem].content) >= 1024) {
+  if (firstSystem >= 0 && estimateCacheTokens(cloned[firstSystem].content) >= 1024) {
     cloned[firstSystem] = { ...cloned[firstSystem], content: [{ type: "text", text: cloned[firstSystem].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
   }
   const lastUser = cloned.map((message) => message.role).lastIndexOf("user");
   const cacheBoundary = lastUser > 0 ? cloned.slice(0, lastUser).map((message) => message.role).lastIndexOf("user") : -1;
   const prefixTokens = cacheBoundary >= 0
-    ? cloned.slice(0, cacheBoundary + 1).reduce((total, message) => total + estimateTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0)
+    ? cloned.slice(0, cacheBoundary + 1).reduce((total, message) => total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0)
     : 0;
   if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
