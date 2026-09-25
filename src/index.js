@@ -13,6 +13,7 @@ const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
+const modelKeywordExtraction = process.env.LUMI_MEMORY_KEYWORD_MODEL === "true";
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
@@ -133,6 +134,7 @@ function fallbackKeywords(input) {
 }
 
 async function extractMemoryKeywords(input) {
+  if (!modelKeywordExtraction) return fallbackKeywords(input);
   try {
     const raw = await callModel({
       messages: [
