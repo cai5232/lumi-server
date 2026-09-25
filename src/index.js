@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const threadPath = join(dataDir, "threads.json");
+const cacheStatsPath = join(dataDir, "cache-stats.json");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.86);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -29,10 +30,43 @@ const seed = () => ({
 async function readThreads() {
   await mkdir(dataDir, { recursive: true });
   try { return JSON.parse(await readFile(threadPath, "utf8")); }
-  catch { const initial = { default: seed() }; await writeFile(threadPath, JSON.stringify(initial, null, 2)); return initial; }
+  catch (error) {
+    if (error?.code !== "ENOENT") {
+      console.error(`thread history preserved; failed to read ${threadPath}: ${error.message}`);
+      throw new Error("聊天历史文件读取失败，原文件已保留，避免覆盖历史记录");
+    }
+    const initial = { default: seed() };
+    await saveThreads(initial);
+    return initial;
+  }
 }
 
-async function saveThreads(threads) { await writeFile(threadPath, JSON.stringify(threads, null, 2)); }
+async function saveThreads(threads) {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryPath = `${threadPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(threads, null, 2));
+  await rename(temporaryPath, threadPath);
+}
+
+async function loadCacheStats() {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const saved = JSON.parse(await readFile(cacheStatsPath, "utf8"));
+    for (const key of ["modelCalls", "cacheReadTokens", "cacheWriteTokens", "memorySearches", "memoryCacheHits"]) {
+      const value = Number(saved[key]);
+      if (Number.isFinite(value) && value >= 0) cacheStats[key] = value;
+    }
+    if (saved.lastUsage && typeof saved.lastUsage === "object") cacheStats.lastUsage = saved.lastUsage;
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn(`cache stats unavailable: ${error.message}`);
+  }
+}
+
+async function saveCacheStats() {
+  const temporaryPath = `${cacheStatsPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(cacheStats));
+  await rename(temporaryPath, cacheStatsPath);
+}
 
 function estimateTokens(text) { return Math.ceil(String(text || "").length / 4); }
 function estimateCacheTokens(text) {
@@ -86,6 +120,7 @@ async function callModel({ messages, temperature = 0.8 }) {
   cacheStats.lastUsage = usage;
   cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
+  await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
   const content = nativeAnthropic
     ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
     : data?.choices?.[0]?.message?.content;
@@ -152,10 +187,11 @@ async function memoryRequest(path, payload) {
 async function memorySearchRequest(query) {
   const cacheKey = String(query).trim().toLowerCase();
   const cached = memorySearchCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) { cacheStats.memoryCacheHits += 1; return cached.data; }
+  if (cached && cached.expiresAt > Date.now()) { cacheStats.memoryCacheHits += 1; await saveCacheStats().catch(() => {}); return cached.data; }
   if (cached) memorySearchCache.delete(cacheKey);
   const headers = await memoryHeaders(false);
   cacheStats.memorySearches += 1;
+  await saveCacheStats().catch(() => {});
   const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
     headers,
     signal: AbortSignal.timeout(4000)
@@ -341,4 +377,5 @@ const server = createServer(async (req, res) => {
   } catch (error) { return send(res, 500, { error: error.message }); }
 });
 
+await loadCacheStats();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
