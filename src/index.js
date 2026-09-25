@@ -11,7 +11,7 @@ const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.86);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
-const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
+const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const modelKeywordExtraction = process.env.LUMI_MEMORY_KEYWORD_MODEL === "true";
 const memorySearchCache = new Map();
@@ -156,7 +156,7 @@ function normalizeMemories(data) {
   const list = Array.isArray(data) ? data : data.memories || data.results || data.data || [];
   return list.map((item) => {
     if (typeof item === "string") return item;
-    return item.content || item.text || item.memory || item.value || item.summary || "";
+    return item.content || item.text || item.memory || item.value || item.summary || item.content_preview || "";
   }).filter(Boolean).slice(0, 8);
 }
 
@@ -183,7 +183,7 @@ async function writeMemory(content, threadId) {
       threadId
     });
     const id = created?.id || created?.note?.id || created?.data?.id;
-    if (id) {
+    if (id && memoryWritePath.includes("/api/latent-notes")) {
       await memoryRequest(`${memoryWritePath}/${encodeURIComponent(id)}/update`, { status: "approved" });
     }
     memorySearchCache.clear();
