@@ -27,6 +27,8 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/latent-notes`
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
+- `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
+- `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `5m`，也可填 `1h`
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
@@ -36,6 +38,8 @@ Zeabur 环境变量：
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
+
+`GET /health` 会返回 Prompt Cache 的读写 token 和记忆检索缓存命中次数，便于确认缓存是否真正生效。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
 
 当窗口估算 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
