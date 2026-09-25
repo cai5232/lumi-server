@@ -27,6 +27,7 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/latent-notes`
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
+- `LUMI_MEMORY_KEYWORD_MODEL`：可选，设为 `true` 才用模型提取记忆关键词；默认关闭，使用本地提取，避免每条消息额外产生一次模型费用
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
 - `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `5m`，也可填 `1h`
 
