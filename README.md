@@ -13,7 +13,7 @@ npm run dev
 
 Zeabur 环境变量：
 
-- `LUMI_MODEL_API_URL`：OpenAI 兼容的 Chat Completions 完整地址
+- `LUMI_MODEL_API_URL`：OpenAI 兼容地址；可填完整的 `/chat/completions`，也可填到 `/v1`，服务会自动补齐路径
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
@@ -40,4 +40,3 @@ Zeabur 环境变量：
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
 每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会移除该标记并在客户端显示“-------沈屿记下了这一刻-------”。
-
