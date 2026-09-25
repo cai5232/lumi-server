@@ -37,7 +37,7 @@ async function saveThreads(threads) { await writeFile(threadPath, JSON.stringify
 function estimateTokens(text) { return Math.ceil(String(text || "").length / 4); }
 function estimateCacheTokens(text) {
   const value = String(text || "");
-  const cjkCharacters = (value.match(/[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]/gu) || []).length;
+  const cjkCharacters = (value.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) || []).length;
   return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0); }
