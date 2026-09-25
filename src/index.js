@@ -140,17 +140,21 @@ async function searchMemories(input) {
 
 async function writeMemory(content, threadId) {
   try {
-    await memoryRequest(memoryWritePath, {
+    const created = await memoryRequest(memoryWritePath, {
       dream_line: content,
       content,
       memory: content,
       text: content,
-      status: "approved",
+      status: "draft",
       note_type: "inward",
       drive_tag: "lumi",
       source: "lumi",
       threadId
     });
+    const id = created?.id || created?.note?.id || created?.data?.id;
+    if (id) {
+      await memoryRequest(`${memoryWritePath}/${encodeURIComponent(id)}/update`, { status: "approved" });
+    }
     memorySearchCache.clear();
     return true;
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
