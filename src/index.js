@@ -14,6 +14,9 @@ const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/latent-notes";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
+const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
+const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
+const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0 };
 let memoryCookie = "";
 
 const seed = () => ({
@@ -47,15 +50,34 @@ async function callModel({ messages, temperature = 0.8 }) {
   const response = await fetch(apiURL, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, messages, temperature })
+    body: JSON.stringify({ model, messages: cacheMessages(messages, model), temperature })
   });
   const raw = await response.text();
   let data = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
+  cacheStats.modelCalls += 1;
+  const usage = data?.usage || {};
+  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
+  cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
   const content = data?.choices?.[0]?.message?.content;
   if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
   return content.trim();
+}
+
+function cacheMessages(messages, model) {
+  if (!promptCacheEnabled || !/anthropic|claude/i.test(String(model))) return messages;
+  const cloned = messages.map((message) => ({ ...message }));
+  const firstSystem = cloned.findIndex((message) => message.role === "system");
+  if (firstSystem >= 0 && estimateTokens(cloned[firstSystem].content) >= 1024) {
+    cloned[firstSystem] = { ...cloned[firstSystem], content: [{ type: "text", text: cloned[firstSystem].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+  }
+  const lastUser = cloned.map((message) => message.role).lastIndexOf("user");
+  const cacheBoundary = lastUser > 0 ? cloned.slice(0, lastUser).map((message) => message.role).lastIndexOf("user") : -1;
+  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && estimateTokens(cloned[cacheBoundary].content) >= 64) {
+    cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+  }
+  return cloned;
 }
 
 async function memoryHeaders(contentType = true) {
@@ -91,9 +113,10 @@ async function memoryRequest(path, payload) {
 async function memorySearchRequest(query) {
   const cacheKey = String(query).trim().toLowerCase();
   const cached = memorySearchCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) return cached.data;
+  if (cached && cached.expiresAt > Date.now()) { cacheStats.memoryCacheHits += 1; return cached.data; }
   if (cached) memorySearchCache.delete(cacheKey);
   const headers = await memoryHeaders(false);
+  cacheStats.memorySearches += 1;
   const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
     headers,
     signal: AbortSignal.timeout(4000)
@@ -206,7 +229,12 @@ async function generateReply({ input, systemPrompt, thread }) {
     : "";
   const history = (thread.messages || []).slice(-20).map((message) => ({ role: message.role, content: message.content }));
   const raw = await callModel({
-    messages: [{ role: "system", content: `${system}${summary}${retrieved}\n\n如果这条对话包含值得长期保留的新事实、偏好或约定，你可以在回复末尾添加 <memory>要记住的内容</memory>；不值得记忆时不要添加。不要向用户解释这个标签。` }, ...history, { role: "user", content: input }]
+    messages: [
+      { role: "system", content: `${system}\n\n如果这条对话包含值得长期保留的新事实、偏好或约定，你可以在回复末尾添加 <memory>要记住的内容</memory>；不值得记忆时不要添加。不要向用户解释这个标签。` },
+      { role: "system", content: `${summary}${retrieved}`.trim() || "当前没有额外上下文。" },
+      ...history,
+      { role: "user", content: input }
+    ]
   });
   const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const memoryContent = memoryMatch?.[1]?.trim();
@@ -230,7 +258,13 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { ok: true });
+    if (req.method === "GET" && url.pathname === "/health") return send(res, 200, {
+      ok: true,
+      cache: {
+        prompt: { enabled: promptCacheEnabled, modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens },
+        memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, ttlMs: memoryCacheTTL }
+      }
+    });
     if (req.method === "POST" && url.pathname === "/v1/memories") {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
