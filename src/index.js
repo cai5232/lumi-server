@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createPrivateKey, createSign, randomUUID } from "node:crypto";
+import { createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
 import { createServer } from "node:http";
 
@@ -22,7 +22,7 @@ const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "5m";
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, lastUsage: {} };
-const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null };
+const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null };
 let proactiveCheckInFlight = false;
 let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
@@ -108,6 +108,15 @@ function apnsConfigured() {
   return Boolean(process.env.LUMI_APNS_KEY_ID && process.env.LUMI_APNS_TEAM_ID && process.env.LUMI_APNS_PRIVATE_KEY_BASE64);
 }
 
+function pushRequestAuthorized(req) {
+  const expected = String(process.env.LUMI_PUSH_API_TOKEN || "");
+  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!expected || !supplied) return false;
+  const expectedBytes = Buffer.from(expected);
+  const suppliedBytes = Buffer.from(supplied);
+  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
 function apnsBearerToken() {
   if (!apnsConfigured()) throw new Error("APNs credentials are not configured");
   if (apnsJwtCache.token && Date.now() - apnsJwtCache.createdAt < 45 * 60_000) return apnsJwtCache.token;
@@ -136,7 +145,7 @@ async function sendAPNs(device, message) {
       ":method": "POST",
       ":path": `/3/device/${device.token}`,
       authorization: `bearer ${bearer}`,
-      "apns-topic": process.env.LUMI_APNS_TOPIC || "com.cai5232.Lumi",
+      "apns-topic": process.env.LUMI_APNS_TOPIC || "com.cai5232.LumiPush",
       "apns-push-type": "alert",
       "apns-priority": "10",
       "content-type": "application/json"
@@ -178,6 +187,8 @@ function chooseNudgeIntervalMs() {
 
 async function checkProactiveNudge() {
   if (proactiveCheckInFlight || !proactiveSettings.enabled || !String(proactiveSettings.message || "").trim()) return;
+  // Never charge for an unsolicited message unless a valid push destination is ready.
+  if (!apnsConfigured() || !pushTokens.some((device) => device.threadId === (proactiveSettings.threadId || "default"))) return;
   proactiveCheckInFlight = true;
   try {
     const threads = await readThreads();
@@ -187,6 +198,7 @@ async function checkProactiveNudge() {
     const messages = thread.messages || [];
     const lastUser = [...messages].reverse().find((message) => message.role === "user");
     if (!lastUser) return;
+    if (proactiveSettings.lastNudgedForUserMessageId === lastUser.id) return;
     if (proactiveSettings.scheduledForUserMessageId !== lastUser.id || !proactiveSettings.nextDueAt) {
       proactiveSettings.scheduledForUserMessageId = lastUser.id;
       proactiveSettings.nextDueAt = new Date(new Date(lastUser.createdAt).getTime() + chooseNudgeIntervalMs()).toISOString();
@@ -195,20 +207,17 @@ async function checkProactiveNudge() {
     }
     if (Date.now() < new Date(proactiveSettings.nextDueAt).getTime()) return;
 
-    // Reserve the next interval before calling the model so a restart cannot duplicate a paid nudge.
+    // Reserve this user turn before calling the model so a restart cannot charge twice.
+    proactiveSettings.lastNudgedForUserMessageId = lastUser.id;
     proactiveSettings.scheduledForUserMessageId = null;
-    proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+    proactiveSettings.nextDueAt = null;
     await saveProactiveSettings();
     const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
     const generated = await generateReply({ input, systemPrompt: "", thread });
     const now = new Date().toISOString();
-    thread.messages.push(
-      { id: randomUUID(), role: "user", content: input, createdAt: now },
-      { id: randomUUID(), role: "assistant", content: generated.content, createdAt: new Date().toISOString() }
-    );
+    thread.messages.push({ id: randomUUID(), role: "assistant", content: generated.content, createdAt: new Date().toISOString() });
     await saveThreads(threads);
-    proactiveSettings.scheduledForUserMessageId = thread.messages.at(-2).id;
-    proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+    proactiveSettings.scheduledForUserMessageId = lastUser.id;
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
     await sendProactivePush(threadId, generated.content);
@@ -491,7 +500,7 @@ async function generateReply({ input, systemPrompt, thread }) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization" });
   res.end(JSON.stringify(body));
 }
 
@@ -505,6 +514,9 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (["/v1/settings/proactive", "/v1/push/register"].includes(url.pathname) && !pushRequestAuthorized(req)) {
+      return send(res, 401, { error: "unauthorized" });
+    }
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
     if (url.pathname === "/v1/push/status" && req.method === "GET") {
       return send(res, 200, { apnsConfigured: apnsConfigured(), registeredDevices: pushTokens.length });
