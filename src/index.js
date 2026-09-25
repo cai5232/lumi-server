@@ -55,7 +55,7 @@ async function callModel({ messages, temperature = 0.8 }) {
   const preparedMessages = cacheMessages(messages, model);
   const requestBody = nativeAnthropic
     ? {
-        model: model.replace(/^anthropic\//i, ""),
+        model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
         max_tokens: Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
         system: preparedMessages.filter((message) => message.role === "system").map((message) => message.content).flat(),
         messages: preparedMessages.filter((message) => message.role !== "system"),
@@ -84,7 +84,7 @@ async function callModel({ messages, temperature = 0.8 }) {
   return content.trim();
 }
 
-function cacheMessages(messages, model) {
+function zenmuxAnthropicModel(model) {\n  const normalized = String(model).replace(/^anthropic\\//i, "");\n  // ZenMux recommends dashed Claude aliases on its native Anthropic route.\n  if (normalized === "claude-sonnet-4.6") return "claude-sonnet-4-6";\n  if (normalized === "claude-sonnet-4.5") return "claude-sonnet-4-5";\n  return normalized;\n}\n\nfunction cacheMessages(messages, model) {
   if (!promptCacheEnabled || !/anthropic|claude/i.test(String(model))) return messages;
   const cloned = messages.map((message) => ({ ...message }));
   const firstSystem = cloned.findIndex((message) => message.role === "system");
