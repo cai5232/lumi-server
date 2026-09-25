@@ -8,7 +8,7 @@ const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const threadPath = join(dataDir, "threads.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
-const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.86);
+const compactAt = Number(process.env.LUMI_COMPACT_AT || 0.85);
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
@@ -268,16 +268,23 @@ async function writeMemory(content, threadId) {
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
-async function compactThread(thread) {
+async function compactThread(thread, pendingInput = "") {
   const messages = contextMessages(thread);
-  if (messageTokens(messages) < contextLimit * compactAt) return false;
+  const pendingTokens = pendingInput ? estimateTokens(pendingInput) + 8 : 0;
+  if (messageTokens(messages) + pendingTokens < contextLimit * compactAt) return false;
+
+  // Preserve whole user/assistant turns in the recent cache-friendly tail.
   let tail = [];
   let tailCount = 0;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const cost = estimateTokens(messages[index].content) + 8;
+  for (let index = messages.length - 1; index >= 0;) {
+    let start = index;
+    if (messages[index].role === "assistant" && index > 0 && messages[index - 1].role === "user") start = index - 1;
+    const turn = messages.slice(start, index + 1);
+    const cost = messageTokens(turn);
     if (tail.length && tailCount + cost > tailTokens) break;
-    tail.unshift(messages[index]);
+    tail.unshift(...turn);
     tailCount += cost;
+    index = start - 1;
   }
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return false;
@@ -305,7 +312,7 @@ ${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
 }
 
 async function generateReply({ input, systemPrompt, thread }) {
-  await compactThread(thread);
+  await compactThread(thread, input);
   const system = process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
   const summary = thread.contextSummary ? `\n\n<context_summary>\n${thread.contextSummary}\n</context_summary>` : "";
   const memories = await searchMemories(input);
@@ -349,7 +356,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/health") return send(res, 200, {
       ok: true,
       cache: {
-      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, lastUsage: cacheStats.lastUsage },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, ttlMs: memoryCacheTTL }
       }
     });
