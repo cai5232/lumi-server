@@ -111,7 +111,7 @@ function apnsConfigured() {
 function apnsBearerToken() {
   if (!apnsConfigured()) throw new Error("APNs credentials are not configured");
   if (apnsJwtCache.token && Date.now() - apnsJwtCache.createdAt < 45 * 60_000) return apnsJwtCache.token;
-  const key = createPrivateKey(Buffer.from(process.env.LUMI_APNS_PRIVATE_KEY_BASE64.replace(/\\s/g, ""), "base64"));
+  const key = createPrivateKey(Buffer.from(process.env.LUMI_APNS_PRIVATE_KEY_BASE64.replace(/\s/g, ""), "base64"));
   const header = Buffer.from(JSON.stringify({ alg: "ES256", kid: process.env.LUMI_APNS_KEY_ID })).toString("base64url");
   const claims = Buffer.from(JSON.stringify({ iss: process.env.LUMI_APNS_TEAM_ID, iat: Math.floor(Date.now() / 1000) })).toString("base64url");
   const unsigned = `${header}.${claims}`;
@@ -125,6 +125,7 @@ function apnsBearerToken() {
 
 async function sendAPNs(device, message) {
   const host = device.environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
+  const bearer = apnsBearerToken();
   const client = connect(host);
   return await new Promise((resolve, reject) => {
     let status = 0;
@@ -134,7 +135,7 @@ async function sendAPNs(device, message) {
     const request = client.request({
       ":method": "POST",
       ":path": `/3/device/${device.token}`,
-      authorization: `bearer ${apnsBearerToken()}`,
+      authorization: `bearer ${bearer}`,
       "apns-topic": process.env.LUMI_APNS_TOPIC || "com.cai5232.Lumi",
       "apns-push-type": "alert",
       "apns-priority": "10",
