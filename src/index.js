@@ -65,7 +65,7 @@ async function callModel({ messages, temperature = 0.8 }) {
 
   const response = await fetch(apiURL, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    headers: {\n      "content-type": "application/json",\n      authorization: `Bearer ${apiKey}`,\n      ...(nativeAnthropic ? { "anthropic-version": "2023-06-01" } : {})\n    },
     body: JSON.stringify(requestBody)
   });
   const raw = await response.text();
