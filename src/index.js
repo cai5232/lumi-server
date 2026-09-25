@@ -328,7 +328,10 @@ function cacheMessages(messages, model) {
   const prefixTokens = cacheBoundary >= 0
     ? cloned.slice(0, cacheBoundary + 1).reduce((total, message) => total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0)
     : 0;
-  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && estimateCacheTokens(cloned[cacheBoundary].content) >= 64 && prefixTokens >= 1024) {
+  // Anthropic's minimum applies to the entire cached prefix, not to this one
+  // message. Short chat turns still need a breakpoint so the growing history
+  // can be read from cache on the next request.
+  if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
   }
   return cloned;
