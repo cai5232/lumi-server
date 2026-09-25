@@ -26,6 +26,7 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_PASSWORD`：如果 memorycore 只提供密码登录，可填记忆库密码，后端会自动登录并复用会话
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/latent-notes`
+- `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
