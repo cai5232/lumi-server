@@ -554,15 +554,26 @@ function chooseEmojiFromMood(mood, faces, reply) {
 function spokenReply(content) {
   return String(content)
     .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
-    // Stage directions are visible in text, but must never be read aloud.
-    .replace(/[（(][^（）()\n]{0,80}(?:摸|抱|亲|靠|搂|抚|揉|蹭|望|笑|拍|吻|低头|轻轻)[^（）()\n]{0,80}[）)]/g, "")
-    .replace(/(?:^|\n)\s*(?:\*[^*\n]{1,80}\*|[（(][^）)\n]{1,80}[）)])\s*(?=\n|$)/g, "\n")
+    .replace(/[（(][^（）()\n]{0,80}[）)]/g, "")
+    .replace(/\[(?:左耳|右耳|脑后|面前|贴近|退开)\]/g, "")
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/[\/\\／＼~～^＿_]+[ωwW]+[\/\\／＼~～^＿_]+/g, "")
+    .replace(/[\/\\／＼~～^＿_]{2,}/g, "")
     .split(/\n+/)
     .map((line) => line.trim())
     .filter(Boolean)
     .reduce((spoken, line) => spoken ? `${spoken}${/[。！？!?，,；;：:]$/.test(spoken) ? "" : "，"}${line}` : line, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function withoutSpeechPlanning(content) {
+  return String(content).replace(/<thinking>([\s\S]*?)<\/thinking>/gi, (_, thought) => {
+    const cleaned = String(thought)
+      .replace(/(?:^|(?<=[。！？!?]))[^。！？!?]*\bspeech_enabled\b[^。！？!?]*[。！？!?]?/gi, "")
+      .trim();
+    return cleaned ? `<thinking>${cleaned}</thinking>` : "";
+  });
 }
 
 async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false }) {
@@ -591,7 +602,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}`;
-  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得用声音说这条回复，不要每条都配语音；决定使用时才在回复最后附加 <speech>实际要朗读的内容</speech>。如果本轮标记为 false，禁止输出 speech 标签。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。`;
+  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   const cacheRequestStartedAt = Date.now();
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
@@ -604,12 +615,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       { role: "user", content: userModelContent, images }
     ]
   });
-  const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
-  const speechMatch = allowSpeech ? raw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
-  const emojiMood = raw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
+  const cleanedRaw = withoutSpeechPlanning(raw);
+  const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
+  const speechMatch = allowSpeech ? cleanedRaw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
+  const emojiMood = cleanedRaw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const memoryContent = memoryMatch?.[1]?.trim();
-  const titleMatch = raw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
+  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -617,10 +629,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
   if (htmlBlock) content = htmlBlock.content;
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
-  const replyForSpeech = spokenReply(content);
-  // <speech> is the model's opt-in signal only. Always speak the complete visible reply;
-  // the speech tag itself can accidentally contain just the greeting or first clause.
-  const speechText = speechMatch ? replyForSpeech : "";
+  const speechText = speechMatch ? spokenReply(speechMatch[1]) : "";
   return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, userModelContent, cacheSystem, cacheRequestStartedAt };
 }
 
