@@ -518,15 +518,7 @@ async function compactThread(thread, pendingInput = "") {
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return false;
   const previous = thread.contextSummary ? `已有摘要：\n${thread.contextSummary}\n\n` : "";
-  const prompt = `${previous}请把下面的聊天历史压缩成长期上下文摘要。保留用户画像、关系变化、已确认事实和当前未完成事项；用具体内容填充每个字段，不要复述字段说明。只输出 XML，不要解释：
-<context_summary>
-  <user_profile>称呼、偏好、语言习惯与长期信息</user_profile>
-  <relationship_dynamic>关系背景、相处氛围与角色状态</relationship_dynamic>
-  <key_decisions_and_facts>确认过的事实、约定、重要事件</key_decisions_and_facts>
-  <active_topics_and_todos>当前话题、未完成事项与下一步</active_topics_and_todos>
-</context_summary>
-聊天历史：
-${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
+  const prompt = `${previous}请把下面的聊天历史压缩成长期上下文摘要。保留用户画像、关系变化、已确认事实和当前未完成事项；用具体内容填充每个字段，不要复述字段说明。只输出 XML，不要解释：\n<context_summary>\n  <user_profile>称呼、偏好、语言习惯与长期信息</user_profile>\n  <relationship_dynamic>关系背景、相处氛围与角色状态</relationship_dynamic>\n  <key_decisions_and_facts>确认过的事实、约定、重要事件</key_decisions_and_facts>\n  <active_topics_and_todos>当前话题、未完成事项与下一步</active_topics_and_todos>\n</context_summary>\n聊天历史：\n${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
   thread.contextSummary = await callModel({
     messages: [
       { role: "system", content: "你是上下文压缩器。保持事实，不编造，不输出聊天回复。" },
@@ -649,12 +641,12 @@ async function checkCacheKeepalive() {
     lastUserMessageId = lastUser?.id || "";
     if (!lastUser || lastUser.imageAttachmentCount ||
         keepaliveState.disabledForMessageId === lastUser.id) return { attempted: false, reason: "latest_turn_not_eligible" };
-    const lastRealAt = Date.parse(lastUser.createdAt);
     const lastRequestAt = Math.max(
       Number(thread.cacheRequestStartedAt || 0),
       Number(thread.cacheKeepaliveAt || 0),
       keepaliveState.lastThreadId === id ? Number(keepaliveState.lastRequestAt || 0) : 0
     );
+    const lastRealAt = Math.max(Date.parse(lastUser.createdAt), lastRequestAt);
     const ttlMs = cacheTTL === "1h" ? 60 * 60_000 : 5 * 60_000;
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
