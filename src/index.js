@@ -538,23 +538,14 @@ ${older.map((message) => `${message.role}: ${message.content}`).join("\n")}`;
   return true;
 }
 
-async function chooseEmojiFromMood(mood, faces, reply) {
+function chooseEmojiFromMood(mood, faces, reply) {
   const candidates = [...new Set(faces.filter((face) => typeof face === "string").map((face) => face.trim()).filter(Boolean))].slice(0, 40);
   if (!candidates.length) return "";
-  try {
-    const selection = await callModel({
-      messages: [
-        { role: "system", content: "你只负责从指定心情的候选颜文字中选一个最适合回复的。只原样输出一个候选颜文字，不要解释，不要改写。" },
-        { role: "user", content: `心情：${mood}\n回复：${reply.slice(-1200)}\n候选颜文字：\n${candidates.join("\n")}` }
-      ],
-      maxOutputTokens: 64,
-      temperature: 0.6
-    });
-    return candidates.find((face) => selection.trim() === face) || "";
-  } catch (error) {
-    console.warn(`emoji selection skipped: ${(error.message || String(error)).slice(0, 200)}`);
-    return "";
-  }
+  // The main reply already selected the mood. Pick a face locally instead of
+  // paying for another uncached Sonnet call on every emoji-bearing reply.
+  let index = 0;
+  for (const character of `${mood}:${reply.slice(-120)}`) index = (index * 31 + character.codePointAt(0)) >>> 0;
+  return candidates[index % candidates.length];
 }
 
 async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false }) {
@@ -603,7 +594,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const titleMatch = raw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
-    const chosen = await chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
+    const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
   }
   const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
