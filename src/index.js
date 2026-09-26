@@ -647,11 +647,9 @@ async function checkCacheKeepalive() {
       keepaliveState.lastThreadId === id ? Number(keepaliveState.lastRequestAt || 0) : 0
     );
     const lastRealAt = Math.max(Date.parse(lastUser.createdAt), lastRequestAt);
-    const ttlMs = cacheTTL === "1h" ? 60 * 60_000 : 5 * 60_000;
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
-    if (Date.now() - lastRequestAt >= ttlMs) return { attempted: false, reason: "cache_window_elapsed" };
     const prefix = history.slice(0, history.indexOf(lastUser) + 1).map((message) => ({
       role: message.role, content: message.modelContent || message.content
     }));
