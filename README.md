@@ -44,6 +44,7 @@ Zeabur 环境变量：
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
+- `POST /v1/chats/:id/messages` 支持 `Idempotency-Key: <每次发送唯一 UUID>`；同一请求号重复到达时复用已保存的回复，不再次调用模型。旧版 App 的完全相同请求在短时间内也会合并，避免网络自动重试产生三笔费用。
 - `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和语音授权；只有 AI 明确选择 `<speech>...</speech>` 才生成语音，TTS Key 只随本次请求传入、不落盘
 - MiniMax 音色只使用 App 中手动填写的 Voice ID，不拉取音色目录；TTS Key 只随本次消息请求传入、不落盘
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
