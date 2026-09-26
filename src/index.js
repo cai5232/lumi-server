@@ -407,6 +407,15 @@ function cacheMessages(messages, model, cacheCurrentUser = true) {
   return cloned;
 }
 
+function assistantCachePrefixHash(messages, model) {
+  const prepared = cacheMessages(messages, model, false);
+  const lastUser = prepared.map((message) => message.role).lastIndexOf("user");
+  const assistant = prepared.slice(0, lastUser).map((message) => message.role).lastIndexOf("assistant");
+  if (assistant < 0 || !Array.isArray(prepared[assistant].content) ||
+      !prepared[assistant].content.some((block) => block.cache_control)) return null;
+  return createHash("sha256").update(JSON.stringify({ model, prefix: prepared.slice(0, assistant + 1) })).digest("hex");
+}
+
 async function memoryHeaders(contentType = true) {
   const headers = contentType ? { "content-type": "application/json" } : {};
   if (process.env.LUMI_MEMORY_API_KEY) headers.authorization = `Bearer ${process.env.LUMI_MEMORY_API_KEY}`;
@@ -617,10 +626,34 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
     { role: "user", content: userModelContent, images }
   ];
+  // Compare the actual cache boundary in this request with the preceding
+  // keepalive. Only hashes and booleans are stored; prompts stay private.
+  const previousKeepaliveAt = Number(thread.cacheKeepaliveAt || 0);
+  const previousRequestAt = Number(thread.cacheRequestStartedAt || 0);
+  const cacheContinuity = previousKeepaliveAt >= previousRequestAt && thread.cacheKeepalivePrefixHash
+    ? (() => {
+        const model = process.env.LUMI_MODEL_NAME || "";
+        const actualHash = assistantCachePrefixHash(cacheRequestMessages, model);
+        return {
+          keepaliveAt: new Date(previousKeepaliveAt).toISOString(),
+          sameSystemPrompt: cacheSystem === thread.cacheSystem,
+          sameModel: model === thread.cacheModel,
+          sameAssistantPrefix: actualHash !== null && actualHash === thread.cacheKeepalivePrefixHash,
+          assistantBreakpointPresent: actualHash !== null,
+          keepalivePrefixHash: thread.cacheKeepalivePrefixHash.slice(0, 16),
+          chatPrefixHash: actualHash?.slice(0, 16) || null
+        };
+      })()
+    : null;
   const cacheRequestStartedAt = Date.now();
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
-    messages: cacheRequestMessages
+    messages: cacheRequestMessages,
+    onUsage: (usage) => {
+      if (!cacheContinuity) return;
+      cacheContinuity.readTokens = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
+      cacheContinuity.writeTokens = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+    }
   });
   const cleanedRaw = withoutSpeechPlanning(raw);
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
@@ -642,7 +675,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity };
 }
 
 async function checkCacheKeepalive() {
@@ -684,6 +717,8 @@ async function checkCacheKeepalive() {
     const keepaliveMessages = [...cachedRequest,
       { role: "assistant", content: lastAssistant.modelContent },
       { role: "user", content: "[缓存保活，请简短回复。]" }];
+    const assistantPrefixHash = assistantCachePrefixHash(keepaliveMessages, process.env.LUMI_MODEL_NAME);
+    if (!assistantPrefixHash) return { attempted: false, reason: "assistant_cache_boundary_missing" };
     if (messageTokens(keepaliveMessages) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
     keepaliveState.attempts += 1;
@@ -700,6 +735,7 @@ async function checkCacheKeepalive() {
     const readTokens = Number(keepaliveUsage.cache_read_input_tokens || keepaliveUsage.prompt_tokens_details?.cached_tokens || 0);
     const writeTokens = Number(keepaliveUsage.cache_creation_input_tokens || keepaliveUsage.prompt_tokens_details?.cache_creation_input_tokens || 0);
     thread.cacheKeepaliveAt = startedAt;
+    thread.cacheKeepalivePrefixHash = assistantPrefixHash;
     await saveThreads(threads);
     keepaliveState.lastThreadId = id;
     keepaliveState.lastRequestAt = startedAt;
@@ -812,7 +848,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       htmlCards: "separate-content-title-v1",
       cache: {
-      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
@@ -878,6 +914,7 @@ const server = createServer(async (req, res) => {
       threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
+      threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
       keepaliveState.disabledForMessageId = "";

@@ -128,8 +128,31 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.ok(next.assistantMessage, JSON.stringify(next));
     assert.equal(seen[3].hit, true);
     assert.equal(seen[3].hitKey, assistantKey, "the next chat must read the assistant prefix");
+    assert.equal(seen[0].plain[0].content[0], seen[1].plain[0].content[0], "original and keepalive system prompts must match byte for byte");
+    assert.equal(seen[1].plain[0].content[0], seen[3].plain[0].content[0], "keepalive and real chat system prompts must match byte for byte");
+    const health = await fetch(`${base}/health`).then((response) => response.json());
+    assert.equal(health.cache.prompt.lastChatContinuity.sameSystemPrompt, true);
+    assert.equal(health.cache.prompt.lastChatContinuity.sameAssistantPrefix, true);
+    assert.equal(health.cache.prompt.lastChatContinuity.readTokens, 2048);
     const finalThreads = JSON.parse(await readFile(path, "utf8"));
     assert.equal(finalThreads.default.messages.at(-1).id, next.assistantMessage.id, "keepalive must not overwrite the chat");
+    await stopBackend(child);
+    child = undefined;
+    finalThreads.default.cacheRequestStartedAt = Date.now() - 46 * 60_000;
+    finalThreads.default.cacheKeepaliveAt = Date.now() - 46 * 60_000;
+    await writeFile(path, JSON.stringify(finalThreads));
+    child = await startBackend(port, env);
+    const thirdKeepalive = await fetch(`${base}/v1/internal/cache-keepalive`, {
+      method: "POST", headers: { authorization: "Bearer test" }
+    }).then((response) => response.json());
+    assert.equal(thirdKeepalive.hit, true);
+    const changed = await chat("第三条消息", "不同的系统提示词".repeat(500));
+    assert.ok(changed.assistantMessage);
+    assert.equal(seen[5].hit, false, "a changed system prompt invalidates the prefix");
+    const changedHealth = await fetch(`${base}/health`).then((response) => response.json());
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameSystemPrompt, false);
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameAssistantPrefix, false);
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.readTokens, 0);
   } finally {
     await stopBackend(child);
     await new Promise((resolve) => provider.close(resolve));
