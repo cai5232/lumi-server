@@ -622,7 +622,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   if (htmlBlock) content = htmlBlock.content;
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
   const speechText = speechMatch ? spokenReply(speechMatch[1]) : "";
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, userModelContent, cacheSystem, cacheRequestStartedAt };
+  // Preserve the exact provider text for the next request's cache prefix. The
+  // user-visible content is intentionally cleaned separately below.
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt };
 }
 
 async function checkCacheKeepalive() {
@@ -844,6 +846,8 @@ const server = createServer(async (req, res) => {
         id: randomUUID(),
         role: "assistant",
         content: generated.content,
+        // Used only when reconstructing the exact model-side history for prompt cache.
+        modelContent: generated.modelContent,
         contentType,
         htmlContent: generated.htmlContent,
         htmlTitle: generated.htmlTitle,
