@@ -380,6 +380,16 @@ function cacheMessages(messages, model, cacheCurrentUser = true) {
   if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
   }
+  // A keepalive writes the most recent assistant reply into the cache. The next
+  // real chat must mark that same block to read the extended prefix directly.
+  const lastAssistant = cloned.slice(0, lastUser).map((message) => message.role).lastIndexOf("assistant");
+  if (lastAssistant >= 0 && typeof cloned[lastAssistant].content === "string") {
+    const assistantPrefixTokens = cloned.slice(0, lastAssistant + 1).reduce((total, message) =>
+      total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0);
+    if (assistantPrefixTokens >= 1024) {
+      cloned[lastAssistant] = { ...cloned[lastAssistant], content: [{ type: "text", text: cloned[lastAssistant].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+    }
+  }
   // Write the current request's stable prefix now. On the next turn the same
   // user block is present in history, so even the second turn can read it.
   // Images are intentionally excluded: their data is not persisted in history.
@@ -657,19 +667,28 @@ async function checkCacheKeepalive() {
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
     const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
-    const prefix = history.slice(0, history.indexOf(lastUser) + 1).map((message) => ({
-      role: message.role, content: message.modelContent || message.content
-    }));
-    const keepaliveMessages = cachedRequest || [{ role: "system", content: thread.cacheSystem }, ...prefix];
+    const lastAssistant = history[history.length - 1];
+    if (!cachedRequest?.length || cachedRequest.at(-1)?.role !== "user" ||
+        cachedRequest.at(-1)?.content !== lastUser.modelContent ||
+        history.at(-2)?.id !== lastUser.id ||
+        lastAssistant?.role !== "assistant" || typeof lastAssistant.modelContent !== "string") {
+      return { attempted: false, reason: "no_matching_chat_snapshot" };
+    }
+    // The probe's suffix differs from a real user message. Both requests mark
+    // the assistant block immediately before it, so they share the same prefix.
+    const keepaliveMessages = [...cachedRequest,
+      { role: "assistant", content: lastAssistant.modelContent },
+      { role: "user", content: "[缓存保活，请简短回复。]" }];
     if (messageTokens(keepaliveMessages) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
     keepaliveState.attempts += 1;
-    // Replay the exact request prefix captured from the last real chat. This prevents
-    // history serialization or display cleanup from creating a different ZenMux cache key.
+    // Read the cached user prefix, then extend it through the exact assistant
+    // reply that the next real chat will send as history.
     await callModel({
       messages: keepaliveMessages,
       maxOutputTokens: 16,
-      temperature: 0
+      temperature: 0,
+      cacheCurrentUser: false
     });
     const readTokens = Number(cacheStats.lastUsage?.cache_read_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cached_tokens || 0);
     const writeTokens = Number(cacheStats.lastUsage?.cache_creation_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
