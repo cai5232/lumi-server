@@ -572,9 +572,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
   }));
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
-  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}`;
-  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的内容</speech>。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}`;
+  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得用声音说这条回复，不要每条都配语音；决定使用时才在回复最后附加 <speech>实际要朗读的内容</speech>。如果本轮标记为 false，禁止输出 speech 标签。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。`;
   const cacheRequestStartedAt = Date.now();
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
