@@ -32,7 +32,9 @@ let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
-const legacyRetryWindowMs = 20_000;
+// Older iOS builds may retry a timed-out POST more than a minute later.
+// Keep exact-body results long enough to cover their three attempts.
+const legacyRetryWindowMs = 3 * 60_000;
 let memoryCookie = "";
 
 const seed = () => ({
