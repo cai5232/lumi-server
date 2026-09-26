@@ -624,7 +624,9 @@ async function checkCacheKeepalive() {
     const history = contextMessages(thread);
     const lastUser = [...history].reverse().find((message) => message.role === "user");
     lastUserMessageId = lastUser?.id || "";
-    if (!lastUser || history.some((message) => message.imageAttachmentCount) ||
+    // Older image turns are represented as saved text in subsequent requests.
+    // Only an image on the latest user turn lacks its original image blocks.
+    if (!lastUser || lastUser.imageAttachmentCount ||
         keepaliveState.disabledForMessageId === lastUser.id) return;
     const lastRealAt = Date.parse(lastUser.createdAt);
     const lastRequestAt = keepaliveState.lastThreadId === id && keepaliveState.lastRequestAt
