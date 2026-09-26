@@ -43,6 +43,9 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
   const dataDir = await mkdtemp(join(tmpdir(), "lumi-cache-test-"));
   const seen = [];
   const cache = new Set();
+  let releaseSecondKeepalive;
+  let secondKeepaliveArrived;
+  const secondKeepaliveStarted = new Promise((resolve) => { secondKeepaliveArrived = resolve; });
   const provider = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -55,11 +58,15 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     const plain = body.messages.map((message) => ({ role: message.role, content: typeof message.content === "string" ? message.content : message.content.map((block) => block.text) }));
     const breakpoints = body.messages.flatMap((message, index) =>
       Array.isArray(message.content) && message.content.some((block) => block.cache_control) ? [index] : []);
-    const keys = breakpoints.map((index) => JSON.stringify(plain.slice(0, index + 1)));
+    const keys = breakpoints.map((index) => JSON.stringify({ model: body.model, prefix: plain.slice(0, index + 1) }));
     const hitKey = keys.filter((key) => cache.has(key)).at(-1);
     const hit = Boolean(hitKey);
     for (const key of keys) cache.add(key);
     seen.push({ plain, breakpoints, keys, hit, hitKey });
+    if (seen.length === 3) {
+      secondKeepaliveArrived();
+      await new Promise((resolve) => { releaseSecondKeepalive = resolve; });
+    }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ choices: [{ message: { content: "AI 原始回复" } }], usage: { cache_read_input_tokens: hit ? 2048 : 0, cache_creation_input_tokens: hit ? 256 : 2048 } }));
   });
@@ -98,6 +105,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.equal(keepalive.hit, true, JSON.stringify(keepalive));
     assert.equal(seen[1].hit, true);
     const assistantKey = seen[1].keys.at(-1);
+    assert.ok(assistantKey.includes("AI 原始回复"), "the refreshed boundary must contain the assistant response");
     assert.deepEqual(seen[1].plain.at(-2).content, [first.assistantMessage.modelContent]);
     await stopBackend(child);
     child = undefined;
@@ -105,15 +113,23 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     refreshedThreads.default.cacheKeepaliveAt = Date.now() - 46 * 60_000;
     await writeFile(path, JSON.stringify(refreshedThreads));
     child = await startBackend(port, env);
-    const secondKeepalive = await fetch(`${base}/v1/internal/cache-keepalive`, {
+    const secondKeepaliveRequest = fetch(`${base}/v1/internal/cache-keepalive`, {
       method: "POST", headers: { authorization: "Bearer test" }
     }).then((response) => response.json());
+    await secondKeepaliveStarted;
+    const nextChatRequest = chat("第二条消息", "稳定的系统提示词".repeat(500));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(seen.length, 3, "a real chat must wait for the running keepalive");
+    releaseSecondKeepalive();
+    const secondKeepalive = await secondKeepaliveRequest;
     assert.equal(secondKeepalive.hit, true, JSON.stringify(secondKeepalive));
     assert.equal(seen[2].hitKey, assistantKey, "later keepalives must read the assistant prefix");
-    const next = await chat("第二条消息", "稳定的系统提示词".repeat(500));
+    const next = await nextChatRequest;
     assert.ok(next.assistantMessage, JSON.stringify(next));
     assert.equal(seen[3].hit, true);
     assert.equal(seen[3].hitKey, assistantKey, "the next chat must read the assistant prefix");
+    const finalThreads = JSON.parse(await readFile(path, "utf8"));
+    assert.equal(finalThreads.default.messages.at(-1).id, next.assistantMessage.id, "keepalive must not overwrite the chat");
   } finally {
     await stopBackend(child);
     await new Promise((resolve) => provider.close(resolve));

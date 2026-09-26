@@ -25,6 +25,9 @@ const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
+let keepaliveDone = Promise.resolve();
+let finishKeepalive = null;
+let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null };
 let proactiveCheckInFlight = false;
@@ -291,7 +294,7 @@ function contextMessages(thread) {
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage }) {
   const configuredURL = process.env.LUMI_MODEL_API_URL;
   const apiKey = process.env.LUMI_MODEL_API_KEY;
   const model = process.env.LUMI_MODEL_NAME;
@@ -343,6 +346,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
+  if (onUsage) onUsage(usage);
   cacheStats.lastUsage = usage;
   cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
@@ -642,11 +646,12 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
 }
 
 async function checkCacheKeepalive() {
-  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || proactiveCheckInFlight ||
+  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || chatRequestsInFlight || proactiveCheckInFlight ||
       !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return { attempted: false, reason: "disabled_or_busy" };
   const id = "default";
   if (activeChatThreads.has(id)) return { attempted: false, reason: "chat_in_progress" };
   keepaliveInFlight = true;
+  keepaliveDone = new Promise((resolve) => { finishKeepalive = resolve; });
   let lastUserMessageId = "";
   try {
     const threads = await readThreads();
@@ -684,14 +689,16 @@ async function checkCacheKeepalive() {
     keepaliveState.attempts += 1;
     // Read the cached user prefix, then extend it through the exact assistant
     // reply that the next real chat will send as history.
+    let keepaliveUsage = {};
     await callModel({
       messages: keepaliveMessages,
       maxOutputTokens: 16,
       temperature: 0,
-      cacheCurrentUser: false
+      cacheCurrentUser: false,
+      onUsage: (usage) => { keepaliveUsage = usage; }
     });
-    const readTokens = Number(cacheStats.lastUsage?.cache_read_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cached_tokens || 0);
-    const writeTokens = Number(cacheStats.lastUsage?.cache_creation_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
+    const readTokens = Number(keepaliveUsage.cache_read_input_tokens || keepaliveUsage.prompt_tokens_details?.cached_tokens || 0);
+    const writeTokens = Number(keepaliveUsage.cache_creation_input_tokens || keepaliveUsage.prompt_tokens_details?.cache_creation_input_tokens || 0);
     thread.cacheKeepaliveAt = startedAt;
     await saveThreads(threads);
     keepaliveState.lastThreadId = id;
@@ -714,7 +721,11 @@ async function checkCacheKeepalive() {
     keepaliveState.lastError = String(error.message || error).slice(0, 200);
     console.warn(`cache keepalive skipped: ${keepaliveState.lastError}`);
     return { attempted: false, reason: "error", error: keepaliveState.lastError };
-  } finally { keepaliveInFlight = false; }
+  } finally {
+    keepaliveInFlight = false;
+    finishKeepalive();
+    finishKeepalive = null;
+  }
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
@@ -816,6 +827,14 @@ const server = createServer(async (req, res) => {
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
     const id = decodeURIComponent(match[1]);
+    const isChatPost = req.method === "POST" && Boolean(match[2]);
+    // Let an already running probe finish before reading history. Reserve the
+    // chat before any asynchronous work so a new probe cannot overtake it.
+    if (isChatPost) {
+      if (id === "default" && keepaliveInFlight) await keepaliveDone;
+      chatRequestsInFlight += 1;
+    }
+    try {
     const threads = await readThreads();
     if (!threads[id]) threads[id] = { id, title: "新聊天", messages: [] };
     if (req.method === "GET" && !match[2]) return send(res, 200, threads[id]);
@@ -900,6 +919,7 @@ const server = createServer(async (req, res) => {
       }
     }
     return send(res, 405, { error: "method_not_allowed" });
+    } finally { if (isChatPost) chatRequestsInFlight -= 1; }
   } catch (error) { return send(res, 500, { error: error.message }); }
 });
 
