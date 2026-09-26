@@ -336,7 +336,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
   cacheStats.lastUsage = usage;
-  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
+  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
   const content = nativeAnthropic
@@ -371,6 +371,16 @@ function cacheMessages(messages, model) {
   // can be read from cache on the next request.
   if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+  }
+  // Write the current request's stable prefix now. On the next turn the same
+  // user block is present in history, so even the second turn can read it.
+  // Images are intentionally excluded: their data is not persisted in history.
+  if (lastUser >= 0 && typeof cloned[lastUser].content === "string") {
+    const currentPrefixTokens = cloned.slice(0, lastUser + 1).reduce((total, message) =>
+      total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0);
+    if (currentPrefixTokens >= 1024) {
+      cloned[lastUser] = { ...cloned[lastUser], content: [{ type: "text", text: cloned[lastUser].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+    }
   }
   return cloned;
 }
