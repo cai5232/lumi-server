@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
 import { createServer } from "node:http";
 
@@ -31,6 +31,8 @@ let proactiveCheckInFlight = false;
 let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
+const recentMessageRequests = new Map();
+const legacyRetryWindowMs = 20_000;
 let memoryCookie = "";
 
 const seed = () => ({
@@ -681,7 +683,7 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
   res.end(JSON.stringify(body));
 }
 
@@ -756,9 +758,33 @@ const server = createServer(async (req, res) => {
       const input = await body(req);
       const images = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : [];
       if ((!input.content || !String(input.content).trim()) && !images.length) return send(res, 400, { error: "content_or_image_required" });
+      const requestId = String(req.headers["idempotency-key"] || "");
+      if (requestId && !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) return send(res, 400, { error: "invalid_idempotency_key" });
+      if (requestId) {
+        const previousIndex = threads[id].messages.findIndex((message) => message.role === "user" && message.requestId === requestId);
+        if (previousIndex >= 0) {
+          const userMessage = threads[id].messages[previousIndex];
+          const assistantMessage = threads[id].messages[previousIndex + 1];
+          if (assistantMessage?.role !== "assistant") return send(res, 409, { error: "incomplete_previous_request" });
+          return send(res, 200, { userMessage, assistantMessage, memorySaved: false, speechAudioBase64: null, speechDuration: null, speechScript: null });
+        }
+      }
+      // Older iOS builds retry the exact same POST up to three times. Coalesce
+      // identical requests for a short window until those clients are updated.
+      const fingerprint = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+      const key = `${id}:${requestId || fingerprint}`;
+      for (const [storedKey, entry] of recentMessageRequests) {
+        if (entry.expiresAt <= Date.now()) recentMessageRequests.delete(storedKey);
+      }
+      const previous = recentMessageRequests.get(key);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
+        return send(res, 200, await previous.result);
+      }
+      const result = (async () => {
       const messageText = String(input.content || "").trim();
       const userMessage = { id: randomUUID(), role: "user", content: messageText || "（发送了图片）", createdAt: new Date().toISOString() };
-      const storedUserMessage = images.length ? { ...userMessage, imageAttachmentCount: images.length } : userMessage;
+      const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       activeChatThreads.add(id);
       try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
@@ -792,7 +818,18 @@ const server = createServer(async (req, res) => {
         proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
         await saveProactiveSettings();
       }
-      return send(res, 200, { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null });
+      return { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
+      })();
+      recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
+      try {
+        const response = await result;
+        const entry = recentMessageRequests.get(key);
+        if (entry?.result === result) entry.expiresAt = Date.now() + (requestId ? 5 * 60_000 : legacyRetryWindowMs);
+        return send(res, 200, response);
+      } catch (error) {
+        if (recentMessageRequests.get(key)?.result === result) recentMessageRequests.delete(key);
+        throw error;
+      }
     }
     return send(res, 405, { error: "method_not_allowed" });
   } catch (error) { return send(res, 500, { error: error.message }); }
