@@ -20,6 +20,11 @@ const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
+const keepaliveEnabled = process.env.LUMI_CACHE_KEEPALIVE_ENABLED === "true";
+const keepaliveIntervalMs = cacheTTL === "1h" ? 50 * 60_000 : 4 * 60_000;
+const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 2 * 60 * 60_000 : 12 * 60_000));
+const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
+let keepaliveInFlight = false;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null };
 let proactiveCheckInFlight = false;
@@ -282,7 +287,7 @@ function contextMessages(thread) {
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true }) {
   const configuredURL = process.env.LUMI_MODEL_API_URL;
   const apiKey = process.env.LUMI_MODEL_API_KEY;
   const model = process.env.LUMI_MODEL_NAME;
@@ -309,7 +314,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
     }).filter(Boolean);
     return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
-  const preparedMessages = cacheMessages(providerMessages, model);
+  const preparedMessages = cacheMessages(providerMessages, model, cacheCurrentUser);
   const requestBody = nativeAnthropic
     ? {
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
@@ -336,7 +341,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens }) {
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
   cacheStats.lastUsage = usage;
-  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || usage?.cache_read_input_tokens || 0);
+  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || 0);
   cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
   const content = nativeAnthropic
@@ -354,7 +359,7 @@ function zenmuxAnthropicModel(model) {
   return normalized;
 }
 
-function cacheMessages(messages, model) {
+function cacheMessages(messages, model, cacheCurrentUser = true) {
   if (!promptCacheEnabled || !/anthropic|claude/i.test(String(model))) return messages;
   const cloned = messages.map((message) => ({ ...message }));
   const firstSystem = cloned.findIndex((message) => message.role === "system");
@@ -371,6 +376,16 @@ function cacheMessages(messages, model) {
   // can be read from cache on the next request.
   if (cacheBoundary >= 0 && typeof cloned[cacheBoundary].content === "string" && prefixTokens >= 1024) {
     cloned[cacheBoundary] = { ...cloned[cacheBoundary], content: [{ type: "text", text: cloned[cacheBoundary].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+  }
+  // Write the current request's stable prefix now. On the next turn the same
+  // user block is present in history, so even the second turn can read it.
+  // Images are intentionally excluded: their data is not persisted in history.
+  if (cacheCurrentUser && lastUser >= 0 && typeof cloned[lastUser].content === "string") {
+    const currentPrefixTokens = cloned.slice(0, lastUser + 1).reduce((total, message) =>
+      total + estimateCacheTokens(typeof message.content === "string" ? message.content : JSON.stringify(message.content)), 0);
+    if (currentPrefixTokens >= 1024) {
+      cloned[lastUser] = { ...cloned[lastUser], content: [{ type: "text", text: cloned[lastUser].content, cache_control: { type: "ephemeral", ttl: cacheTTL } }] };
+    }
   }
   return cloned;
 }
@@ -568,10 +583,12 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}`;
+  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的内容</speech>。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}`;
+  const cacheRequestStartedAt = Date.now();
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
     messages: [
-      { role: "system", content: `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的内容</speech>。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}` },
+      { role: "system", content: cacheSystem },
       ...history,
       // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
       // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
@@ -596,7 +613,57 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // <speech> is the model's opt-in signal only. Always speak the complete visible reply;
   // the speech tag itself can accidentally contain just the greeting or first clause.
   const speechText = speechMatch ? replyForSpeech : "";
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, userModelContent };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, userModelContent, cacheSystem, cacheRequestStartedAt };
+}
+
+async function checkCacheKeepalive() {
+  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || proactiveCheckInFlight ||
+      !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return;
+  const id = "default";
+  if (activeChatThreads.has(id)) return;
+  keepaliveInFlight = true;
+  let lastUserMessageId = "";
+  try {
+    const thread = (await readThreads())[id];
+    if (!thread?.cacheSystem || thread.cacheModel !== process.env.LUMI_MODEL_NAME) return;
+    const history = contextMessages(thread);
+    const lastUser = [...history].reverse().find((message) => message.role === "user");
+    lastUserMessageId = lastUser?.id || "";
+    if (!lastUser || history.some((message) => message.imageAttachmentCount) ||
+        keepaliveState.disabledForMessageId === lastUser.id) return;
+    const lastRealAt = Date.parse(lastUser.createdAt);
+    const lastRequestAt = keepaliveState.lastThreadId === id && keepaliveState.lastRequestAt
+      ? keepaliveState.lastRequestAt : thread.cacheRequestStartedAt;
+    if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
+        Date.now() - lastRealAt > keepaliveMaxIdleMs ||
+        Date.now() - lastRequestAt < keepaliveIntervalMs ||
+        Date.now() - lastRequestAt >= (cacheTTL === "1h" ? 60 : 5) * 60_000) return;
+    const prefix = history.slice(0, history.indexOf(lastUser) + 1).map((message) => ({
+      role: message.role, content: message.modelContent || message.content
+    }));
+    if (messageTokens(prefix) + estimateTokens(thread.cacheSystem) < 1024) return;
+    const startedAt = Date.now();
+    keepaliveState.attempts += 1;
+    await callModel({ messages: [
+      { role: "system", content: thread.cacheSystem }, ...prefix,
+      { role: "user", content: "【系统】缓存保活探测。只回复一个句号。" }
+    ], maxOutputTokens: 16, temperature: 0, cacheCurrentUser: false });
+    const readTokens = Number(cacheStats.lastUsage?.cache_read_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cached_tokens || 0);
+    const writeTokens = Number(cacheStats.lastUsage?.cache_creation_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
+    keepaliveState.lastThreadId = id;
+    keepaliveState.lastRequestAt = startedAt;
+    keepaliveState.lastAt = new Date(startedAt).toISOString();
+    keepaliveState.lastReadTokens = readTokens;
+    keepaliveState.lastWriteTokens = writeTokens;
+    keepaliveState.readTokens += readTokens;
+    keepaliveState.writeTokens += writeTokens;
+    if (readTokens > 0) { keepaliveState.successes += 1; keepaliveState.lastError = ""; }
+    else { keepaliveState.disabledForMessageId = lastUser.id; keepaliveState.lastError = "模型未报告缓存读取；已停止本轮保活"; }
+  } catch (error) {
+    if (lastUserMessageId) keepaliveState.disabledForMessageId = lastUserMessageId;
+    keepaliveState.lastError = String(error.message || error).slice(0, 200);
+    console.warn(`cache keepalive skipped: ${keepaliveState.lastError}`);
+  } finally { keepaliveInFlight = false; }
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
@@ -676,7 +743,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       htmlCards: "separate-content-title-v1",
       cache: {
-      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v2", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
@@ -706,6 +773,12 @@ const server = createServer(async (req, res) => {
       try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
       storedUserMessage.modelContent = generated.userModelContent;
+      threads[id].cacheSystem = generated.cacheSystem;
+      threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
+      threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
+      keepaliveState.lastThreadId = id;
+      keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
+      keepaliveState.disabledForMessageId = "";
       const contentType = generated.htmlContent ? (generated.content ? "mixed" : "html") : "text";
       let speech = null;
       if (input.tts?.enabled && generated.speechText && !generated.htmlContent) {
@@ -739,3 +812,4 @@ await loadProactiveSettings();
 await loadPushTokens();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 setInterval(() => { void checkProactiveNudge(); }, 60_000);
+setInterval(() => { void checkCacheKeepalive(); }, 60_000);

@@ -29,6 +29,8 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
 - `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `1h`，也可填 `5m`；Zeabur 中显式设置的变量优先于代码默认值
+- `LUMI_CACHE_KEEPALIVE_ENABLED`：可选，设为 `true` 才启动模型缓存保活；保活会产生付费模型请求，默认关闭
+- `LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS`：可选，最后一条真实用户消息之后最多保活多久；`1h` 缓存默认 2 小时，`5m` 缓存默认 12 分钟
 - `LUMI_COMPACT_TAIL_TOKENS`：上下文压缩后保留的完整最近对话轮 token 预算，默认 `20000`
 - `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
 - `LUMI_APNS_KEY_ID`、`LUMI_APNS_TEAM_ID`、`LUMI_APNS_PRIVATE_KEY_BASE64`：Apple 推送凭据
@@ -50,6 +52,7 @@ Zeabur 环境变量：
 - `POST /v1/push/register`，需要同一 Bearer 口令；由 App 自动登记 iOS 推送令牌
 
 `GET /health` 会返回 Prompt Cache 的读写 token、缓存命中率和记忆检索缓存命中次数，便于确认缓存是否真正生效。缓存命中率按 `cache_read / (cache_read + cache_creation)` 计算，没有样本时返回 `null`。
+开启保活后，后端仅对默认聊天在缓存仍可能有效、没有图片历史且空闲时间未超限时，按 `1h` 档约 50 分钟或 `5m` 档约 4 分钟发送一次短模型探测。探测复用最近用户消息之前的原始系统提示及历史前缀，不写入用户可见聊天；模型必须成功返回，且报告缓存读取 token，才继续后续保活。`/health` 中 `cache.prompt.keepalive` 单独显示尝试数、命中数、累计与最近一次缓存读取和重写 token，以及最近错误；计数在进程重启后清零。普通 `/health` 请求不会触发保活。第三方模型网关可能不透传缓存控制或命中统计，此时不会继续付费探测。长期不聊天时，关闭保活通常更省钱。
 Claude 缓存按稳定的系统提示词和历史消息设置断点；每次变化的时间戳、检索到的记忆和本轮输入放在断点之后，并把发送给模型的原文保存在服务端历史中，保证下一轮的缓存前缀完全一致。连续请求是否命中以模型返回的 `cache_read_input_tokens` 为准，首次写入、提示词改动或过期后的请求仍会产生缓存写入费用。
 同一个健康接口也返回上下文压缩次数、当前活跃历史 token 估算及触发阈值。默认历史达到 200k 窗口的 85% 时蒸馏较早内容，保留最近约 20k token 的完整对话；摘要最多输出 25k token，并与后续新增历史继续融合。摘要生成会产生一次额外模型调用。
 
