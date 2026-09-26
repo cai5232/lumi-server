@@ -656,10 +656,13 @@ async function checkCacheKeepalive() {
     if (messageTokens(prefix) + estimateTokens(thread.cacheSystem) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
     keepaliveState.attempts += 1;
-    await callModel({ messages: [
-      { role: "system", content: thread.cacheSystem }, ...prefix,
-      { role: "user", content: "【系统】缓存保活探测。只回复一个句号。" }
-    ], maxOutputTokens: 16, temperature: 0, cacheCurrentUser: false });
+    // Replay the exact cached chat prefix. Adding a synthetic probe message after the
+    // breakpoint caused ZenMux to treat the keepalive as a new cache chain.
+    await callModel({
+      messages: [{ role: "system", content: thread.cacheSystem }, ...prefix],
+      maxOutputTokens: 16,
+      temperature: 0
+    });
     const readTokens = Number(cacheStats.lastUsage?.cache_read_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cached_tokens || 0);
     const writeTokens = Number(cacheStats.lastUsage?.cache_creation_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
     thread.cacheKeepaliveAt = startedAt;
