@@ -22,7 +22,7 @@ const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
 const keepaliveEnabled = process.env.LUMI_CACHE_KEEPALIVE_ENABLED === "true";
 const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
-const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 2 * 60 * 60_000 : 12 * 60_000));
+const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
