@@ -30,7 +30,7 @@ Zeabur 环境变量：
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
 - `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `1h`，也可填 `5m`；Zeabur 中显式设置的变量优先于代码默认值
 - `LUMI_CACHE_KEEPALIVE_ENABLED`：可选，设为 `true` 才启动模型缓存保活；保活会产生付费模型请求，默认关闭
-- `LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS`：可选，最后一条真实用户消息之后最多保活多久；`1h` 缓存默认 2 小时，`5m` 缓存默认 12 分钟
+- `LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS`：可选，最后一条真实用户消息之后最多保活多久；`1h` 缓存默认 24 小时，`5m` 缓存默认 12 分钟
 - `LUMI_COMPACT_TAIL_TOKENS`：上下文压缩后保留的完整最近对话轮 token 预算，默认 `20000`
 - `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
 - `LUMI_APNS_KEY_ID`、`LUMI_APNS_TEAM_ID`、`LUMI_APNS_PRIVATE_KEY_BASE64`：Apple 推送凭据
