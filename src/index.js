@@ -324,8 +324,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
         max_tokens: Number(maxOutputTokens || process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
-        messages: preparedMessages.filter((message) => message.role !== "system"),
-        temperature
+        messages: preparedMessages.filter((message) => message.role !== "system")
       }
     : { model, messages: preparedMessages, temperature, ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
