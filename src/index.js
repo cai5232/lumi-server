@@ -554,15 +554,15 @@ function chooseEmojiFromMood(mood, faces, reply) {
 
 function spokenReply(content) {
   return String(content)
-    .replace(/<thinking>[\\s\\S]*?<\\/thinking>/gi, "")
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, "")
     // Stage directions are visible in text, but must never be read aloud.
-    .replace(/[（(][^（）()\\n]{0,80}(?:摸|抱|亲|靠|搂|抚|揉|蹭|望|笑|拍|吻|低头|轻轻)[^（）()\\n]{0,80}[）)]/g, "")
-    .replace(/(?:^|\\n)\\s*(?:\\*[^*\\n]{1,80}\\*|[（(][^）)\\n]{1,80}[）)])\\s*(?=\\n|$)/g, "\\n")
-    .split(/\\n+/)
+    .replace(/[（(][^（）()\n]{0,80}(?:摸|抱|亲|靠|搂|抚|揉|蹭|望|笑|拍|吻|低头|轻轻)[^（）()\n]{0,80}[）)]/g, "")
+    .replace(/(?:^|\n)\s*(?:\*[^*\n]{1,80}\*|[（(][^）)\n]{1,80}[）)])\s*(?=\n|$)/g, "\n")
+    .split(/\n+/)
     .map((line) => line.trim())
     .filter(Boolean)
     .reduce((spoken, line) => spoken ? `${spoken}${/[。！？!?，,；;：:]$/.test(spoken) ? "" : "，"}${line}` : line, "")
-    .replace(/\\s+/g, " ")
+    .replace(/\s+/g, " ")
     .trim();
 }
 
