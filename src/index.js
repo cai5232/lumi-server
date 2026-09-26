@@ -21,7 +21,7 @@ const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
 const keepaliveEnabled = process.env.LUMI_CACHE_KEEPALIVE_ENABLED === "true";
-const keepaliveIntervalMs = cacheTTL === "1h" ? 50 * 60_000 : 4 * 60_000;
+const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 2 * 60 * 60_000 : 12 * 60_000));
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
@@ -635,32 +635,35 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
 
 async function checkCacheKeepalive() {
   if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || proactiveCheckInFlight ||
-      !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return;
+      !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return { attempted: false, reason: "disabled_or_busy" };
   const id = "default";
-  if (activeChatThreads.has(id)) return;
+  if (activeChatThreads.has(id)) return { attempted: false, reason: "chat_in_progress" };
   keepaliveInFlight = true;
   let lastUserMessageId = "";
   try {
-    const thread = (await readThreads())[id];
-    if (!thread?.cacheSystem || thread.cacheModel !== process.env.LUMI_MODEL_NAME) return;
+    const threads = await readThreads();
+    const thread = threads[id];
+    if (!thread?.cacheSystem || thread.cacheModel !== process.env.LUMI_MODEL_NAME) return { attempted: false, reason: "no_matching_chat_cache" };
     const history = contextMessages(thread);
     const lastUser = [...history].reverse().find((message) => message.role === "user");
     lastUserMessageId = lastUser?.id || "";
-    // Older image turns are represented as saved text in subsequent requests.
-    // Only an image on the latest user turn lacks its original image blocks.
     if (!lastUser || lastUser.imageAttachmentCount ||
-        keepaliveState.disabledForMessageId === lastUser.id) return;
+        keepaliveState.disabledForMessageId === lastUser.id) return { attempted: false, reason: "latest_turn_not_eligible" };
     const lastRealAt = Date.parse(lastUser.createdAt);
-    const lastRequestAt = keepaliveState.lastThreadId === id && keepaliveState.lastRequestAt
-      ? keepaliveState.lastRequestAt : thread.cacheRequestStartedAt;
+    const lastRequestAt = Math.max(
+      Number(thread.cacheRequestStartedAt || 0),
+      Number(thread.cacheKeepaliveAt || 0),
+      keepaliveState.lastThreadId === id ? Number(keepaliveState.lastRequestAt || 0) : 0
+    );
+    const ttlMs = cacheTTL === "1h" ? 60 * 60_000 : 5 * 60_000;
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
-        Date.now() - lastRealAt > keepaliveMaxIdleMs ||
-        Date.now() - lastRequestAt < keepaliveIntervalMs ||
-        Date.now() - lastRequestAt >= (cacheTTL === "1h" ? 60 : 5) * 60_000) return;
+        Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
+    if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
+    if (Date.now() - lastRequestAt >= ttlMs) return { attempted: false, reason: "cache_window_elapsed" };
     const prefix = history.slice(0, history.indexOf(lastUser) + 1).map((message) => ({
       role: message.role, content: message.modelContent || message.content
     }));
-    if (messageTokens(prefix) + estimateTokens(thread.cacheSystem) < 1024) return;
+    if (messageTokens(prefix) + estimateTokens(thread.cacheSystem) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
     keepaliveState.attempts += 1;
     await callModel({ messages: [
@@ -669,6 +672,8 @@ async function checkCacheKeepalive() {
     ], maxOutputTokens: 16, temperature: 0, cacheCurrentUser: false });
     const readTokens = Number(cacheStats.lastUsage?.cache_read_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cached_tokens || 0);
     const writeTokens = Number(cacheStats.lastUsage?.cache_creation_input_tokens || cacheStats.lastUsage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
+    thread.cacheKeepaliveAt = startedAt;
+    await saveThreads(threads);
     keepaliveState.lastThreadId = id;
     keepaliveState.lastRequestAt = startedAt;
     keepaliveState.lastAt = new Date(startedAt).toISOString();
@@ -676,12 +681,19 @@ async function checkCacheKeepalive() {
     keepaliveState.lastWriteTokens = writeTokens;
     keepaliveState.readTokens += readTokens;
     keepaliveState.writeTokens += writeTokens;
-    if (readTokens > 0) { keepaliveState.successes += 1; keepaliveState.lastError = ""; }
-    else { keepaliveState.disabledForMessageId = lastUser.id; keepaliveState.lastError = "模型未报告缓存读取；已停止本轮保活"; }
+    if (readTokens > 0) {
+      keepaliveState.successes += 1;
+      keepaliveState.lastError = "";
+      return { attempted: true, hit: true, readTokens, writeTokens };
+    }
+    keepaliveState.disabledForMessageId = lastUser.id;
+    keepaliveState.lastError = "模型未报告缓存读取；已停止本轮保活";
+    return { attempted: true, hit: false, readTokens, writeTokens };
   } catch (error) {
     if (lastUserMessageId) keepaliveState.disabledForMessageId = lastUserMessageId;
     keepaliveState.lastError = String(error.message || error).slice(0, 200);
     console.warn(`cache keepalive skipped: ${keepaliveState.lastError}`);
+    return { attempted: false, reason: "error", error: keepaliveState.lastError };
   } finally { keepaliveInFlight = false; }
 }
 
@@ -723,6 +735,13 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/internal/cache-keepalive" && req.method === "POST") {
+      const expected = String(process.env.LUMI_CACHE_KEEPALIVE_TOKEN || process.env.LUMI_PUSH_API_TOKEN || "");
+      const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+      if (!expected || !supplied || expected.length !== supplied.length ||
+          !timingSafeEqual(Buffer.from(expected), Buffer.from(supplied))) return send(res, 401, { error: "unauthorized" });
+      return send(res, 200, await checkCacheKeepalive());
+    }
     if (["/v1/settings/proactive", "/v1/push/register"].includes(url.pathname) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
