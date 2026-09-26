@@ -595,17 +595,18 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}`;
   const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
+  const cacheRequestMessages = [
+    { role: "system", content: cacheSystem },
+    ...history,
+    // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
+    // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
+    // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
+    { role: "user", content: userModelContent, images }
+  ];
   const cacheRequestStartedAt = Date.now();
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
-    messages: [
-      { role: "system", content: cacheSystem },
-      ...history,
-      // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
-      // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
-      // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
-      { role: "user", content: userModelContent, images }
-    ]
+    messages: cacheRequestMessages
   });
   const cleanedRaw = withoutSpeechPlanning(raw);
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
@@ -624,7 +625,10 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const speechText = speechMatch ? spokenReply(speechMatch[1]) : "";
   // Preserve the exact provider text for the next request's cache prefix. The
   // user-visible content is intentionally cleaned separately below.
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt };
+  // Snapshot the exact request prefix used for this chat turn. Keepalive replays
+  // this snapshot instead of reconstructing messages from stored display history.
+  const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages };
 }
 
 async function checkCacheKeepalive() {
@@ -652,16 +656,18 @@ async function checkCacheKeepalive() {
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
+    const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
     const prefix = history.slice(0, history.indexOf(lastUser) + 1).map((message) => ({
       role: message.role, content: message.modelContent || message.content
     }));
-    if (messageTokens(prefix) + estimateTokens(thread.cacheSystem) < 1024) return { attempted: false, reason: "prefix_too_short" };
+    const keepaliveMessages = cachedRequest || [{ role: "system", content: thread.cacheSystem }, ...prefix];
+    if (messageTokens(keepaliveMessages) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
     keepaliveState.attempts += 1;
-    // Replay the exact cached chat prefix. Adding a synthetic probe message after the
-    // breakpoint caused ZenMux to treat the keepalive as a new cache chain.
+    // Replay the exact request prefix captured from the last real chat. This prevents
+    // history serialization or display cleanup from creating a different ZenMux cache key.
     await callModel({
-      messages: [{ role: "system", content: thread.cacheSystem }, ...prefix],
+      messages: keepaliveMessages,
       maxOutputTokens: 16,
       temperature: 0
     });
@@ -833,6 +839,7 @@ const server = createServer(async (req, res) => {
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
+      threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
       keepaliveState.lastThreadId = id;
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
       keepaliveState.disabledForMessageId = "";
