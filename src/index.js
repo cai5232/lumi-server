@@ -1009,10 +1009,11 @@ const server = createServer(async (req, res) => {
         } catch {
           generated = { content: "没关系，你先忙，等你有空我们再说。", memorySaved: false };
         }
-        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", contentType: "call_status", callID: call.id, callInitiator: "assistant", callStatus: "rejected", createdAt: now };
-        thread.messages.push(assistantMessage);
+        const callStatusMessage = { id: randomUUID(), role: "assistant", content: "", contentType: "call_status", callID: call.id, callInitiator: "assistant", callStatus: "rejected", createdAt: now };
+        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", createdAt: now };
+        thread.messages.push(callStatusMessage, assistantMessage);
         await saveThreads(threads);
-        return send(res, 200, { callId: call.id, status: "declined", assistantMessage });
+        return send(res, 200, { callId: call.id, status: "declined", assistantMessage, callStatusMessage });
       }
       let generated;
       try {
@@ -1129,10 +1130,11 @@ const server = createServer(async (req, res) => {
       });
       const now = new Date().toISOString();
       if (generated.callDecision !== "accept") {
-        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "我现在不太方便接电话。", contentType: "call_status", callID: callId, callInitiator: "user", callStatus: "rejected", createdAt: now };
-        thread.messages.push(assistantMessage);
+        const callStatusMessage = { id: randomUUID(), role: "user", content: "", contentType: "call_status", callID: callId, callInitiator: "user", callStatus: "rejected", createdAt: now };
+        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "我现在不太方便接电话。", createdAt: now };
+        thread.messages.push(callStatusMessage, assistantMessage);
         await saveThreads(threads);
-        return send(res, 200, { callId, status: "rejected", assistantMessage, memorySaved: generated.memorySaved });
+        return send(res, 200, { callId, status: "rejected", assistantMessage, callStatusMessage, memorySaved: generated.memorySaved });
       }
       let speech = null;
       let speechError = null;
