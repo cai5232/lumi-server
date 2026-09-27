@@ -689,13 +689,14 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     : "";
   const relevantMessages = contextMessages(thread);
   const chatHistory = (proactive ? relevantMessages.slice(-8) : relevantMessages)
-    .filter((message) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim())
+    .filter((message) => message.role === "user" || message.role === "assistant")
     .map((message) => ({
       role: message.role,
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
       content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
-    }));
+    }))
+    .filter((message) => typeof message.content === "string" && message.content.trim());
   const phoneHistory = callMode && Array.isArray(callHistory)
     ? callHistory
         .filter((turn) => (turn?.role === "user" || turn?.role === "assistant") && typeof turn.content === "string" && turn.content.trim())
