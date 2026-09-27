@@ -676,7 +676,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const system = configuredSystem
     .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
     .replace(/你最喜欢最像你自己最常用的颜文字[^\n]*/g, "")
-    .trim();
+    .trim()
+    .concat("\n\n若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。");
   const summaryText = proactive ? String(thread.contextSummary || "").slice(-4000) : thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const memories = await searchMemories(input);
