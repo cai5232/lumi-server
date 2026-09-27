@@ -282,6 +282,11 @@ async function checkProactiveNudge() {
     thread.cacheRequestStartedAt = generated.cacheRequestStartedAt;
     thread.lastMeasuredInputTokens = generated.measuredInputTokens;
     thread.cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
+    // A proactive turn has an internal user suffix that must not appear in the
+    // visible history. Preserve the exact raw reply alongside its request
+    // snapshot so keepalive can extend this prefix without reconstructing it.
+    thread.cacheKeepaliveAssistantContent = generated.modelContent;
+    thread.cacheKeepaliveSnapshotKind = "proactive";
     thread.cacheLastChatContinuity = generated.cacheContinuity;
     const invite = dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
     await saveThreads(threads);
@@ -690,11 +695,14 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const configuredSystem = proactive && cachedSystemBase
     ? cachedSystemBase
     : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
-  const system = configuredSystem
+  const callDirective = "若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。";
+  let system = configuredSystem
     .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
     .replace(/你最喜欢最像你自己最常用的颜文字[^\n]*/g, "")
-    .trim()
-    .concat("\n\n若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。");
+    .trim();
+  // `cacheSystem` already contains this directive. Adding it again only for a
+  // proactive call changes the stable system prefix and guarantees a miss.
+  if (!system.includes(callDirective)) system = `${system}\n\n${callDirective}`;
   const summaryText = proactive ? String(thread.contextSummary || "").slice(-4000) : thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const memories = callMode ? [] : await searchMemories(input);
@@ -857,16 +865,20 @@ async function checkCacheKeepalive() {
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
     const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
     const lastAssistant = history[history.length - 1];
+    const snapshotAssistant = typeof thread.cacheKeepaliveAssistantContent === "string" && thread.cacheKeepaliveAssistantContent.trim()
+      ? thread.cacheKeepaliveAssistantContent
+      : lastAssistant?.modelContent;
+    const isProactiveSnapshot = thread.cacheKeepaliveSnapshotKind === "proactive";
     if (!cachedRequest?.length || cachedRequest.at(-1)?.role !== "user" ||
-        cachedRequest.at(-1)?.content !== lastUser.modelContent ||
-        history.at(-2)?.id !== lastUser.id ||
-        lastAssistant?.role !== "assistant" || typeof lastAssistant.modelContent !== "string") {
+        typeof snapshotAssistant !== "string" ||
+        (!isProactiveSnapshot && (cachedRequest.at(-1)?.content !== lastUser.modelContent ||
+          history.at(-2)?.id !== lastUser.id || lastAssistant?.role !== "assistant"))) {
       return { attempted: false, reason: "no_matching_chat_snapshot" };
     }
     // The probe's suffix differs from a real user message. Both requests mark
     // the assistant block immediately before it, so they share the same prefix.
     const keepaliveMessages = [...cachedRequest,
-      { role: "assistant", content: lastAssistant.modelContent },
+      { role: "assistant", content: snapshotAssistant },
       { role: "user", content: "[缓存保活，请简短回复。]" }];
     const assistantPrefixHash = assistantCachePrefixHash(keepaliveMessages, process.env.LUMI_MODEL_NAME);
     if (!assistantPrefixHash) return { attempted: false, reason: "assistant_cache_boundary_missing" };
@@ -1246,6 +1258,8 @@ const server = createServer(async (req, res) => {
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
       threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
+      threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
+      threads[id].cacheKeepaliveSnapshotKind = "chat";
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
