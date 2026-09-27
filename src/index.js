@@ -523,7 +523,8 @@ async function writeMemory(content, threadId) {
 async function compactThread(thread, pendingInput = "") {
   const messages = contextMessages(thread);
   const pendingTokens = pendingInput ? estimateTokens(pendingInput) + 8 : 0;
-  if (messageTokens(messages) + pendingTokens < compactAtTokens) return false;
+  if (messageTokens(messages) + pendingTokens < compactAtTokens &&
+      Number(thread.lastMeasuredInputTokens || 0) < compactAtTokens) return false;
 
   // Preserve whole user/assistant turns in the recent cache-friendly tail.
   let tail = [];
@@ -553,6 +554,7 @@ async function compactThread(thread, pendingInput = "") {
   thread.compactionCount = (thread.compactionCount || 0) + 1;
   thread.compactedAt = new Date().toISOString();
   thread.compactedThroughMessageId = older[older.length - 1].id;
+  thread.lastMeasuredInputTokens = 0;
   return true;
 }
 
@@ -646,10 +648,14 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       })()
     : null;
   const cacheRequestStartedAt = Date.now();
+  let measuredInputTokens = 0;
   const raw = await callModel({
     maxOutputTokens: proactive ? 256 : undefined,
     messages: cacheRequestMessages,
     onUsage: (usage) => {
+      measuredInputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0)
+        + Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0)
+        + Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
       if (!cacheContinuity) return;
       cacheContinuity.readTokens = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
       cacheContinuity.writeTokens = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
@@ -675,7 +681,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, modelContent: raw, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
 }
 
 async function checkCacheKeepalive() {
@@ -851,7 +857,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
       });
     }
     if (req.method === "POST" && url.pathname === "/v1/memories") {
@@ -913,6 +919,7 @@ const server = createServer(async (req, res) => {
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
+      threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
       threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
