@@ -219,6 +219,23 @@ async function createIncomingCallInvite(thread, reason) {
   return call;
 }
 
+function startIncomingCallRing(threadID, call) {
+  const deadline = new Date(call.expiresAt).getTime();
+  const ring = async () => {
+    if (Date.now() >= deadline) return;
+    try {
+      const threads = await readThreads();
+      const current = threads[threadID]?.calls?.find((item) => item.id === call.id);
+      if (!current || current.state !== "pending") return;
+      await sendProactivePush(threadID, `📞 ${call.reason} ·仍在响`, { kind: "incoming_call", callId: call.id });
+      setTimeout(() => { void ring(); }, 2_000);
+    } catch (error) {
+      console.warn(`incoming call ring stopped: ${error.message}`);
+    }
+  };
+  setTimeout(() => { void ring(); }, 2_000);
+}
+
 function chooseNudgeIntervalMs() {
   const min = Math.max(10, Number(proactiveSettings.intervalMin) || 60);
   const max = Math.max(min, Number(proactiveSettings.intervalMax) || min);
@@ -259,6 +276,7 @@ async function checkProactiveNudge() {
     thread.messages.push({ id: randomUUID(), role: "assistant", content: dial.content, createdAt: now });
     const invite = dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
     await saveThreads(threads);
+    if (invite) startIncomingCallRing(threadId, invite);
     proactiveSettings.scheduledForUserMessageId = lastUser.id;
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
@@ -1196,6 +1214,7 @@ const server = createServer(async (req, res) => {
       threads[id].messages.push(storedUserMessage, assistantMessage);
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       await saveThreads(threads);
+      if (invite) startIncomingCallRing(id, invite);
       if (proactiveSettings.threadId === id) {
         proactiveSettings.scheduledForUserMessageId = userMessage.id;
         proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
