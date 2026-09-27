@@ -712,10 +712,11 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const speechMatch = allowSpeech ? cleanedRaw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
   const callDecision = cleanedRaw.match(/<call_decision>\s*(accept|reject)\s*<\/call_decision>/i)?.[1]?.toLowerCase() || null;
+  const callUserText = cleanedRaw.match(/<call_user_text>([\s\S]*?)<\/call_user_text>/i)?.[1]?.trim() || null;
   const emojiMood = cleanedRaw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -729,7 +730,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
 }
 
 async function checkCacheKeepalive() {
@@ -929,11 +930,11 @@ const server = createServer(async (req, res) => {
       if (!call) return send(res, 404, { error: "call_not_found" });
       const transcript = call.turns.map((turn) => `${turn.role}: ${turn.content}`).join("\n").slice(-16000);
       const generated = await generateReply({
-        input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说：${spoken}\n\n自然回复。可以分成多段短句；它们会按顺序显示和朗读。不要解释内部标签。</internal_call_turn>`,
+        input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；它们会按顺序显示和朗读。不要解释内部标签。</internal_call_turn>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread, callMode: true
       });
       const now = new Date().toISOString();
-      const userTurn = { id: randomUUID(), role: "user", content: spoken, createdAt: now };
+      const userTurn = { id: randomUUID(), role: "user", content: generated.callUserText || spoken, createdAt: now };
       const assistantTurn = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: generated.content };
       call.turns.push(userTurn, assistantTurn);
       let speech = null;
