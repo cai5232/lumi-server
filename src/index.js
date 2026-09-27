@@ -918,6 +918,36 @@ const server = createServer(async (req, res) => {
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
     }
+    const callEndMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/([^/]+)\/end$/);
+    if (req.method === "POST" && callEndMatch) {
+      const [, rawThreadID, callID] = callEndMatch;
+      const threads = await readThreads();
+      const thread = threads[decodeURIComponent(rawThreadID)];
+      const call = thread?.calls?.find((item) => item.id === callID);
+      if (!call) return send(res, 404, { error: "call_not_found" });
+      if (call.recordMessage) {
+        return send(res, 200, { callId: call.id, duration: Number(call.duration || 0), recordMessage: call.recordMessage });
+      }
+      const endedAt = new Date().toISOString();
+      const duration = Math.max(0, (new Date(endedAt).getTime() - new Date(call.startedAt).getTime()) / 1000);
+      const transcript = (call.turns || []).map((turn) => `${turn.role === "user" ? "我" : "沈屿"}：${turn.content}`).join("\n");
+      const recordMessage = {
+        id: randomUUID(),
+        role: "assistant",
+        content: transcript || "这通电话没有留下文字记录。",
+        contentType: "call_record",
+        createdAt: endedAt,
+        callID: call.id,
+        callDuration: duration
+      };
+      call.state = "ended";
+      call.endedAt = endedAt;
+      call.duration = duration;
+      call.recordMessage = recordMessage;
+      thread.messages.push(recordMessage);
+      await saveThreads(threads);
+      return send(res, 200, { callId: call.id, duration, recordMessage });
+    }
     const callTurnMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/([^/]+)\/messages$/);
     if (req.method === "POST" && callTurnMatch) {
       const [, rawThreadID, callID] = callTurnMatch;
@@ -938,12 +968,15 @@ const server = createServer(async (req, res) => {
       const assistantTurn = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: generated.content };
       call.turns.push(userTurn, assistantTurn);
       let speech = null;
+      let speechError = null;
       if (input.tts?.enabled && generated.content) {
         try { speech = await synthesizeSpeech(generated.content, input.tts); }
-        catch (error) { console.warn(`call speech skipped: ${(error.message || String(error)).slice(0, 200)}`); }
+        catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call speech skipped: ${speechError}`); }
+      } else if (generated.content) {
+        speechError = "客户端没有提供 MiniMax TTS 配置";
       }
       await saveThreads(threads);
-      return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null });
+      return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -979,16 +1012,19 @@ const server = createServer(async (req, res) => {
         return send(res, 200, { callId, status: "rejected", assistantMessage, memorySaved: generated.memorySaved });
       }
       let speech = null;
+      let speechError = null;
       if (input.tts?.enabled && generated.content) {
         try { speech = await synthesizeSpeech(generated.content, input.tts); }
-        catch (error) { console.warn(`call opening speech skipped: ${(error.message || String(error)).slice(0, 200)}`); }
+        catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call opening speech skipped: ${speechError}`); }
+      } else if (generated.content) {
+        speechError = "客户端没有提供 MiniMax TTS 配置";
       }
       const opening = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: generated.content };
       const call = { id: callId, initiator: "user", state: "active", startedAt: now, turns: [opening] };
       thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
       thread.calls.push(call);
       await saveThreads(threads);
-      return send(res, 200, { callId, status: "accepted", firstMessage: opening, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, memorySaved: generated.memorySaved });
+      return send(res, 200, { callId, status: "accepted", firstMessage: opening, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError, memorySaved: generated.memorySaved });
     }
     if (req.method === "POST" && match[2]) {
       const input = await body(req);
