@@ -145,7 +145,7 @@ function apnsBearerToken() {
   return apnsJwtCache.token;
 }
 
-async function sendAPNs(device, message) {
+async function sendAPNs(device, message, metadata = null) {
   const host = device.environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
   const bearer = apnsBearerToken();
   const client = connect(host);
@@ -171,16 +171,16 @@ async function sendAPNs(device, message) {
       resolve({ status, body: responseBody });
     });
     request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
-    request.end(JSON.stringify({ aps: { alert: { title: "沈屿", body: String(message || "有一条新消息").replace(/<[^>]*>/g, "").slice(0, 220) }, sound: "default" } }));
+    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: String(message || "有一条新消息").replace(/<[^>]*>/g, "").slice(0, 220) }, sound: "default" }, ...(metadata || {}) }));
   });
 }
 
-async function sendProactivePush(threadId, message) {
+async function sendProactivePush(threadId, message, metadata = null) {
   if (!apnsConfigured()) { console.warn("proactive push skipped: APNs credentials are not configured"); return; }
   const targets = pushTokens.filter((item) => item.threadId === threadId);
   for (const device of targets) {
     try {
-      const result = await sendAPNs(device, message);
+      const result = await sendAPNs(device, message, metadata);
       if (result.status < 200 || result.status >= 300) {
         console.warn(`APNs delivery failed (${result.status}): ${result.body}`);
         if (result.status === 410 || /BadDeviceToken|Unregistered/.test(result.body)) {
@@ -190,6 +190,33 @@ async function sendProactivePush(threadId, message) {
       }
     } catch (error) { console.warn(`APNs delivery failed: ${error.message}`); }
   }
+}
+
+function extractDialMarker(content) {
+  const source = String(content || "");
+  const match = source.match(/[⟪《【\[]\s*(?:拨号|dial)\s*[:：]?\s*([^⟫》】\]]*)[⟫》】\]]/i);
+  if (!match) return { content: source, reason: null };
+  const reason = String(match[1] || "").trim().slice(0, 120) || "想听听你的声音";
+  return {
+    content: source.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim(),
+    reason
+  };
+}
+
+async function createIncomingCallInvite(thread, reason) {
+  const now = new Date();
+  const call = {
+    id: randomUUID(),
+    initiator: "assistant",
+    state: "pending",
+    reason: String(reason || "想听听你的声音").slice(0, 120),
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30_000).toISOString(),
+    turns: []
+  };
+  thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
+  thread.calls.push(call);
+  return call;
 }
 
 function chooseNudgeIntervalMs() {
@@ -227,13 +254,15 @@ async function checkProactiveNudge() {
     await saveProactiveSettings();
     const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
     const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
+    const dial = extractDialMarker(generated.content);
     const now = new Date().toISOString();
-    thread.messages.push({ id: randomUUID(), role: "assistant", content: generated.content, createdAt: new Date().toISOString() });
+    thread.messages.push({ id: randomUUID(), role: "assistant", content: dial.content, createdAt: now });
+    const invite = dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
     await saveThreads(threads);
     proactiveSettings.scheduledForUserMessageId = lastUser.id;
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
-    await sendProactivePush(threadId, generated.content);
+    await sendProactivePush(threadId, invite ? `📞 ${invite.reason}` : dial.content, invite ? { kind: "incoming_call", callId: invite.id } : null);
   } catch (error) {
     console.warn(`proactive nudge skipped: ${error.message}`);
     // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
@@ -918,6 +947,80 @@ const server = createServer(async (req, res) => {
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
     }
+    const pendingCallMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/pending$/);
+    if (req.method === "GET" && pendingCallMatch) {
+      const [, rawThreadID] = pendingCallMatch;
+      const threads = await readThreads();
+      const thread = threads[decodeURIComponent(rawThreadID)];
+      if (!thread) return send(res, 200, { call: null });
+      const pending = (thread.calls || []).find((item) => item.initiator === "assistant" && item.state === "pending");
+      if (!pending) return send(res, 200, { call: null });
+      if (Date.now() >= new Date(pending.expiresAt || 0).getTime()) {
+        pending.state = "ended";
+        pending.endedAt = new Date().toISOString();
+        thread.messages.push({ id: randomUUID(), role: "assistant", content: `我刚刚想打电话给你，但你没有接到。${pending.reason || "等你有空再找我"}，不急，回来再和我说话。`, createdAt: pending.endedAt });
+        await saveThreads(threads);
+        return send(res, 200, { call: null });
+      }
+      return send(res, 200, { call: { callId: pending.id, reason: pending.reason, createdAt: pending.createdAt, expiresAt: pending.expiresAt } });
+    }
+    const answerCallMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/([^/]+)\/answer$/);
+    if (req.method === "POST" && answerCallMatch) {
+      const [, rawThreadID, callID] = answerCallMatch;
+      const input = await body(req);
+      const action = input.action === "accept" ? "accept" : "decline";
+      const threads = await readThreads();
+      const thread = threads[decodeURIComponent(rawThreadID)];
+      const call = thread?.calls?.find((item) => item.id === callID && item.initiator === "assistant");
+      if (!call) return send(res, 404, { error: "call_not_found" });
+      if (call.state !== "pending") return send(res, 409, { error: "call_not_pending" });
+      if (Date.now() >= new Date(call.expiresAt || 0).getTime()) return send(res, 410, { error: "call_expired" });
+      const now = new Date().toISOString();
+      if (action === "decline") {
+        call.state = "ended";
+        call.endedAt = now;
+        let generated;
+        try {
+          generated = await generateReply({
+            input: `<internal_call_declined>言言拒绝了你刚才主动发起的电话。请自然地发一条聊天消息，理解她可能在忙，不要责怪，也不要提及内部标签。</internal_call_declined>`,
+            systemPrompt: input.systemPrompt,
+            thread,
+            callMode: true
+          });
+        } catch {
+          generated = { content: "没关系，你先忙，等你有空我们再说。", memorySaved: false };
+        }
+        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", createdAt: now };
+        thread.messages.push(assistantMessage);
+        await saveThreads(threads);
+        return send(res, 200, { callId: call.id, status: "declined", assistantMessage });
+      }
+      let generated;
+      try {
+        generated = await generateReply({
+          input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。不要提及内部标签。</internal_call_accepted>`,
+          systemPrompt: input.systemPrompt,
+          thread,
+          callMode: true,
+          allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled)
+        });
+      } catch (error) {
+        return send(res, 502, { error: error.message || "call_opening_failed" });
+      }
+      const openingText = extractDialMarker(generated.content).content || "喂，听得到吗？";
+      const opening = { id: randomUUID(), role: "assistant", content: openingText, createdAt: now, speechScript: openingText };
+      call.state = "active";
+      call.startedAt = now;
+      call.turns = [opening];
+      let speech = null;
+      let speechError = null;
+      if (input.tts?.enabled && openingText) {
+        try { speech = await synthesizeSpeech(openingText, input.tts); }
+        catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
+      } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
+      await saveThreads(threads);
+      return send(res, 200, { callId: call.id, status: "accepted", firstMessage: opening, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingText : null, speechError });
+    }
     const callEndMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/([^/]+)\/end$/);
     if (req.method === "POST" && callEndMatch) {
       const [, rawThreadID, callID] = callEndMatch;
@@ -1071,7 +1174,9 @@ const server = createServer(async (req, res) => {
       keepaliveState.lastThreadId = id;
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
       keepaliveState.disabledForMessageId = "";
-      const contentType = generated.htmlContent ? (generated.content ? "mixed" : "html") : "text";
+      const dial = extractDialMarker(generated.content);
+      const visibleContent = dial.content;
+      const contentType = generated.htmlContent ? (visibleContent ? "mixed" : "html") : "text";
       let speech = null;
       if (input.tts?.enabled && generated.speechText && !generated.htmlContent) {
         try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
@@ -1080,7 +1185,7 @@ const server = createServer(async (req, res) => {
       const assistantMessage = {
         id: randomUUID(),
         role: "assistant",
-        content: generated.content,
+        content: visibleContent,
         // Used only when reconstructing the exact model-side history for prompt cache.
         modelContent: generated.modelContent,
         contentType,
@@ -1089,12 +1194,16 @@ const server = createServer(async (req, res) => {
         createdAt: new Date().toISOString()
       };
       threads[id].messages.push(storedUserMessage, assistantMessage);
+      const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       await saveThreads(threads);
       if (proactiveSettings.threadId === id) {
         proactiveSettings.scheduledForUserMessageId = userMessage.id;
         proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
         await saveProactiveSettings();
       }
+      // Normal replies can finish while the iOS app is suspended. Reuse the
+      // registered APNs destination so the user is notified when the reply is ready.
+      await sendProactivePush(id, invite ? `📞 ${invite.reason}` : visibleContent, invite ? { kind: "incoming_call", callId: invite.id } : null);
       return { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
