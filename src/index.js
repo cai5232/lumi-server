@@ -358,6 +358,34 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   return content.trim();
 }
 
+async function zenMuxSubscriptionUsage() {
+  const apiKey = String(process.env.ZENMUX_MANAGEMENT_API_KEY || "").trim();
+  if (!apiKey) throw new Error("尚未配置 ZenMux 管理密钥");
+  const endpoint = String(process.env.ZENMUX_MANAGEMENT_API_URL || "https://zenmux.ai/api/v1/management/subscription/detail").trim();
+  const response = await fetch(endpoint, {
+    headers: { authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(10_000)
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result?.success === false) throw new Error(result?.error?.message || result?.error || `ZenMux 返回 ${response.status}`);
+  const data = result?.data || result;
+  const quota = (value) => ({
+    usagePercentage: Number(value?.usage_percentage || 0),
+    resetsAt: value?.resets_at || null,
+    maxFlows: Number(value?.max_flows || 0),
+    usedFlows: Number(value?.used_flows || 0),
+    remainingFlows: Number(value?.remaining_flows || 0),
+    usedValueUSD: Number(value?.used_value_usd || 0),
+    maxValueUSD: Number(value?.max_value_usd || 0)
+  });
+  return {
+    plan: { tier: String(data?.plan?.tier || "subscription"), expiresAt: data?.plan?.expires_at || null },
+    quota5Hour: quota(data?.quota_5_hour),
+    quota7Day: quota(data?.quota_7_day),
+    fetchedAt: new Date().toISOString()
+  };
+}
+
 function zenmuxAnthropicModel(model) {
   const normalized = String(model).replace(/^anthropic\//i, "");
   // ZenMux recommends dashed Claude aliases on its native Anthropic route.
@@ -821,6 +849,10 @@ const server = createServer(async (req, res) => {
     }
     if (["/v1/settings/proactive", "/v1/push/register"].includes(url.pathname) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
+    }
+    if (url.pathname === "/v1/subscription/usage" && req.method === "GET") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      return send(res, 200, await zenMuxSubscriptionUsage());
     }
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
     if (url.pathname === "/v1/push/status" && req.method === "GET") {
