@@ -669,7 +669,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
-  const pendingCompaction = proactive ? null : compactionPlan(thread, input);
+  // Phone turns should stay fast and must not trigger a separate context-compression
+  // request or a memory lookup. The normal chat cache remains the stable prefix.
+  const pendingCompaction = proactive || callMode ? null : compactionPlan(thread, input);
   const configuredSystem = proactive
     ? process.env.LUMI_NUDGE_SYSTEM_PROMPT || "你是沈屿，在和言言延续一段熟悉、亲近的聊天。根据最近几条对话，自然地发一条简短、不催促的消息；不要复述整段历史，也不要提及你是定时任务。"
     : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
@@ -680,7 +682,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     .concat("\n\n若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。");
   const summaryText = proactive ? String(thread.contextSummary || "").slice(-4000) : thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
-  const memories = await searchMemories(input);
+  const memories = callMode ? [] : await searchMemories(input);
   const timestamp = new Date().toISOString();
   const retrieved = memories.length
     ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
@@ -726,7 +728,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
   const raw = await callModel({
-    maxOutputTokens: proactive ? 256 : pendingCompaction
+    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 768) : proactive ? 256 : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
     messages: cacheRequestMessages,
@@ -870,12 +872,14 @@ const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech
 async function synthesizeSpeech(text, settings) {
   if (!settings?.apiKey || !settings?.voiceID || !ttsModels.includes(settings.model)) return null;
   const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
+  const speechText = spokenReply(text).slice(0, 1800);
+  if (!speechText) return null;
   const response = await fetch(`${minimaxHost}/v1/t2a_v2`, {
     method: "POST",
     headers: { authorization: `Bearer ${settings.apiKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       model: settings.model,
-      text: String(text).replace(/\[(?:左耳|右耳|脑后|面前|贴近|退开)\]/g, "").slice(0, 9000),
+      text: speechText,
       stream: false,
       voice_setting: { voice_id: settings.voiceID, speed: 1, vol: 1, pitch: 0 },
       audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
