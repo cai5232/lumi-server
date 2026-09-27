@@ -930,7 +930,7 @@ const server = createServer(async (req, res) => {
       if (!call) return send(res, 404, { error: "call_not_found" });
       const transcript = call.turns.map((turn) => `${turn.role}: ${turn.content}`).join("\n").slice(-16000);
       const generated = await generateReply({
-        input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；它们会按顺序显示和朗读。不要解释内部标签。</internal_call_turn>`,
+        input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；如果有多句，请每句单独换行，方便电话里逐条显示和播放。不要解释内部标签。</internal_call_turn>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread, callMode: true
       });
       const now = new Date().toISOString();
@@ -965,7 +965,7 @@ const server = createServer(async (req, res) => {
       const callId = randomUUID();
       // One model call: the decision and opening line reuse the ordinary chat-cache prefix.
       const generated = await generateReply({
-        input: `<internal_call_request initiator="user">言言正在拨给你。请自行决定接听或拒绝。无论结果都在最后输出 <call_decision>accept 或 reject</call_decision>。接听时，先自然说出进入通话后的第一句话；拒绝时，只说能显示在聊天里的拒绝理由。不要解释这个内部标签。</internal_call_request>`,
+        input: `<internal_call_request initiator="user">言言正在拨给你。请自行决定接听或拒绝。无论结果都在最后输出 <call_decision>accept 或 reject</call_decision>。接听时，先自然说出进入通话后的第一句话；如果有多句，请每句单独换行，方便电话里逐条显示和播放。拒绝时，只说能显示在聊天里的拒绝理由。不要解释这个内部标签。</internal_call_request>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
         systemPrompt: input.systemPrompt,
         thread,
