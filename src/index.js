@@ -273,7 +273,16 @@ async function checkProactiveNudge() {
     const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
     const dial = extractDialMarker(generated.content);
     const now = new Date().toISOString();
-    thread.messages.push({ id: randomUUID(), role: "assistant", content: dial.content, createdAt: now });
+    thread.messages.push({ id: randomUUID(), role: "assistant", content: dial.content, modelContent: generated.modelContent, createdAt: now });
+    // Keep the exact proactive turn in the same cache history as ordinary chat;
+    // otherwise the next phone/chat request would reconstruct a different
+    // assistant prefix and lose the cache immediately after the nudge.
+    thread.cacheSystem = generated.cacheSystem;
+    thread.cacheModel = process.env.LUMI_MODEL_NAME;
+    thread.cacheRequestStartedAt = generated.cacheRequestStartedAt;
+    thread.lastMeasuredInputTokens = generated.measuredInputTokens;
+    thread.cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
+    thread.cacheLastChatContinuity = generated.cacheContinuity;
     const invite = dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
     await saveThreads(threads);
     if (invite) startIncomingCallRing(threadId, invite);
