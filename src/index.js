@@ -20,6 +20,7 @@ const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
+const ttsTimeoutMs = Math.max(3_000, Number(process.env.LUMI_TTS_TIMEOUT_MS || 12_000));
 const keepaliveEnabled = process.env.LUMI_CACHE_KEEPALIVE_ENABLED === "true";
 const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
@@ -830,7 +831,7 @@ async function synthesizeSpeech(text, settings) {
       voice_setting: { voice_id: settings.voiceID, speed: 1, vol: 1, pitch: 0 },
       audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
     }),
-    signal: AbortSignal.timeout(60000)
+    signal: AbortSignal.timeout(ttsTimeoutMs)
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || result?.base_resp?.status_code) throw new Error(result?.base_resp?.status_msg || `MiniMax TTS 返回 ${response.status}`);
