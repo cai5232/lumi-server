@@ -665,7 +665,7 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false }) {
+async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false, callHistory = [] }) {
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
@@ -688,12 +688,29 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
   const relevantMessages = contextMessages(thread);
-  const history = (proactive ? relevantMessages.slice(-8) : relevantMessages).map((message) => ({
-    role: message.role,
-    // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
-    // from history and the previous request's Anthropic cache prefix can never match again.
-    content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
-  }));
+  const chatHistory = (proactive ? relevantMessages.slice(-8) : relevantMessages)
+    .filter((message) => (message.role === "user" || message.role === "assistant") && typeof message.content === "string" && message.content.trim())
+    .map((message) => ({
+      role: message.role,
+      // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
+      // from history and the previous request's Anthropic cache prefix can never match again.
+      content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
+    }));
+  const phoneHistory = callMode && Array.isArray(callHistory)
+    ? callHistory
+        .filter((turn) => (turn?.role === "user" || turn?.role === "assistant") && typeof turn.content === "string" && turn.content.trim())
+        .map((turn) => ({ role: turn.role, content: turn.content }))
+    : [];
+  // A normal chat turn usually ends with an assistant message, and an accepted
+  // call starts its persisted transcript with the assistant's opening line.
+  // Keep the two histories as a valid user/assistant sequence by inserting a
+  // tiny internal user marker before the phone transcript. This also preserves
+  // the normal chat assistant block as the cacheable prefix.
+  const history = [
+    ...chatHistory,
+    ...(phoneHistory.length ? [{ role: "user", content: "<internal_call_history_start>通话已接通，以下是通话内前文。</internal_call_history_start>" }] : []),
+    ...phoneHistory
+  ];
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
@@ -1086,10 +1103,13 @@ const server = createServer(async (req, res) => {
       const thread = threads[decodeURIComponent(rawThreadID)];
       const call = thread?.calls?.find((item) => item.id === callID && item.state === "active");
       if (!call) return send(res, 404, { error: "call_not_found" });
-      const transcript = call.turns.map((turn) => `${turn.role}: ${turn.content}`).join("\n").slice(-16000);
       const generated = await generateReply({
-        input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；如果有多句，请每句单独换行，方便电话里逐条显示和播放。不要解释内部标签。</internal_call_turn>`,
-        allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread, callMode: true
+        input: `<internal_call_turn>这是正在进行的语音通话。通话前文已经按对话历史提供。言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；如果有多句，请每句单独换行，方便电话里逐条显示和播放。不要解释内部标签。</internal_call_turn>`,
+        allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
+        systemPrompt: input.systemPrompt,
+        thread,
+        callMode: true,
+        callHistory: call.turns
       });
       const now = new Date().toISOString();
       const userTurn = { id: randomUUID(), role: "user", content: generated.callUserText || spoken, createdAt: now };
