@@ -293,6 +293,11 @@ function contextMessages(thread) {
   return boundaryIndex >= 0 ? messages.slice(boundaryIndex + 1) : messages;
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
+function cacheUsage(usage = {}) {
+  const read = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
+  const created = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || usage.cache_creation?.ephemeral_1h_input_tokens || usage.cache_creation?.ephemeral_5m_input_tokens || 0);
+  return { read, created };
+}
 
 async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage }) {
   const configuredURL = process.env.LUMI_MODEL_API_URL;
@@ -348,8 +353,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   const usage = data?.usage || {};
   if (onUsage) onUsage(usage);
   cacheStats.lastUsage = usage;
-  cacheStats.cacheReadTokens += Number(usage?.prompt_tokens_details?.cached_tokens || usage?.cache_read_input_tokens || 0);
-  cacheStats.cacheWriteTokens += Number(usage?.cache_creation_input_tokens || usage?.prompt_tokens_details?.cache_creation_input_tokens || 0);
+  const cache = cacheUsage(usage);
+  cacheStats.cacheReadTokens += cache.read;
+  cacheStats.cacheWriteTokens += cache.created;
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
   const content = nativeAnthropic
     ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
@@ -611,7 +617,7 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false }) {
+async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false }) {
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
@@ -640,7 +646,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const userModelContent = `${systemContext}\n\n${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
-  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
+  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
     ...history,
@@ -676,16 +682,15 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       : undefined,
     messages: cacheRequestMessages,
     onUsage: (usage) => {
-      const cachedRead = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
-      const cachedWrite = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+      const { read: cachedRead, created: cachedWrite } = cacheUsage(usage);
       const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
       // Native Anthropic reports uncached input separately; some OpenAI gateways
       // include cached tokens in prompt_tokens while others report them separately.
       measuredInputTokens = usage.input_tokens != null || promptTokens < cachedRead + cachedWrite
         ? promptTokens + cachedRead + cachedWrite : promptTokens;
       if (!cacheContinuity) return;
-      cacheContinuity.readTokens = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
-      cacheContinuity.writeTokens = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+      cacheContinuity.readTokens = cachedRead;
+      cacheContinuity.writeTokens = cachedWrite;
     }
   });
   const compactedSummary = pendingCompaction
@@ -700,7 +705,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   } else if (pendingCompaction) {
     console.warn("context compaction deferred: model response contained no context_summary");
   }
-  const cleanedRaw = withoutSpeechPlanning(raw);
+  const cleanedRaw = (callMode
+    ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
+    : withoutSpeechPlanning(raw));
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const speechMatch = allowSpeech ? cleanedRaw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
   const callDecision = cleanedRaw.match(/<call_decision>\s*(accept|reject)\s*<\/call_decision>/i)?.[1]?.toLowerCase() || null;
@@ -708,44 +715,6 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
-/* Superseded pre-rebase implementation retained as a non-executing reference. */
-/*
-  const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
-  const userModelContent = `${systemContext}\n\n${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
-  const raw = await callModel({
-    maxOutputTokens: proactive ? 256 : pendingCompaction
-      ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
-      : undefined,
-    messages: [
-      { role: "system", content: `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。${allowSpeech ? "\n你可以自主判断是否值得用声音说这条回复，不要每条都配语音；只有你主动决定要语音时，才在回复最后附加 <speech>实际要朗读的内容</speech>。语音内容通常应与完整文字回复一致；回复很长时可以自然节选，但绝不能只念称呼或开头一小截。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。若适合让声音移动，可在 speech 内容中少量加入 [左耳]、[右耳]、[脑后]、[面前]、[贴近]、[退开] 作为不朗读的位置提示，不要无关堆叠。" : ""}` },
-      ...history,
-      // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
-      // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
-      // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
-      { role: "user", content: userModelContent, images }
-    ]
-  });
-  const compactedSummary = pendingCompaction
-    ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
-    : null;
-  if (pendingCompaction && compactedSummary) {
-    thread.contextSummary = compactedSummary;
-    thread.compactionCount = (thread.compactionCount || 0) + 1;
-    thread.compactedAt = new Date().toISOString();
-    thread.compactedThroughMessageId = pendingCompaction.throughMessageId;
-  } else if (pendingCompaction) {
-    // Keep the full history if the provider fails to return the private tag.
-    // Retrying on the next user turn is safer than silently discarding context.
-    console.warn("context compaction deferred: model response contained no context_summary");
-  }
-  const memoryMatch = raw.match(/<memory>([\s\S]*?)<\/memory>/i);
-  const speechMatch = allowSpeech ? raw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
-  const callDecision = raw.match(/<call_decision>\s*(accept|reject)\s*<\/call_decision>/i)?.[1]?.toLowerCase() || null;
-  const emojiMood = raw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
-  const memoryContent = memoryMatch?.[1]?.trim();
-  const titleMatch = raw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = raw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
-*/
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -816,8 +785,7 @@ async function checkCacheKeepalive() {
       cacheCurrentUser: false,
       onUsage: (usage) => { keepaliveUsage = usage; }
     });
-    const readTokens = Number(keepaliveUsage.cache_read_input_tokens || keepaliveUsage.prompt_tokens_details?.cached_tokens || 0);
-    const writeTokens = Number(keepaliveUsage.cache_creation_input_tokens || keepaliveUsage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+    const { read: readTokens, created: writeTokens } = cacheUsage(keepaliveUsage);
     thread.cacheKeepaliveAt = startedAt;
     thread.cacheKeepalivePrefixHash = assistantPrefixHash;
     await saveThreads(threads);
@@ -846,13 +814,6 @@ async function checkCacheKeepalive() {
     finishKeepalive();
     finishKeepalive = null;
   }
-/*
-  const replyForSpeech = content.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
-  // <speech> is the model's opt-in signal only. Always speak the complete visible reply;
-  // the speech tag itself can accidentally contain just the greeting or first clause.
-  const speechText = speechMatch ? replyForSpeech : "";
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, userModelContent };
-*/
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
@@ -968,7 +929,7 @@ const server = createServer(async (req, res) => {
       const transcript = call.turns.map((turn) => `${turn.role}: ${turn.content}`).join("\n").slice(-16000);
       const generated = await generateReply({
         input: `<internal_call_turn>这是正在进行的语音通话。已发生的通话记录：\n${transcript}\n\n言言刚刚说：${spoken}\n\n自然回复。可以分成多段短句；它们会按顺序显示和朗读。不要解释内部标签。</internal_call_turn>`,
-        allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread
+        allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread, callMode: true
       });
       const now = new Date().toISOString();
       const userTurn = { id: randomUUID(), role: "user", content: spoken, createdAt: now };
@@ -1005,7 +966,8 @@ const server = createServer(async (req, res) => {
         input: `<internal_call_request initiator="user">言言正在拨给你。请自行决定接听或拒绝。无论结果都在最后输出 <call_decision>accept 或 reject</call_decision>。接听时，先自然说出进入通话后的第一句话；拒绝时，只说能显示在聊天里的拒绝理由。不要解释这个内部标签。</internal_call_request>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
         systemPrompt: input.systemPrompt,
-        thread
+        thread,
+        callMode: true
       });
       const now = new Date().toISOString();
       if (generated.callDecision !== "accept") {
