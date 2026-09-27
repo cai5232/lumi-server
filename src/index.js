@@ -977,7 +977,7 @@ const server = createServer(async (req, res) => {
       if (Date.now() >= new Date(pending.expiresAt || 0).getTime()) {
         pending.state = "ended";
         pending.endedAt = new Date().toISOString();
-        thread.messages.push({ id: randomUUID(), role: "assistant", content: `我刚刚想打电话给你，但你没有接到。${pending.reason || "等你有空再找我"}，不急，回来再和我说话。`, createdAt: pending.endedAt });
+        thread.messages.push({ id: randomUUID(), role: "assistant", content: `我刚刚想打电话给你，但你没有接到。${pending.reason || "等你有空再找我"}，不急，回来再和我说话。`, contentType: "call_status", callID: pending.id, callInitiator: "assistant", callStatus: "missed", createdAt: pending.endedAt });
         await saveThreads(threads);
         return send(res, 200, { call: null });
       }
@@ -1001,7 +1001,7 @@ const server = createServer(async (req, res) => {
         let generated;
         try {
           generated = await generateReply({
-            input: `<internal_call_declined>言言拒绝了你刚才主动发起的电话。请自然地发一条聊天消息，理解她可能在忙，不要责怪，也不要提及内部标签。</internal_call_declined>`,
+            input: `<internal_call_declined>言言拒绝了你刚才主动发起的电话。${input.note ? `她留下的理由是：${String(input.note).slice(0, 120)}。` : "她没有留下理由。"}请自然地发一条聊天消息，理解她可能在忙，不要责怪，也不要提及内部标签。</internal_call_declined>`,
             systemPrompt: input.systemPrompt,
             thread,
             callMode: true
@@ -1009,7 +1009,7 @@ const server = createServer(async (req, res) => {
         } catch {
           generated = { content: "没关系，你先忙，等你有空我们再说。", memorySaved: false };
         }
-        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", createdAt: now };
+        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", contentType: "call_status", callID: call.id, callInitiator: "assistant", callStatus: "rejected", createdAt: now };
         thread.messages.push(assistantMessage);
         await saveThreads(threads);
         return send(res, 200, { callId: call.id, status: "declined", assistantMessage });
@@ -1060,7 +1060,8 @@ const server = createServer(async (req, res) => {
         contentType: "call_record",
         createdAt: endedAt,
         callID: call.id,
-        callDuration: duration
+        callDuration: duration,
+        callInitiator: call.initiator === "user" ? "user" : "assistant"
       };
       call.state = "ended";
       call.endedAt = endedAt;
@@ -1128,7 +1129,7 @@ const server = createServer(async (req, res) => {
       });
       const now = new Date().toISOString();
       if (generated.callDecision !== "accept") {
-        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "我现在不太方便接电话。", contentType: "text", createdAt: now };
+        const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "我现在不太方便接电话。", contentType: "call_status", callID: callId, callInitiator: "user", callStatus: "rejected", createdAt: now };
         thread.messages.push(assistantMessage);
         await saveThreads(threads);
         return send(res, 200, { callId, status: "rejected", assistantMessage, memorySaved: generated.memorySaved });
