@@ -653,9 +653,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     maxOutputTokens: proactive ? 256 : undefined,
     messages: cacheRequestMessages,
     onUsage: (usage) => {
-      measuredInputTokens = Number(usage.prompt_tokens || usage.input_tokens || 0)
-        + Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0)
-        + Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+      const cachedRead = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
+      const cachedWrite = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
+      const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
+      // Native Anthropic reports uncached input separately; some OpenAI gateways
+      // include cached tokens in prompt_tokens while others report them separately.
+      measuredInputTokens = usage.input_tokens != null || promptTokens < cachedRead + cachedWrite
+        ? promptTokens + cachedRead + cachedWrite : promptTokens;
       if (!cacheContinuity) return;
       cacheContinuity.readTokens = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
       cacheContinuity.writeTokens = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || 0);
