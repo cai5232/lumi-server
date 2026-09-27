@@ -722,11 +722,21 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Keep the two histories as a valid user/assistant sequence by inserting a
   // tiny internal user marker before the phone transcript. This also preserves
   // the normal chat assistant block as the cacheable prefix.
-  const history = [
+  const rawHistory = [
     ...chatHistory,
     ...(phoneHistory.length ? [{ role: "user", content: "<internal_call_history_start>通话已接通，以下是通话内前文。</internal_call_history_start>" }] : []),
     ...phoneHistory
   ];
+  // Call records are stored as one assistant-side summary, so a later chat
+  // can otherwise place two assistant messages next to each other. Anthropic
+  // requires alternating roles; coalesce only adjacent same-role blocks while
+  // keeping their exact text and therefore a deterministic cache prefix.
+  const history = [];
+  for (const message of rawHistory) {
+    const previous = history.at(-1);
+    if (previous?.role === message.role) previous.content = `${previous.content}\n${message.content}`;
+    else history.push({ ...message });
+  }
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const proactiveDirective = proactive
