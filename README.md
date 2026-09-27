@@ -16,6 +16,7 @@ Zeabur 环境变量：
 - `LUMI_MODEL_API_URL`：OpenAI 兼容地址；可填完整的 `/chat/completions`，也可填到 `/v1`，服务会自动补齐路径
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
+- `ZENMUX_MANAGEMENT_API_KEY`：ZenMux Subscription Management 创建的管理密钥；仅供后端读取 5 小时 / 7 天订阅额度，不能放进 App 或前端
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
 - `LUMI_CONTEXT_LIMIT`：可选，单个聊天窗口的估算 Token 上限，默认 `200000`
@@ -43,6 +44,7 @@ Zeabur 环境变量：
 
 - `GET /health`
 - `GET /v1/chats/:id`
+- `GET /v1/subscription/usage`，需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`；返回 ZenMux 订阅的 5 小时和 7 天额度
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
 - `POST /v1/chats/:id/messages` 支持 `Idempotency-Key: <每次发送唯一 UUID>`；同一请求号重复到达时复用已保存的回复，不再次调用模型。旧版 App 的完全相同请求在短时间内也会合并，避免网络自动重试产生三笔费用。
 - `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和语音授权；只有 AI 明确选择 `<speech>...</speech>` 才生成语音，TTS Key 只随本次请求传入、不落盘
