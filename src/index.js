@@ -672,8 +672,14 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Phone turns should stay fast and must not trigger a separate context-compression
   // request or a memory lookup. The normal chat cache remains the stable prefix.
   const pendingCompaction = proactive || callMode ? null : compactionPlan(thread, input);
-  const configuredSystem = proactive
-    ? process.env.LUMI_NUDGE_SYSTEM_PROMPT || "你是沈屿，在和言言延续一段熟悉、亲近的聊天。根据最近几条对话，自然地发一条简短、不催促的消息；不要复述整段历史，也不要提及你是定时任务。"
+  // Proactive follow-ups stay on the ordinary chat system prompt so their
+  // stable prefix can read the same cache as the chat that led to them. The
+  // nudge-specific instruction is placed in the changing user suffix below.
+  const cachedSystemBase = typeof thread?.cacheSystem === "string"
+    ? thread.cacheSystem.split("\n\n你可以自行决定要不要使用颜文字")[0].trim()
+    : "";
+  const configuredSystem = proactive && cachedSystemBase
+    ? cachedSystemBase
     : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
   const system = configuredSystem
     .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
@@ -688,7 +694,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
     : "";
   const relevantMessages = contextMessages(thread);
-  const chatHistory = (proactive ? relevantMessages.slice(-8) : relevantMessages)
+  const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .map((message) => ({
       role: message.role,
@@ -714,7 +720,10 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   ];
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timestamp="${timestamp}">\n当前时间（由系统发送）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
-  const userModelContent = `${systemContext}\n\n${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const proactiveDirective = proactive
+    ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地发一条简短、亲近、不催促的聊天消息；不要复述整段历史，不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。</internal_proactive_nudge>\n"
+    : "";
+  const userModelContent = `${systemContext}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
@@ -746,7 +755,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
   const raw = await callModel({
-    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 768) : proactive ? 256 : pendingCompaction
+    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? 256 : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
     messages: cacheRequestMessages,
@@ -890,7 +899,8 @@ const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech
 async function synthesizeSpeech(text, settings) {
   if (!settings?.apiKey || !settings?.voiceID || !ttsModels.includes(settings.model)) return null;
   const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
-  const speechText = spokenReply(text).slice(0, 1800);
+  const speechLimit = Math.max(240, Math.min(Number(settings.maxChars || 1800), 1800));
+  const speechText = spokenReply(text).slice(0, speechLimit);
   if (!speechText) return null;
   const response = await fetch(`${minimaxHost}/v1/t2a_v2`, {
     method: "POST",
@@ -1057,7 +1067,7 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && openingText) {
-        try { speech = await synthesizeSpeech(openingText, input.tts); }
+        try { speech = await synthesizeSpeech(openingText, { ...input.tts, maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
       await saveThreads(threads);
@@ -1119,7 +1129,7 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && generated.content) {
-        try { speech = await synthesizeSpeech(generated.content, input.tts); }
+        try { speech = await synthesizeSpeech(generated.content, { ...input.tts, maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call speech skipped: ${speechError}`); }
       } else if (generated.content) {
         speechError = "客户端没有提供 MiniMax TTS 配置";
@@ -1164,7 +1174,7 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && generated.content) {
-        try { speech = await synthesizeSpeech(generated.content, input.tts); }
+        try { speech = await synthesizeSpeech(generated.content, { ...input.tts, maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call opening speech skipped: ${speechError}`); }
       } else if (generated.content) {
         speechError = "客户端没有提供 MiniMax TTS 配置";
