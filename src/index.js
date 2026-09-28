@@ -1,4 +1,4 @@
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
@@ -992,7 +992,7 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
   res.end(JSON.stringify(body));
 }
 
@@ -1235,9 +1235,19 @@ const server = createServer(async (req, res) => {
       if (req.method === "PATCH" && !operation) {
         const input = await body(req);
         item.title = galleryText(input.title, item.title, 36);
+        item.visualDescription = galleryText(input.visualDescription, item.visualDescription);
+        item.firstImpression = galleryText(input.firstImpression, item.firstImpression, 240);
         item.updatedAt = new Date().toISOString();
         await writeGalleryItem(threadID, item);
         return send(res, 200, item);
+      }
+      if (req.method === "DELETE" && !operation) {
+        const paths = galleryPaths(threadID, item.id);
+        await Promise.all([
+          unlink(paths.metadata).catch((error) => { if (error?.code !== "ENOENT") throw error; }),
+          unlink(paths.image(item.extension)).catch((error) => { if (error?.code !== "ENOENT") throw error; })
+        ]);
+        return send(res, 200, { deleted: true });
       }
       return send(res, 405, { error: "method_not_allowed" });
     }
