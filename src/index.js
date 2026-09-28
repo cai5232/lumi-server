@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
@@ -10,6 +10,7 @@ const threadPath = join(dataDir, "threads.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
+const galleryDir = join(dataDir, "gallery");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -991,14 +992,137 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
   res.end(JSON.stringify(body));
+}
+
+function sendBinary(res, status, bytes, contentType) {
+  res.writeHead(status, {
+    "content-type": contentType,
+    "content-length": bytes.length,
+    "cache-control": "private, max-age=31536000, immutable",
+    "access-control-allow-origin": "*"
+  });
+  res.end(bytes);
 }
 
 async function body(req) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   return raw ? JSON.parse(raw) : {};
+}
+
+const galleryImagePattern = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i;
+const galleryExtensions = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
+
+function galleryThreadKey(threadID) {
+  return createHash("sha256").update(String(threadID)).digest("hex");
+}
+
+function galleryPaths(threadID, itemID) {
+  const directory = join(galleryDir, galleryThreadKey(threadID));
+  return {
+    directory,
+    metadata: join(directory, `${itemID}.json`),
+    image: (extension) => join(directory, `${itemID}.${extension}`)
+  };
+}
+
+function imagePayload(source) {
+  const match = String(source || "").match(galleryImagePattern);
+  if (!match) return null;
+  const mimeType = match[1].toLowerCase();
+  const bytes = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (!bytes.length || bytes.length > 12 * 1024 * 1024) return null;
+  return { dataURI: `data:${mimeType};base64,${bytes.toString("base64")}`, mimeType, extension: galleryExtensions[mimeType], bytes };
+}
+
+function galleryText(value, fallback, maximum = 600) {
+  const normalized = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return (normalized || fallback).slice(0, maximum);
+}
+
+async function readGalleryItem(threadID, itemID) {
+  if (!/^[a-f0-9]{64}$/i.test(itemID)) return null;
+  try { return JSON.parse(await readFile(galleryPaths(threadID, itemID).metadata, "utf8")); }
+  catch (error) { if (error?.code !== "ENOENT") console.warn(`gallery metadata unavailable: ${error.message}`); return null; }
+}
+
+async function writeGalleryItem(threadID, item) {
+  const path = galleryPaths(threadID, item.id).metadata;
+  await mkdir(galleryPaths(threadID, item.id).directory, { recursive: true });
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(item, null, 2));
+  await rename(temporaryPath, path);
+}
+
+async function analyzeGalleryImage(dataURI) {
+  const fallback = {
+    title: "我们收藏的一张照片",
+    visualDescription: "一张我们收藏的图片。",
+    firstImpression: "这一刻被好好收下了。"
+  };
+  try {
+    const raw = await callModel({
+      temperature: 0.35,
+      maxOutputTokens: 240,
+      cacheCurrentUser: false,
+      messages: [
+        { role: "system", content: "你是私密相册的图片整理助手。只输出一个 JSON 对象，不要 markdown。字段 title（不超过18个中文字符）、visualDescription（客观描述画面，不猜测隐私或身份）、firstImpression（第一人称、温柔简短的感受）。" },
+        { role: "user", content: "请为这张刚收藏的图片生成相册信息。", images: [dataURI] }
+      ]
+    });
+    const json = raw.match(/\{[\s\S]*\}/)?.[0];
+    const parsed = json ? JSON.parse(json) : {};
+    return {
+      title: galleryText(parsed.title, fallback.title, 36),
+      visualDescription: galleryText(parsed.visualDescription, fallback.visualDescription),
+      firstImpression: galleryText(parsed.firstImpression, fallback.firstImpression, 240)
+    };
+  } catch (error) {
+    console.warn(`gallery image analysis skipped: ${error.message}`);
+    return fallback;
+  }
+}
+
+async function saveGalleryImage(threadID, source) {
+  const payload = imagePayload(source);
+  if (!payload) return null;
+  const id = createHash("sha256").update(payload.bytes).digest("hex");
+  const existing = await readGalleryItem(threadID, id);
+  if (existing) return existing;
+  const paths = galleryPaths(threadID, id);
+  await mkdir(paths.directory, { recursive: true });
+  const destination = paths.image(payload.extension);
+  const temporaryPath = `${destination}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, payload.bytes);
+  await rename(temporaryPath, destination);
+  const analysis = await analyzeGalleryImage(payload.dataURI);
+  const now = new Date().toISOString();
+  const item = { id, mimeType: payload.mimeType, extension: payload.extension, createdAt: now, updatedAt: now, ...analysis };
+  await writeGalleryItem(threadID, item);
+  return item;
+}
+
+async function saveGalleryImages(threadID, sources) {
+  const items = await Promise.all((sources || []).map((source) => saveGalleryImage(threadID, source)));
+  return items.filter(Boolean);
+}
+
+async function listGalleryItems(threadID) {
+  const directory = galleryPaths(threadID, "").directory;
+  let files = [];
+  try { files = await readdir(directory); }
+  catch (error) { if (error?.code !== "ENOENT") console.warn(`gallery list unavailable: ${error.message}`); return []; }
+  const items = (await Promise.all(files.filter((file) => /^[a-f0-9]{64}\.json$/i.test(file)).map((file) => readGalleryItem(threadID, file.slice(0, -5))))).filter(Boolean);
+  return items.sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt));
+}
+
+async function galleryMemory(threadID, itemIDs) {
+  const items = await Promise.all((itemIDs || []).map((id) => readGalleryItem(threadID, id)));
+  const available = items.filter(Boolean).slice(0, 4);
+  if (!available.length) return "";
+  return `\n\n<gallery_memories source="user_selected">\n${available.map((item) => `- 《${item.title}》\n  客观描述：${item.visualDescription}\n  当时的感受：${item.firstImpression}`).join("\n")}\n</gallery_memories>\n这些是用户从共同相册带来的记忆。基于文字自然回应，不要假装再次看见原图。`;
 }
 
 const server = createServer(async (req, res) => {
@@ -1066,6 +1190,35 @@ const server = createServer(async (req, res) => {
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
+    }
+    const galleryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/gallery(?:\/([a-f0-9]{64})(?:\/(image|use))?)?$/i);
+    if (galleryMatch) {
+      const threadID = decodeURIComponent(galleryMatch[1]);
+      const itemID = galleryMatch[2]?.toLowerCase();
+      const operation = galleryMatch[3];
+      if (req.method === "GET" && !itemID) return send(res, 200, { items: await listGalleryItems(threadID) });
+      if (req.method === "POST" && !itemID) {
+        const input = await body(req);
+        const images = Array.isArray(input.images) ? input.images.slice(0, 4) : [];
+        if (!images.length) return send(res, 400, { error: "image_required" });
+        return send(res, 201, { items: await saveGalleryImages(threadID, images) });
+      }
+      const item = itemID ? await readGalleryItem(threadID, itemID) : null;
+      if (!item) return send(res, 404, { error: "gallery_item_not_found" });
+      if (req.method === "GET" && !operation) return send(res, 200, item);
+      if (req.method === "GET" && operation === "image") {
+        try { return sendBinary(res, 200, await readFile(galleryPaths(threadID, item.id).image(item.extension)), item.mimeType); }
+        catch (error) { return send(res, error?.code === "ENOENT" ? 404 : 500, { error: "gallery_image_unavailable" }); }
+      }
+      if (req.method === "POST" && operation === "use") return send(res, 200, { item });
+      if (req.method === "PATCH" && !operation) {
+        const input = await body(req);
+        item.title = galleryText(input.title, item.title, 36);
+        item.updatedAt = new Date().toISOString();
+        await writeGalleryItem(threadID, item);
+        return send(res, 200, item);
+      }
+      return send(res, 405, { error: "method_not_allowed" });
     }
     const pendingCallMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/pending$/);
     if (req.method === "GET" && pendingCallMatch) {
@@ -1272,7 +1425,10 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && match[2]) {
       const input = await body(req);
       const images = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : [];
-      if ((!input.content || !String(input.content).trim()) && !images.length) return send(res, 400, { error: "content_or_image_required" });
+      const galleryImageIDs = Array.isArray(input.galleryImageIDs)
+        ? input.galleryImageIDs.filter((itemID) => typeof itemID === "string" && /^[a-f0-9]{64}$/i.test(itemID)).slice(0, 4)
+        : [];
+      if ((!input.content || !String(input.content).trim()) && !images.length && !galleryImageIDs.length) return send(res, 400, { error: "content_image_or_gallery_required" });
       const requestId = String(req.headers["idempotency-key"] || "");
       if (requestId && !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) return send(res, 400, { error: "invalid_idempotency_key" });
       if (requestId) {
@@ -1298,12 +1454,15 @@ const server = createServer(async (req, res) => {
       }
       const result = (async () => {
       const messageText = String(input.content || "").trim();
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || "（发送了图片）", createdAt: new Date().toISOString() };
-      const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(requestId ? { requestId } : {}) };
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), createdAt: new Date().toISOString() };
+      const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       activeChatThreads.add(id);
-      try { generated = await generateReply({ input: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
+      const gallerySave = images.length ? saveGalleryImages(id, images).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : Promise.resolve([]);
+      const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
+      try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
+      const galleryItems = await gallerySave;
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
@@ -1347,7 +1506,7 @@ const server = createServer(async (req, res) => {
       // Normal replies can finish while the iOS app is suspended. Reuse the
       // registered APNs destination so the user is notified when the reply is ready.
       await sendProactivePush(id, invite ? `📞 ${invite.reason}` : visibleContent, invite ? { kind: "incoming_call", callId: invite.id } : null);
-      return { userMessage: storedUserMessage, assistantMessage, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
+      return { userMessage: storedUserMessage, assistantMessage, galleryItems, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
