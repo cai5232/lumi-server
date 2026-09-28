@@ -273,7 +273,15 @@ async function checkProactiveNudge() {
     const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
     const dial = extractDialMarker(generated.content);
     const now = new Date().toISOString();
-    thread.messages.push({ id: randomUUID(), role: "assistant", content: dial.content, modelContent: generated.modelContent, createdAt: now });
+    thread.messages.push({
+      id: randomUUID(), role: "assistant", content: dial.content,
+      modelContent: generated.modelContent,
+      // The nudge instruction is an invisible user turn. Persist its exact
+      // provider text with the reply so the next visible chat can replay the
+      // same prefix instead of falling back to the system-prompt cache only.
+      precedingUserModelContent: generated.userModelContent,
+      createdAt: now
+    });
     // Keep the exact proactive turn in the same cache history as ordinary chat;
     // otherwise the next phone/chat request would reconstruct a different
     // assistant prefix and lose the cache immediately after the nudge.
@@ -724,13 +732,19 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const relevantMessages = contextMessages(thread);
   const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
-    .map((message) => ({
-      role: message.role,
+    .flatMap((message) => {
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
-      content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
-    }))
-    .filter((message) => typeof message.content === "string" && message.content.trim());
+      const content = message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
+      if (typeof content !== "string" || !content.trim()) return [];
+      // An unsolicited nudge has an internal user request that is deliberately
+      // absent from the visible timeline. It is nevertheless part of the
+      // provider prefix and must precede the stored assistant reply exactly.
+      const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
+        ? [{ role: "user", content: message.precedingUserModelContent }]
+        : [];
+      return [...preceding, { role: message.role, content }];
+    });
   const phoneHistory = [];
   if (callMode && Array.isArray(callHistory)) {
     for (const turn of callHistory) {
