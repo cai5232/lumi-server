@@ -1058,6 +1058,7 @@ async function writeGalleryItem(threadID, item) {
 
 async function analyzeGalleryImage(dataURI) {
   const fallback = {
+    shouldCollect: false,
     title: "我们收藏的一张照片",
     visualDescription: "一张我们收藏的图片。",
     firstImpression: "这一刻被好好收下了。"
@@ -1068,13 +1069,14 @@ async function analyzeGalleryImage(dataURI) {
       maxOutputTokens: 240,
       cacheCurrentUser: false,
       messages: [
-        { role: "system", content: "你是私密相册的图片整理助手。只输出一个 JSON 对象，不要 markdown。字段 title（不超过18个中文字符）、visualDescription（客观描述画面，不猜测隐私或身份）、firstImpression（第一人称、温柔简短的感受）。" },
-        { role: "user", content: "请为这张刚收藏的图片生成相册信息。", images: [dataURI] }
+        { role: "system", content: "你是私密相册的图片整理助手。只输出一个 JSON 对象，不要 markdown。字段 shouldCollect（boolean）：只有值得作为两人共同回忆长期保留的照片才为 true；普通截图、纯文字资料、无意义转发、重复或不清晰图片为 false。若为 true，再填写 title（不超过18个中文字符）、visualDescription（客观描述画面，不猜测隐私或身份）、firstImpression（第一人称、温柔简短的感受）。" },
+        { role: "user", content: "请判断这张聊天图片是否应该自动收藏；若值得收藏，生成相册信息。", images: [dataURI] }
       ]
     });
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
     const parsed = json ? JSON.parse(json) : {};
     return {
+      shouldCollect: parsed.shouldCollect !== false,
       title: galleryText(parsed.title, fallback.title, 36),
       visualDescription: galleryText(parsed.visualDescription, fallback.visualDescription),
       firstImpression: galleryText(parsed.firstImpression, fallback.firstImpression, 240)
@@ -1085,27 +1087,29 @@ async function analyzeGalleryImage(dataURI) {
   }
 }
 
-async function saveGalleryImage(threadID, source) {
+async function saveGalleryImage(threadID, source, { automatic = false } = {}) {
   const payload = imagePayload(source);
   if (!payload) return null;
   const id = createHash("sha256").update(payload.bytes).digest("hex");
   const existing = await readGalleryItem(threadID, id);
   if (existing) return existing;
+  const analysis = await analyzeGalleryImage(payload.dataURI);
+  if (automatic && !analysis.shouldCollect) return null;
   const paths = galleryPaths(threadID, id);
   await mkdir(paths.directory, { recursive: true });
   const destination = paths.image(payload.extension);
   const temporaryPath = `${destination}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, payload.bytes);
   await rename(temporaryPath, destination);
-  const analysis = await analyzeGalleryImage(payload.dataURI);
   const now = new Date().toISOString();
-  const item = { id, mimeType: payload.mimeType, extension: payload.extension, createdAt: now, updatedAt: now, ...analysis };
+  const { shouldCollect: _shouldCollect, ...metadata } = analysis;
+  const item = { id, mimeType: payload.mimeType, extension: payload.extension, createdAt: now, updatedAt: now, ...metadata };
   await writeGalleryItem(threadID, item);
   return item;
 }
 
-async function saveGalleryImages(threadID, sources) {
-  const items = await Promise.all((sources || []).map((source) => saveGalleryImage(threadID, source)));
+async function saveGalleryImages(threadID, sources, options) {
+  const items = await Promise.all((sources || []).map((source) => saveGalleryImage(threadID, source, options)));
   return items.filter(Boolean);
 }
 
@@ -1458,7 +1462,7 @@ const server = createServer(async (req, res) => {
       const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       activeChatThreads.add(id);
-      const gallerySave = images.length ? saveGalleryImages(id, images).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : Promise.resolve([]);
+      const gallerySave = images.length ? saveGalleryImages(id, images, { automatic: true }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : Promise.resolve([]);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
