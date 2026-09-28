@@ -1087,7 +1087,7 @@ async function analyzeGalleryImage(dataURI) {
   }
 }
 
-async function saveGalleryImage(threadID, source, { automatic = false } = {}) {
+async function saveGalleryImage(threadID, source, { automatic = false, draft = {} } = {}) {
   const payload = imagePayload(source);
   if (!payload) return null;
   const id = createHash("sha256").update(payload.bytes).digest("hex");
@@ -1103,7 +1103,19 @@ async function saveGalleryImage(threadID, source, { automatic = false } = {}) {
   await rename(temporaryPath, destination);
   const now = new Date().toISOString();
   const { shouldCollect: _shouldCollect, ...metadata } = analysis;
-  const item = { id, mimeType: payload.mimeType, extension: payload.extension, createdAt: now, updatedAt: now, ...metadata };
+  const item = {
+    id,
+    mimeType: payload.mimeType,
+    extension: payload.extension,
+    createdAt: now,
+    updatedAt: now,
+    ...metadata,
+    ...(automatic ? {} : {
+      title: galleryText(draft.title, metadata.title, 36),
+      visualDescription: galleryText(draft.visualDescription, metadata.visualDescription),
+      firstImpression: galleryText(draft.firstImpression, metadata.firstImpression, 240)
+    })
+  };
   await writeGalleryItem(threadID, item);
   return item;
 }
@@ -1205,7 +1217,12 @@ const server = createServer(async (req, res) => {
         const input = await body(req);
         const images = Array.isArray(input.images) ? input.images.slice(0, 4) : [];
         if (!images.length) return send(res, 400, { error: "image_required" });
-        return send(res, 201, { items: await saveGalleryImages(threadID, images) });
+        const draft = {
+          title: typeof input.title === "string" ? input.title : "",
+          visualDescription: typeof input.visualDescription === "string" ? input.visualDescription : "",
+          firstImpression: typeof input.firstImpression === "string" ? input.firstImpression : ""
+        };
+        return send(res, 201, { items: await saveGalleryImages(threadID, images, { draft }) });
       }
       const item = itemID ? await readGalleryItem(threadID, itemID) : null;
       if (!item) return send(res, 404, { error: "gallery_item_not_found" });
