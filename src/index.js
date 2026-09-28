@@ -731,11 +731,19 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       content: message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
     }))
     .filter((message) => typeof message.content === "string" && message.content.trim());
-  const phoneHistory = callMode && Array.isArray(callHistory)
-    ? callHistory
-        .filter((turn) => (turn?.role === "user" || turn?.role === "assistant") && typeof turn.content === "string" && turn.content.trim())
-        .map((turn) => ({ role: turn.role, content: turn.content }))
-    : [];
+  const phoneHistory = [];
+  if (callMode && Array.isArray(callHistory)) {
+    for (const turn of callHistory) {
+      if (!turn || (turn.role !== "user" && turn.role !== "assistant") || typeof turn.content !== "string" || !turn.content.trim()) continue;
+      // The call-opening request is the cacheable predecessor of the first
+      // spoken turn. Persist it invisibly, then replay its raw assistant
+      // response so the first caller message shares that exact prefix.
+      if (turn.role === "assistant" && typeof turn.requestModelContent === "string" && turn.requestModelContent.trim()) {
+        phoneHistory.push({ role: "user", content: turn.requestModelContent });
+      }
+      phoneHistory.push({ role: turn.role, content: turn.modelContent || turn.content });
+    }
+  }
   // A normal chat turn usually ends with an assistant message, and an accepted
   // call starts its persisted transcript with the assistant's opening line.
   // Keep the two histories as a valid user/assistant sequence by inserting a
@@ -743,7 +751,12 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // the normal chat assistant block as the cacheable prefix.
   const rawHistory = [
     ...chatHistory,
-    ...(phoneHistory.length ? [{ role: "user", content: "<internal_call_history_start>通话已接通，以下是通话内前文。</internal_call_history_start>" }] : []),
+    // Legacy calls have only a visible opening, so they need a separator to
+    // obey Anthropic's alternating-role requirement. New calls replay the
+    // original opening request instead, preserving the cache prefix exactly.
+    ...(phoneHistory.length && chatHistory.at(-1)?.role === "assistant" && phoneHistory[0]?.role === "assistant"
+      ? [{ role: "user", content: "<internal_call_history_start>通话已接通，以下是通话内前文。</internal_call_history_start>" }]
+      : []),
     ...phoneHistory
   ];
   // Call records are stored as one assistant-side summary, so a later chat
@@ -1102,7 +1115,13 @@ const server = createServer(async (req, res) => {
         return send(res, 502, { error: error.message || "call_opening_failed" });
       }
       const openingText = extractDialMarker(generated.content).content || "喂，听得到吗？";
-      const opening = { id: randomUUID(), role: "assistant", content: openingText, createdAt: now, speechScript: openingText };
+      const opening = {
+        id: randomUUID(), role: "assistant", content: openingText,
+        // Private cache bridge for the first spoken turn; not sent to iOS.
+        modelContent: generated.modelContent,
+        requestModelContent: generated.userModelContent,
+        createdAt: now, speechScript: openingText
+      };
       call.state = "active";
       call.startedAt = now;
       call.turns = [opening];
@@ -1113,7 +1132,8 @@ const server = createServer(async (req, res) => {
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
       await saveThreads(threads);
-      return send(res, 200, { callId: call.id, status: "accepted", firstMessage: opening, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingText : null, speechError });
+      const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
+      return send(res, 200, { callId: call.id, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingText : null, speechError });
     }
     const callEndMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/([^/]+)\/end$/);
     if (req.method === "POST" && callEndMatch) {
@@ -1221,12 +1241,19 @@ const server = createServer(async (req, res) => {
       } else if (generated.content) {
         speechError = "客户端没有提供 MiniMax TTS 配置";
       }
-      const opening = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: generated.content };
+      const opening = {
+        id: randomUUID(), role: "assistant", content: generated.content,
+        // Private cache bridge for the first spoken turn; not sent to iOS.
+        modelContent: generated.modelContent,
+        requestModelContent: generated.userModelContent,
+        createdAt: now, speechScript: generated.content
+      };
       const call = { id: callId, initiator: "user", state: "active", startedAt: now, turns: [opening] };
       thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
       thread.calls.push(call);
       await saveThreads(threads);
-      return send(res, 200, { callId, status: "accepted", firstMessage: opening, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError, memorySaved: generated.memorySaved });
+      const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
+      return send(res, 200, { callId, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError, memorySaved: generated.memorySaved });
     }
     if (req.method === "POST" && match[2]) {
       const input = await body(req);
