@@ -790,7 +790,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地发一条简短、亲近、不催促的聊天消息；不要复述整段历史，不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。</internal_proactive_nudge>\n"
     : "";
   const userModelContent = `${systemContext}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
-  const cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
+  let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
+  if (images.length) cacheSystem += "\\n\\n当前用户消息附带图片。请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
     ...history,
@@ -857,9 +858,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const callDecision = cleanedRaw.match(/<call_decision>\s*(accept|reject)\s*<\/call_decision>/i)?.[1]?.toLowerCase() || null;
   const callUserText = cleanedRaw.match(/<call_user_text>([\s\S]*?)<\/call_user_text>/i)?.[1]?.trim() || null;
   const emojiMood = cleanedRaw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
+  const galleryCollectionMatch = cleanedRaw.match(/<gallery_collection>([\s\S]*?)<\/gallery_collection>/i);
+  let galleryCollection = null;
+  try { galleryCollection = galleryDecision(JSON.parse(galleryCollectionMatch?.[1] || "null")); }
+  catch { galleryCollection = null; }
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -873,7 +878,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
 }
 
 async function checkCacheKeepalive() {
@@ -1087,14 +1092,26 @@ async function analyzeGalleryImage(dataURI) {
   }
 }
 
-async function saveGalleryImage(threadID, source, { automatic = false, draft = {} } = {}) {
+function galleryDecision(value) {
+  if (!value || typeof value !== "object" || value.shouldCollect !== true) return null;
+  return {
+    shouldCollect: true,
+    title: galleryText(value.title, "我们收藏的一张照片", 36),
+    visualDescription: galleryText(value.visualDescription, "一张我们收藏的图片。"),
+    firstImpression: galleryText(value.firstImpression, "这一刻被好好收下了。", 240)
+  };
+}
+
+async function saveGalleryImage(threadID, source, { automatic = false, draft = {}, decision = null } = {}) {
   const payload = imagePayload(source);
   if (!payload) return null;
   const id = createHash("sha256").update(payload.bytes).digest("hex");
   const existing = await readGalleryItem(threadID, id);
   if (existing) return existing;
-  const analysis = await analyzeGalleryImage(payload.dataURI);
-  if (automatic && !analysis.shouldCollect) return null;
+  // Automatic collection is decided by the same chat model that received the
+  // picture and full conversation. The helper remains for manual gallery edits.
+  const analysis = automatic ? galleryDecision(decision) : await analyzeGalleryImage(payload.dataURI);
+  if (!analysis || (automatic && !analysis.shouldCollect)) return null;
   const paths = galleryPaths(threadID, id);
   await mkdir(paths.directory, { recursive: true });
   const destination = paths.image(payload.extension);
@@ -1121,7 +1138,10 @@ async function saveGalleryImage(threadID, source, { automatic = false, draft = {
 }
 
 async function saveGalleryImages(threadID, sources, options) {
-  const items = await Promise.all((sources || []).map((source) => saveGalleryImage(threadID, source, options)));
+  const items = await Promise.all((sources || []).map((source, index) => saveGalleryImage(threadID, source, {
+    ...options,
+    decision: Array.isArray(options?.decisions) ? options.decisions[index] : options?.decision
+  })));
   return items.filter(Boolean);
 }
 
@@ -1489,11 +1509,10 @@ const server = createServer(async (req, res) => {
       const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       activeChatThreads.add(id);
-      const gallerySave = images.length ? saveGalleryImages(id, images, { automatic: true }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : Promise.resolve([]);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
       finally { activeChatThreads.delete(id); }
-      const galleryItems = await gallerySave;
+      const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
@@ -1525,7 +1544,14 @@ const server = createServer(async (req, res) => {
         htmlTitle: generated.htmlTitle,
         createdAt: new Date().toISOString()
       };
-      threads[id].messages.push(storedUserMessage, assistantMessage);
+      const galleryMessages = galleryItems.map((item, index) => ({
+        id: randomUUID(),
+        role: "assistant",
+        content: JSON.stringify({ id: item.id, title: item.title, firstImpression: item.firstImpression }),
+        contentType: "gallery_collected",
+        createdAt: new Date(Date.now() + index + 1).toISOString()
+      }));
+      threads[id].messages.push(storedUserMessage, assistantMessage, ...galleryMessages);
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       await saveThreads(threads);
       if (invite) startIncomingCallRing(id, invite);
@@ -1537,7 +1563,7 @@ const server = createServer(async (req, res) => {
       // Normal replies can finish while the iOS app is suspended. Reuse the
       // registered APNs destination so the user is notified when the reply is ready.
       await sendProactivePush(id, invite ? `📞 ${invite.reason}` : visibleContent, invite ? { kind: "incoming_call", callId: invite.id } : null);
-      return { userMessage: storedUserMessage, assistantMessage, galleryItems, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
+      return { userMessage: storedUserMessage, assistantMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
