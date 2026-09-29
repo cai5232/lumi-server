@@ -1230,6 +1230,43 @@ const server = createServer(async (req, res) => {
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
     }
+    // Temporary, authenticated one-hop migration for moving the persistent
+    // conversation and gallery from the former Zeabur service. The source is
+    // deliberately fixed rather than accepting arbitrary URLs.
+    if (req.method === "POST" && url.pathname === "/v1/admin/migrate-from-silicon-valley") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const input = await body(req);
+      const threadID = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
+      const source = "https://lumi-api.zeabur.app";
+      const [threadResponse, galleryResponse] = await Promise.all([
+        fetch(`${source}/v1/chats/${encodeURIComponent(threadID)}`),
+        fetch(`${source}/v1/chats/${encodeURIComponent(threadID)}/gallery`)
+      ]);
+      if (!threadResponse.ok || !galleryResponse.ok) return send(res, 502, { error: "source_unavailable" });
+      const thread = await threadResponse.json();
+      const gallery = await galleryResponse.json();
+      if (!thread || !Array.isArray(thread.messages) || !Array.isArray(gallery.items)) return send(res, 502, { error: "source_payload_invalid" });
+      const threads = await readThreads();
+      threads[threadID] = thread;
+      await saveThreads(threads);
+      let copiedImages = 0;
+      for (const item of gallery.items) {
+        if (!item || !/^[a-f0-9]{64}$/i.test(item.id) || !galleryExtensions[item.mimeType]) continue;
+        const imageResponse = await fetch(`${source}/v1/chats/${encodeURIComponent(threadID)}/gallery/${item.id}/image`);
+        if (!imageResponse.ok) continue;
+        const payload = Buffer.from(await imageResponse.arrayBuffer());
+        const paths = galleryPaths(threadID, item.id);
+        await mkdir(paths.directory, { recursive: true });
+        const extension = item.extension || galleryExtensions[item.mimeType];
+        const destination = paths.image(extension);
+        const temporaryPath = `${destination}.${randomUUID()}.tmp`;
+        await writeFile(temporaryPath, payload);
+        await rename(temporaryPath, destination);
+        await writeGalleryItem(threadID, { ...item, extension });
+        copiedImages += 1;
+      }
+      return send(res, 200, { migratedMessages: thread.messages.length, migratedGalleryItems: copiedImages });
+    }
     const galleryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/gallery(?:\/([a-f0-9]{64})(?:\/(image|use))?)?$/i);
     if (galleryMatch) {
       const threadID = decodeURIComponent(galleryMatch[1]);
