@@ -909,9 +909,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   let diaryEntry = null;
   try { diaryEntry = diaryDecision(JSON.parse(diaryEntryMatch?.[1] || "null")); }
   catch { diaryEntry = null; }
+  const diaryActionMatch = cleanedRaw.match(/<diary_action>([\s\S]*?)<\/diary_action>/i);
+  let diaryAction = null;
+  try { diaryAction = diaryActionDecision(JSON.parse(diaryActionMatch?.[1] || "null")); }
+  catch { diaryAction = null; }
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
   if (!content && diaryEntry) content = "嗯，我在。";
@@ -928,7 +932,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
 }
 
 async function checkCacheKeepalive() {
@@ -1163,16 +1167,6 @@ function diaryDecision(value) {
   const body = diaryText(value.body, "", 1400);
   if (!body) return null;
   const requested = value.lock && typeof value.lock === "object" ? value.lock : { type: "public" };
-  if (requested.type === "question") {
-    const question = diaryText(requested.question, "关于今天的小问题", 90);
-    const choices = Array.isArray(requested.choices)
-      ? requested.choices.map((choice) => diaryText(choice, "", 50)).filter(Boolean).slice(0, 4)
-      : [];
-    const answer = diaryText(requested.answer, "", 50);
-    if (choices.length >= 2 && answer && choices.includes(answer)) {
-      return { title, body, lock: { type: "question", question, choices, answerHash: createHash("sha256").update(answer).digest("hex"), retryUntil: null } };
-    }
-  }
   if (requested.type === "capsule") {
     const unlockAt = new Date(requested.unlockAt);
     if (!Number.isNaN(unlockAt.valueOf()) && unlockAt > new Date()) {
@@ -1182,9 +1176,20 @@ function diaryDecision(value) {
   return { title, body, lock: { type: "public" } };
 }
 
+function diaryActionDecision(value) {
+  if (!value || typeof value !== "object") return null;
+  const type = value.type === "unlock" || value.type === "retime" ? value.type : null;
+  const title = diaryText(value.title, "", 28);
+  if (!type || !title) return null;
+  if (type === "unlock") return { type, title };
+  const unlockAt = new Date(value.unlockAt);
+  if (Number.isNaN(unlockAt.valueOf()) || unlockAt <= new Date()) return null;
+  return { type, title, unlockAt: unlockAt.toISOString() };
+}
+
 function diaryIsLocked(item, now = new Date()) {
   if (item?.unlockedAt) return false;
-  return item?.lock?.type === "question" || (item?.lock?.type === "capsule" && new Date(item.lock.unlockAt) > now);
+  return item?.lock?.type === "capsule" && new Date(item.lock.unlockAt) > now;
 }
 
 function diaryForClient(item) {
@@ -1765,6 +1770,13 @@ const server = createServer(async (req, res) => {
       if (diaryItem) {
         const existingDiaries = Array.isArray(threads[id].diaries) ? threads[id].diaries : [];
         threads[id].diaries = [diaryItem, ...existingDiaries].slice(0, 800);
+      }
+      if (generated.diaryAction) {
+        const target = (threads[id].diaries || []).find((item) => item.title === generated.diaryAction.title);
+        if (target?.lock?.type === "capsule") {
+          if (generated.diaryAction.type === "unlock") target.unlockedAt = new Date().toISOString();
+          if (generated.diaryAction.type === "retime") target.lock.unlockAt = generated.diaryAction.unlockAt;
+        }
       }
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       await persistChatThread(id, threads[id]);
