@@ -488,11 +488,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
     // If ZenMux has no channel for a model, transparently retry once through
     // the configured backup relay so older clients cannot get stuck on a
     // stale ZenMux model selection.
-    if (provider === "zenmux" && /no available channel|没有可用.*通道/i.test(providerError)) {
+    if (provider === "zenmux" && (response.status >= 500 || /no available channel|没有可用.*通道/i.test(providerError))) {
       const backup = providerConfig("backup");
       const backupModels = await listProviderModels(backup);
-      if (backupModels[0]) {
-        return callModel({ messages, temperature, maxOutputTokens, cacheCurrentUser, onUsage, provider: "backup", model: backupModels[0] });
+      const fallbackModel = backupModels[0] || requestedModel;
+      if (fallbackModel) {
+        return callModel({ messages, temperature, maxOutputTokens, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel });
       }
     }
     throw new Error(providerError);
