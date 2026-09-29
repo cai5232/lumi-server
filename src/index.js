@@ -814,7 +814,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // actual image remains request-specific, so an image turn can reuse the
   // same cached conversation prefix instead of forcing a cache miss.
   cacheSystem += "\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
-  cacheSystem += "\\n\\n你也可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记。不要为了功能而频繁写，普通闲聊不要写；若决定写，在回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。lock 可以是 public；也可以是 question（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；或 capsule（给未来的 ISO 时间 unlockAt）。你自己决定是否上锁和上哪种锁。仅当这是你在日常聊天中自主决定要记下的瞬间时，绝不能在可见回复中提及日记、标签或内部机制。若用户明确要求你写日记，则正常在聊天中回复这篇日记；是否同时写入日记页仍由你自行判断。";
+  cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。若你决定写，在回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
     ...history,
