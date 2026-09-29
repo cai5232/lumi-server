@@ -740,7 +740,12 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const cachedSystemBase = typeof thread?.cacheSystem === "string"
     ? thread.cacheSystem.split("\n\n你可以自行决定要不要使用颜文字")[0].trim()
     : "";
-  const configuredSystem = proactive && cachedSystemBase
+  // Reuse the exact stable system prefix from the previous turn for every
+  // ordinary chat as well as proactive turns. Rebuilding it from environment
+  // values after a keepalive can introduce a tiny difference and makes the
+  // next real message miss the provider cache immediately after a successful
+  // keepalive.
+  const configuredSystem = !callMode && cachedSystemBase
     ? cachedSystemBase
     : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
   const callDirective = "若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。";
