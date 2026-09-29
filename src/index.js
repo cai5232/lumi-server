@@ -45,8 +45,8 @@ const providerConfigs = () => [
 ].filter((item) => item.url && item.key);
 
 function providerConfig(id = "zenmux", modelOverride = "") {
-  const config = providerConfigs().find((item) => item.id === id) || providerConfigs()[0];
-  if (!config) throw new Error("模型服务尚未配置");
+  const config = providerConfigs().find((item) => item.id === id);
+  if (!config) throw new Error(`${id === "backup" ? "备用中转" : "ZenMux"}线路尚未配置`);
   return { ...config, model: modelOverride || config.model };
 }
 
@@ -429,7 +429,11 @@ function cacheUsage(usage = {}) {
 }
 
 async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "" }) {
-  const selected = providerConfig(provider, requestedModel);
+  let selected = providerConfig(provider, requestedModel);
+  if (!selected.model && provider !== "zenmux") {
+    const discovered = await listProviderModels(selected);
+    if (discovered[0]) selected = { ...selected, model: discovered[0] };
+  }
   const configuredURL = selected.url;
   const apiKey = selected.key;
   const model = selected.model;
