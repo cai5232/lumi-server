@@ -483,7 +483,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   let data = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
   if (!response.ok) {
-    const providerError = String(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
+    const rawProviderError = data?.error?.message || data?.error || data?.message || `模型服务返回 ${response.status}`;
+    const providerError = typeof rawProviderError === "string" ? rawProviderError : JSON.stringify(rawProviderError);
     // If ZenMux has no channel for a model, transparently retry once through
     // the configured backup relay so older clients cannot get stuck on a
     // stale ZenMux model selection.
