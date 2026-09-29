@@ -814,7 +814,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // actual image remains request-specific, so an image turn can reuse the
   // same cached conversation prefix instead of forcing a cache miss.
   cacheSystem += "\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
-  cacheSystem += "\\n\\n你也可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记。不要为了功能而频繁写，普通闲聊不要写；若决定写，在回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。lock 可以是 public；也可以是 question（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；或 capsule（给未来的 ISO 时间 unlockAt）。你自己决定是否上锁和上哪种锁。绝不能在可见回复中提及日记、标签或内部机制。";
+  cacheSystem += "\\n\\n你也可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记。不要为了功能而频繁写，普通闲聊不要写；若决定写，在回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。lock 可以是 public；也可以是 question（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；或 capsule（给未来的 ISO 时间 unlockAt）。你自己决定是否上锁和上哪种锁。若用户明确要求你写日记、记日记或把这段记下来：必须生成 diary_entry，且可见回复必须完全为空——不要回复“好”、不要展示标题、日期、分隔线或日记正文。日记只会在日记页出现。绝不能在可见回复中提及日记、标签或内部机制。";
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
     ...history,
@@ -891,7 +891,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   catch { diaryEntry = null; }
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  let explicitDiaryRequest = /(?:写|记|做|存).{0,8}日记|日记.{0,8}(?:写|记|做|存)/u.test(input);
+  let content = diaryEntry && explicitDiaryRequest ? "" : cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
