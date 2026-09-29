@@ -814,7 +814,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // actual image remains request-specific, so an image turn can reuse the
   // same cached conversation prefix instead of forcing a cache miss.
   cacheSystem += "\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
-  cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。若你决定写，在回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
+  cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。无论是否决定写日记，都必须先给用户一条完整、自然的正常聊天回复；绝不可只输出内部标签。若你决定写，在正常回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字的日记标题\\\",\\\"body\\\":\\\"第一人称、自然完整的一段日记\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
   const cacheRequestMessages = [
     { role: "system", content: cacheSystem },
     ...history,
@@ -892,6 +892,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  // A provider occasionally returns only the private diary payload. Never let
+  // stripping that payload turn a completed chat turn into an invisible reply.
+  if (!content && diaryEntry) content = "嗯，我在。";
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -1323,7 +1326,11 @@ const server = createServer(async (req, res) => {
       const threadID = decodeURIComponent(diaryMatch[1]);
       const diaryID = diaryMatch[2];
       const diaries = await readDiaries();
-      const entries = Array.isArray(diaries[threadID]) ? diaries[threadID] : [];
+      const threads = await readThreads();
+      // Keep diaries with the thread history as the durable source of truth.
+      // The former stand-alone file remains a backwards-compatible mirror.
+      const embeddedEntries = Array.isArray(threads[threadID]?.diaries) ? threads[threadID].diaries : [];
+      const entries = embeddedEntries.length ? embeddedEntries : (Array.isArray(diaries[threadID]) ? diaries[threadID] : []);
       if (req.method === "GET" && !diaryID) return send(res, 200, { items: entries.map(diaryForClient) });
       if (req.method === "POST" && diaryID) {
         const entry = entries.find((item) => item.id === diaryID);
@@ -1338,11 +1345,15 @@ const server = createServer(async (req, res) => {
         if (!answer || createHash("sha256").update(answer).digest("hex") !== entry.lock.answerHash) {
           entry.lock.retryUntil = new Date(now + 3 * 60_000).toISOString();
           diaries[threadID] = entries;
+          if (threads[threadID]) threads[threadID].diaries = entries;
+          await saveThreads(threads);
           await saveDiaries(diaries);
           return send(res, 403, { error: "wrong_answer", retryUntil: entry.lock.retryUntil });
         }
         entry.unlockedAt = new Date().toISOString();
         diaries[threadID] = entries;
+        if (threads[threadID]) threads[threadID].diaries = entries;
+        await saveThreads(threads);
         await saveDiaries(diaries);
         return send(res, 200, { item: diaryForClient(entry) });
       }
@@ -1682,11 +1693,21 @@ const server = createServer(async (req, res) => {
         createdAt: new Date(Date.now() + index + 1).toISOString()
       }));
       threads[id].messages.push(storedUserMessage, assistantMessage, ...galleryMessages);
-      // The same contextual main-model response decides whether a diary exists.
-      // It is deliberately stored out of band so the chat never announces it.
-      await saveDiary(id, generated.diaryEntry);
+      // Keep the model's diary decision inside the same durable record as its
+      // chat history. diaries.json remains a backwards-compatible mirror only.
+      const diaryItem = generated.diaryEntry
+        ? { id: randomUUID(), createdAt: new Date().toISOString(), ...generated.diaryEntry }
+        : null;
+      if (diaryItem) {
+        const existingDiaries = Array.isArray(threads[id].diaries) ? threads[id].diaries : [];
+        threads[id].diaries = [diaryItem, ...existingDiaries].slice(0, 800);
+      }
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       await saveThreads(threads);
+      if (diaryItem) {
+        // A legacy mirror failure must never eat a completed chat response.
+        saveDiary(id, generated.diaryEntry).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
+      }
       if (invite) startIncomingCallRing(id, invite);
       if (proactiveSettings.threadId === id) {
         proactiveSettings.scheduledForUserMessageId = userMessage.id;
