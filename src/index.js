@@ -482,7 +482,20 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   const raw = await response.text();
   let data = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
-  if (!response.ok) throw new Error(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
+  if (!response.ok) {
+    const providerError = String(data?.error?.message || data?.error || `模型服务返回 ${response.status}`);
+    // If ZenMux has no channel for a model, transparently retry once through
+    // the configured backup relay so older clients cannot get stuck on a
+    // stale ZenMux model selection.
+    if (provider === "zenmux" && /no available channel|没有可用.*通道/i.test(providerError)) {
+      const backup = providerConfig("backup");
+      const backupModels = await listProviderModels(backup);
+      if (backupModels[0]) {
+        return callModel({ messages, temperature, maxOutputTokens, cacheCurrentUser, onUsage, provider: "backup", model: backupModels[0] });
+      }
+    }
+    throw new Error(providerError);
+  }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
   if (onUsage) onUsage(usage);
