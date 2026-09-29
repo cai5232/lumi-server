@@ -1185,15 +1185,23 @@ function diaryForClient(item) {
   };
 }
 
+let diaryAppendQueue = Promise.resolve(null);
+
 async function saveDiary(threadID, decision) {
   if (!decision) return null;
-  const diaries = await readDiaries();
-  const entries = Array.isArray(diaries[threadID]) ? diaries[threadID] : [];
-  const item = { id: randomUUID(), createdAt: new Date().toISOString(), ...decision };
-  entries.unshift(item);
-  diaries[threadID] = entries.slice(0, 800);
-  await saveDiaries(diaries);
-  return item;
+  // Serialize the read/append/write cycle. Two model replies can finish
+  // close together; without a queue, the second read could overwrite the
+  // first diary in the backwards-compatible mirror.
+  diaryAppendQueue = diaryAppendQueue.then(async () => {
+    const diaries = await readDiaries();
+    const entries = Array.isArray(diaries[threadID]) ? diaries[threadID] : [];
+    const item = { id: randomUUID(), createdAt: new Date().toISOString(), ...decision };
+    entries.unshift(item);
+    diaries[threadID] = entries.slice(0, 800);
+    await saveDiaries(diaries);
+    return item;
+  });
+  return diaryAppendQueue;
 }
 
 async function saveGalleryImage(threadID, source, { automatic = false, draft = {}, decision = null } = {}) {
@@ -1330,7 +1338,13 @@ const server = createServer(async (req, res) => {
       // Keep diaries with the thread history as the durable source of truth.
       // The former stand-alone file remains a backwards-compatible mirror.
       const embeddedEntries = Array.isArray(threads[threadID]?.diaries) ? threads[threadID].diaries : [];
-      const entries = embeddedEntries.length ? embeddedEntries : (Array.isArray(diaries[threadID]) ? diaries[threadID] : []);
+      const mirroredEntries = Array.isArray(diaries[threadID]) ? diaries[threadID] : [];
+      // A chat response and the legacy mirror are written in separate durable
+      // records. Merge both sources so a close-together pair of diary writes
+      // can never hide one entry just because the thread snapshot lagged.
+      const entries = Array.from(new Map([...embeddedEntries, ...mirroredEntries].map((item) => [item.id, item])).values())
+        .sort((a, b) => new Date(b.createdAt).valueOf() - new Date(a.createdAt).valueOf())
+        .slice(0, 800);
       if (req.method === "GET" && !diaryID) return send(res, 200, { items: entries.map(diaryForClient) });
       if (req.method === "DELETE" && diaryID) {
         const nextEntries = entries.filter((item) => item.id !== diaryID);
