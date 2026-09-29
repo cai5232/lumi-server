@@ -1192,7 +1192,9 @@ function diaryForClient(item) {
   return {
     id: item.id,
     createdAt: item.createdAt,
-    title: locked ? "一封还没打开的日记" : item.title,
+    // Keep the model-written title visible on a locked card; only the body
+    // stays protected until the capsule/question is unlocked.
+    title: item.title,
     body: locked ? "写下的字被轻轻藏起来了。" : item.body,
     isLocked: locked,
     lock: locked ? {
