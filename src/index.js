@@ -38,6 +38,7 @@ let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
+const chatPersistenceQueues = new Map();
 // Older iOS builds may retry a timed-out POST more than a minute later.
 // Keep exact-body results long enough to cover their three attempts.
 const legacyRetryWindowMs = 3 * 60_000;
@@ -68,6 +69,25 @@ async function saveThreads(threads) {
   const temporaryPath = `${threadPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(threads, null, 2));
   await rename(temporaryPath, threadPath);
+}
+
+async function persistChatThread(id, snapshot) {
+  const previous = chatPersistenceQueues.get(id) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    const all = await readThreads();
+    const stored = all[id] || { id, title: "新聊天", messages: [] };
+    const messagesByID = new Map((Array.isArray(stored.messages) ? stored.messages : []).map((item) => [item.id, item]));
+    for (const item of (Array.isArray(snapshot.messages) ? snapshot.messages : [])) messagesByID.set(item.id, item);
+    const messages = Array.from(messagesByID.values()).sort((a, b) => new Date(a.createdAt).valueOf() - new Date(b.createdAt).valueOf());
+    const diaries = mergeDiaryEntries(stored.diaries || [], snapshot.diaries || []);
+    all[id] = { ...stored, ...snapshot, messages, diaries };
+    await saveThreads(all);
+    return all[id];
+  });
+  chatPersistenceQueues.set(id, operation.finally(() => {
+    if (chatPersistenceQueues.get(id) === operation) chatPersistenceQueues.delete(id);
+  }));
+  return operation;
 }
 
 async function readDiaries() {
@@ -1745,7 +1765,7 @@ const server = createServer(async (req, res) => {
         threads[id].diaries = [diaryItem, ...existingDiaries].slice(0, 800);
       }
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
-      await saveThreads(threads);
+      await persistChatThread(id, threads[id]);
       if (diaryItem) {
         // A legacy mirror failure must never eat a completed chat response.
         saveDiary(id, generated.diaryEntry, diaryItem).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
