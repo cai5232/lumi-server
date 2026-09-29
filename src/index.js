@@ -1187,7 +1187,7 @@ function diaryForClient(item) {
 
 let diaryAppendQueue = Promise.resolve(null);
 
-async function saveDiary(threadID, decision) {
+async function saveDiary(threadID, decision, existingItem = null) {
   if (!decision) return null;
   // Serialize the read/append/write cycle. Two model replies can finish
   // close together; without a queue, the second read could overwrite the
@@ -1195,7 +1195,7 @@ async function saveDiary(threadID, decision) {
   diaryAppendQueue = diaryAppendQueue.then(async () => {
     const diaries = await readDiaries();
     const entries = Array.isArray(diaries[threadID]) ? diaries[threadID] : [];
-    const item = { id: randomUUID(), createdAt: new Date().toISOString(), ...decision };
+    const item = existingItem || { id: randomUUID(), createdAt: new Date().toISOString(), ...decision };
     entries.unshift(item);
     diaries[threadID] = entries.slice(0, 800);
     await saveDiaries(diaries);
@@ -1237,6 +1237,27 @@ async function saveGalleryImage(threadID, source, { automatic = false, draft = {
   };
   await writeGalleryItem(threadID, item);
   return item;
+}
+
+function mergeDiaryEntries(...sources) {
+  const byID = new Map();
+  const byContent = new Map();
+  for (const item of sources.flat()) {
+    if (!item || !item.id) continue;
+    const contentKey = `${item.title || ""}\u0000${item.body || ""}`;
+    const existing = byContent.get(contentKey);
+    if (existing) {
+      // Prefer the durable thread item when both records are copies of the
+      // same generated diary.
+      if (String(item.id).length > String(existing.id).length) continue;
+      byID.delete(existing.id);
+    }
+    byContent.set(contentKey, item);
+    byID.set(item.id, item);
+  }
+  return Array.from(byID.values())
+    .sort((a, b) => new Date(b.createdAt).valueOf() - new Date(a.createdAt).valueOf())
+    .slice(0, 800);
 }
 
 async function saveGalleryImages(threadID, sources, options) {
@@ -1342,9 +1363,7 @@ const server = createServer(async (req, res) => {
       // A chat response and the legacy mirror are written in separate durable
       // records. Merge both sources so a close-together pair of diary writes
       // can never hide one entry just because the thread snapshot lagged.
-      const entries = Array.from(new Map([...embeddedEntries, ...mirroredEntries].map((item) => [item.id, item])).values())
-        .sort((a, b) => new Date(b.createdAt).valueOf() - new Date(a.createdAt).valueOf())
-        .slice(0, 800);
+      const entries = mergeDiaryEntries(embeddedEntries, mirroredEntries);
       if (req.method === "GET" && !diaryID) return send(res, 200, { items: entries.map(diaryForClient) });
       if (req.method === "DELETE" && diaryID) {
         const nextEntries = entries.filter((item) => item.id !== diaryID);
@@ -1729,7 +1748,7 @@ const server = createServer(async (req, res) => {
       await saveThreads(threads);
       if (diaryItem) {
         // A legacy mirror failure must never eat a completed chat response.
-        saveDiary(id, generated.diaryEntry).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
+        saveDiary(id, generated.diaryEntry, diaryItem).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
       }
       if (invite) startIncomingCallRing(id, invite);
       if (proactiveSettings.threadId === id) {
