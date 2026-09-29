@@ -747,7 +747,8 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false, callHistory = [], provider = "zenmux", model = "" }) {
+async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false, callHistory = [], provider = "", model = "" }) {
+  provider = provider || thread?.cacheProvider || "zenmux";
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
@@ -1018,6 +1019,8 @@ async function checkCacheKeepalive() {
       maxOutputTokens: 16,
       temperature: 0,
       cacheCurrentUser: false,
+      provider: thread.cacheProvider || "zenmux",
+      model: thread.cacheModel || "",
       onUsage: (usage) => { keepaliveUsage = usage; }
     });
     const { read: readTokens, created: writeTokens } = cacheUsage(keepaliveUsage);
