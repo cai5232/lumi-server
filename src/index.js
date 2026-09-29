@@ -39,6 +39,25 @@ let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
+const providerConfigs = () => [
+  { id: "zenmux", url: process.env.LUMI_MODEL_API_URL, key: process.env.LUMI_MODEL_API_KEY, model: process.env.LUMI_MODEL_NAME },
+  { id: "backup", url: process.env.LUMI_MODEL_API_URL_2, key: process.env.LUMI_MODEL_API_KEY_2, model: null }
+].filter((item) => item.url && item.key);
+
+function providerConfig(id = "zenmux", modelOverride = "") {
+  const config = providerConfigs().find((item) => item.id === id) || providerConfigs()[0];
+  if (!config) throw new Error("模型服务尚未配置");
+  return { ...config, model: modelOverride || config.model };
+}
+
+async function listProviderModels(config) {
+  try {
+    const response = await fetch(`${String(config.url).replace(/\/$/, "")}/models`, { headers: { authorization: `Bearer ${config.key}` } });
+    const data = await response.json().catch(() => ({}));
+    const models = Array.isArray(data?.data) ? data.data.map((item) => item.id).filter(Boolean) : [];
+    return models;
+  } catch { return []; }
+}
 // Older iOS builds may retry a timed-out POST more than a minute later.
 // Keep exact-body results long enough to cover their three attempts.
 const legacyRetryWindowMs = 3 * 60_000;
@@ -409,10 +428,11 @@ function cacheUsage(usage = {}) {
   return { read, created };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage }) {
-  const configuredURL = process.env.LUMI_MODEL_API_URL;
-  const apiKey = process.env.LUMI_MODEL_API_KEY;
-  const model = process.env.LUMI_MODEL_NAME;
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "" }) {
+  const selected = providerConfig(provider, requestedModel);
+  const configuredURL = selected.url;
+  const apiKey = selected.key;
+  const model = selected.model;
   if (!configuredURL || !apiKey || !model) {
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
@@ -727,7 +747,7 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false, callHistory = [] }) {
+async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, callMode = false, callHistory = [], provider = "zenmux", model = "" }) {
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
@@ -874,6 +894,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
     messages: cacheRequestMessages,
+    provider,
+    model,
     onUsage: (usage) => {
       const { read: cachedRead, created: cachedWrite } = cacheUsage(usage);
       const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
@@ -1376,6 +1398,14 @@ const server = createServer(async (req, res) => {
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens }
       });
     }
+    if (req.method === "GET" && url.pathname === "/v1/providers") {
+      const providers = await Promise.all(providerConfigs().map(async (config) => ({
+        id: config.id,
+        models: await listProviderModels(config),
+        configuredModel: config.model || null
+      })));
+      return send(res, 200, { providers });
+    }
     if (req.method === "POST" && url.pathname === "/v1/memories") {
       const input = await body(req);
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
@@ -1725,12 +1755,15 @@ const server = createServer(async (req, res) => {
       let generated;
       activeChatThreads.add(id);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
-      try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id] }); }
+      const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
+      const selectedModel = typeof input.model === "string" ? input.model : "";
+      try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel }); }
       finally { activeChatThreads.delete(id); }
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
-      threads[id].cacheModel = process.env.LUMI_MODEL_NAME;
+      threads[id].cacheModel = selectedModel || process.env.LUMI_MODEL_NAME;
+      threads[id].cacheProvider = selectedProvider;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
       threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
