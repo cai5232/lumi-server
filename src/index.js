@@ -1332,6 +1332,15 @@ const server = createServer(async (req, res) => {
       const embeddedEntries = Array.isArray(threads[threadID]?.diaries) ? threads[threadID].diaries : [];
       const entries = embeddedEntries.length ? embeddedEntries : (Array.isArray(diaries[threadID]) ? diaries[threadID] : []);
       if (req.method === "GET" && !diaryID) return send(res, 200, { items: entries.map(diaryForClient) });
+      if (req.method === "DELETE" && diaryID) {
+        const nextEntries = entries.filter((item) => item.id !== diaryID);
+        if (nextEntries.length === entries.length) return send(res, 404, { error: "diary_not_found" });
+        diaries[threadID] = nextEntries;
+        if (threads[threadID]) threads[threadID].diaries = nextEntries;
+        await saveThreads(threads);
+        await saveDiaries(diaries);
+        return send(res, 200, { deleted: true });
+      }
       if (req.method === "POST" && diaryID) {
         const entry = entries.find((item) => item.id === diaryID);
         if (!entry) return send(res, 404, { error: "diary_not_found" });
