@@ -25,7 +25,7 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：记忆库内部 Nook Token，填 memorycore 的 `OMBRE_NOOK_API_TOKEN`；用于检索/写入接口
 - `LUMI_MEMORY_PASSWORD`：如果 memorycore 只提供密码登录，可填记忆库密码，后端会自动登录并复用会话
-- `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/search`
+- `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/integrations/nook/recall`（POST，发送 `query` 和 `limit`）
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/integrations/nook/memories`；该路径会写入可被 `/api/search` 检索的 buckets
 - `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
 - `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
@@ -66,5 +66,5 @@ Claude 缓存按稳定的系统提示词和历史消息设置断点；每次变�
 当窗口估算 Token（包含当前输入）达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
-每条普通回复调用一次聊天模型；记忆关键词由后端本地提取，避免为检索另付一次模型调用。关键词只送给记忆库，不会塞进聊天提示词；返回的记忆原文和系统时间戳以标明 `source="system"` 的上下文放在本轮输入前，并从 `/health` 暴露搜索结果数与最近错误。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。
+每条普通回复调用一次聊天模型；记忆关键词由后端本地提取，避免为检索另付一次模型调用。关键词只送给记忆库，不会塞进聊天提示词；Lumi 通过 Memory Core 的 `/api/integrations/nook/recall` 读取 `related` 结果，返回的记忆原文和系统时间戳以标明 `source="system"` 的上下文放在本轮输入前，并从 `/health` 暴露搜索结果数与最近错误。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。
 颜文字库第一轮只发送心情标签名；AI 自行决定是否输出 `<emoji_mood>`。选中标签后，后端从对应类别本地选择一个颜文字，不再为此额外调用一次模型；其他类别的颜文字不会送给模型。
