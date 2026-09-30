@@ -41,7 +41,7 @@ const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
 const providerConfigs = () => [
   { id: "zenmux", url: process.env.LUMI_MODEL_API_URL, key: process.env.LUMI_MODEL_API_KEY, model: process.env.LUMI_MODEL_NAME },
-  { id: "backup", url: process.env.LUMI_MODEL_API_URL_2, key: process.env.LUMI_MODEL_API_KEY_2, model: null }
+  { id: "backup", url: process.env.LUMI_MODEL_API_URL_2, key: process.env.LUMI_MODEL_API_KEY_2, model: process.env.LUMI_MODEL_NAME_2 || null }
 ].filter((item) => item.url && item.key);
 
 function providerConfig(id = "zenmux", modelOverride = "") {
@@ -52,7 +52,8 @@ function providerConfig(id = "zenmux", modelOverride = "") {
 
 async function listProviderModels(config) {
   try {
-    const response = await fetch(`${String(config.url).replace(/\/$/, "")}/models`, { headers: { authorization: `Bearer ${config.key}` } });
+    const baseURL = String(config.url).replace(/\/chat\/completions\/?$/i, "").replace(/\/$/, "");
+    const response = await fetch(`${baseURL}/models`, { headers: { authorization: `Bearer ${config.key}` } });
     const data = await response.json().catch(() => ({}));
     const models = Array.isArray(data?.data) ? data.data.map((item) => item.id).filter(Boolean) : [];
     return models;
@@ -506,10 +507,19 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   cacheStats.cacheReadTokens += cache.read;
   cacheStats.cacheWriteTokens += cache.created;
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
-  const content = nativeAnthropic
+  const rawContent = nativeAnthropic
     ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
-    : data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string" || !content.trim()) throw new Error("模型没有返回内容");
+    : data?.choices?.[0]?.message?.content
+      ?? data?.choices?.[0]?.text
+      ?? data?.output_text
+      ?? data?.content;
+  const content = Array.isArray(rawContent)
+    ? rawContent.map((block) => typeof block === "string" ? block : block?.text || block?.content || "").join("")
+    : typeof rawContent === "string" ? rawContent : "";
+  if (!content.trim()) {
+    const finishReason = data?.choices?.[0]?.finish_reason || data?.status || "unknown";
+    throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
+  }
   return content.trim();
 }
 
