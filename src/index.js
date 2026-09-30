@@ -891,8 +891,11 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const exactCachedPrefix = Array.isArray(thread?.cacheKeepaliveMessages) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
     thread.cacheKeepaliveMessages.at(-1)?.role === "user" &&
-    thread.cacheKeepaliveMessages.at(-1)?.content === previousUserContent &&
-    thread.cacheSystem === cacheSystem
+    (thread.cacheKeepaliveSnapshotKind === "proactive" ||
+      thread.cacheKeepaliveMessages.at(-1)?.content === previousUserContent) &&
+    thread.cacheSystem === cacheSystem &&
+    (!model || model === thread.cacheModel) &&
+    (!thread.cacheProvider || provider === thread.cacheProvider)
     ? [
         ...thread.cacheKeepaliveMessages,
         { role: "assistant", content: thread.cacheKeepaliveAssistantContent }
