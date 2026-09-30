@@ -1002,7 +1002,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens };
+  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
@@ -1811,9 +1811,20 @@ const server = createServer(async (req, res) => {
       threads[id].cacheProvider = selectedProvider;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
-      threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
-      threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
-      threads[id].cacheKeepaliveSnapshotKind = "chat";
+      // A successful compaction removes old messages from the active context.
+      // Never retain the pre-compaction cache snapshot, or keepalive would
+      // resurrect the full history and undo the 68,888-token boundary.
+      if (generated.compactionApplied) {
+        threads[id].cacheKeepaliveMessages = null;
+        threads[id].cacheKeepaliveAssistantContent = "";
+        threads[id].cacheKeepaliveSnapshotKind = "";
+        threads[id].cacheKeepalivePrefixHash = "";
+        threads[id].cacheKeepaliveAt = 0;
+      } else {
+        threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
+        threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
+        threads[id].cacheKeepaliveSnapshotKind = "chat";
+      }
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
