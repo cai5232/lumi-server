@@ -442,7 +442,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
   const isClaude = /anthropic|claude/i.test(model);
-  const nativeAnthropic = isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
+  // Native Anthropic is a ZenMux-only mode. Backup relays are OpenAI-compatible
+  // unless they get their own explicit native-API configuration.
+  const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
   const apiURL = nativeAnthropic && /\/api\/v1\/?$/i.test(configuredURL)
     ? configuredURL.replace(/\/api\/v1\/?$/i, "/api/anthropic/v1/messages")
     : /\/chat\/completions\/?$/i.test(configuredURL)
@@ -492,7 +494,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
     if (provider === "zenmux" && (response.status >= 500 || /no available channel|没有可用.*通道/i.test(providerError))) {
       const backup = providerConfig("backup");
       const backupModels = await listProviderModels(backup);
-      const fallbackModel = backupModels[0] || requestedModel;
+      const fallbackModel = backup.model || backupModels[0] || requestedModel;
       if (fallbackModel) {
         return callModel({ messages, temperature, maxOutputTokens, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel });
       }
