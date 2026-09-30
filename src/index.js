@@ -16,7 +16,7 @@ const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
-const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/search";
+const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/integrations/nook/recall";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
@@ -634,11 +634,13 @@ async function memorySearchRequest(query) {
   const cached = memorySearchCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) { cacheStats.memoryCacheHits += 1; await saveCacheStats().catch(() => {}); return cached.data; }
   if (cached) memorySearchCache.delete(cacheKey);
-  const headers = await memoryHeaders(false);
+  const headers = await memoryHeaders();
   cacheStats.memorySearches += 1;
   await saveCacheStats().catch(() => {});
-  const response = await fetch(`${memoryAPI}${memorySearchPath}?q=${encodeURIComponent(query)}`, {
+  const response = await fetch(`${memoryAPI}${memorySearchPath.startsWith("/") ? memorySearchPath : `/${memorySearchPath}`}`, {
+    method: "POST",
     headers,
+    body: JSON.stringify({ query: String(query).slice(0, 800), limit: 8 }),
     signal: AbortSignal.timeout(4000)
   });
   const data = await response.json().catch(() => ({}));
@@ -656,17 +658,24 @@ function extractMemoryKeywords(input) { return fallbackKeywords(input); }
 function normalizeMemories(data) {
   const container = data?.data && !Array.isArray(data.data) ? data.data : data;
   const list = Array.isArray(data) ? data : container.memories || container.results || container.items || container.data || [];
-  return list.map((item) => {
+  const normalized = list.map((item) => {
     if (typeof item === "string") return item;
     return item.content || item.text || item.memory || item.value || item.summary || item.content_preview || "";
-  }).filter(Boolean).slice(0, 8);
+  }).filter(Boolean);
+  // Nocturne Memory Core's direct Nook bridge returns the contextual recall
+  // as a single \`related\` string rather than an array.
+  if (!normalized.length) {
+    const related = String(container?.related || container?.surfaced || "").trim();
+    if (related) normalized.push(related);
+  }
+  return normalized.slice(0, 8);
 }
 
 async function searchMemories(input) {
   const keywords = await extractMemoryKeywords(input);
   const source = String(input || "").trim().slice(0, 1200);
   if (!source) return [];
-  const query = [source, ...keywords].filter(Boolean).join(" ");
+  const query = [source, ...keywords].filter(Boolean).join(" ").slice(0, 800);
   try {
     const memories = normalizeMemories(await memorySearchRequest(query));
     cacheStats.memoryResults += memories.length;
