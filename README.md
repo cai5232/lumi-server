@@ -16,6 +16,9 @@ Zeabur 环境变量：
 - `LUMI_MODEL_API_URL`：OpenAI 兼容地址；可填完整的 `/chat/completions`，也可填到 `/v1`，服务会自动补齐路径
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
+- `LUMI_MODEL_API_URL_2`：可选备用中转地址；同样支持基础 `/v1` 地址或完整 `/chat/completions` 地址
+- `LUMI_MODEL_API_KEY_2`：备用中转 API Key
+- `LUMI_MODEL_NAME_2`：可选备用模型名称；建议显式填写，避免自动选择 `/models` 返回的第一个模型
 - `ZENMUX_MANAGEMENT_API_KEY`：ZenMux Subscription Management 创建的管理密钥；仅供后端读取 5 小时 / 7 天订阅额度，不能放进 App 或前端
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
