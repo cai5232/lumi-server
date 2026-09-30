@@ -880,14 +880,34 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // same cached conversation prefix instead of forcing a cache miss.
   cacheSystem += "\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
   cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。无论是否决定写日记，都必须先给用户一条完整、自然的正常聊天回复；绝不可只输出内部标签。若你决定写，在正常回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字、概括当天发生的事的标题\\\",\\\"body\\\":\\\"只写今天真实发生的具体事情、对话、画面和当时感受；像给两个人看的自然日记，不要解释上下文、系统、记忆、模型或写作过程，不要把聊天摘要原样搬进去\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
-  const cacheRequestMessages = [
-    { role: "system", content: cacheSystem },
-    ...history,
-    // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
-    // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
-    // invalidates the message-cache prefix even when all earlier chat turns are unchanged.
-    { role: "user", content: userModelContent, images }
-  ];
+  // When a keepalive has already extended the cache through the exact previous
+  // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
+  // persisted display history can change hidden proactive markers, timestamps,
+  // memory wrappers, or role coalescing and causes the next real message to miss.
+  const previousUser = [...relevantMessages].reverse().find((message) => message.role === "user");
+  const previousUserContent = previousUser
+    ? (previousUser.modelContent || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
+    : "";
+  const exactCachedPrefix = Array.isArray(thread?.cacheKeepaliveMessages) &&
+    typeof thread?.cacheKeepaliveAssistantContent === "string" &&
+    thread.cacheKeepaliveMessages.at(-1)?.role === "user" &&
+    thread.cacheKeepaliveMessages.at(-1)?.content === previousUserContent &&
+    thread.cacheSystem === cacheSystem
+    ? [
+        ...thread.cacheKeepaliveMessages,
+        { role: "assistant", content: thread.cacheKeepaliveAssistantContent }
+      ]
+    : null;
+  let cacheRequestMessages = exactCachedPrefix
+    ? [...exactCachedPrefix, { role: "user", content: userModelContent, images }]
+    : [
+        { role: "system", content: cacheSystem },
+        ...history,
+        // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
+        // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
+        // invalidates the cache prefix even when all earlier chat turns are unchanged.
+        { role: "user", content: userModelContent, images }
+      ];
   // Compare the actual cache boundary in this request with the preceding
   // keepalive. Only hashes and booleans are stored; prompts stay private.
   const previousKeepaliveAt = Number(thread.cacheKeepaliveAt || 0);
