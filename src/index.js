@@ -1810,7 +1810,7 @@ const server = createServer(async (req, res) => {
       threads[id].cacheModel = selectedModel || process.env.LUMI_MODEL_NAME;
       threads[id].cacheProvider = selectedProvider;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
-      threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
+      threads[id].lastMeasuredInputTokens = generated.compactionApplied ? 0 : generated.measuredInputTokens;
       // A successful compaction removes old messages from the active context.
       // Never retain the pre-compaction cache snapshot, or keepalive would
       // resurrect the full history and undo the 68,888-token boundary.
