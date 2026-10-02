@@ -33,7 +33,7 @@ let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
-const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null };
+const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
 let proactiveCheckInFlight = false;
 let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
@@ -418,6 +418,7 @@ async function loadProactiveSettings() {
   await mkdir(dataDir, { recursive: true });
   try { Object.assign(proactiveSettings, JSON.parse(await readFile(proactiveSettingsPath, "utf8"))); }
   catch (error) { if (error?.code !== "ENOENT") console.warn(`proactive settings unavailable: ${error.message}`); }
+  if (!proactiveSettings.actions || typeof proactiveSettings.actions !== "object") proactiveSettings.actions = { message: true, phone: true, screen: false };
 }
 
 async function saveProactiveSettings() {
@@ -568,7 +569,8 @@ function chooseNudgeIntervalMs() {
 }
 
 async function checkProactiveNudge() {
-  if (proactiveCheckInFlight || !proactiveSettings.enabled || !String(proactiveSettings.message || "").trim()) return;
+  const actions = proactiveSettings.actions || { message: true, phone: true, screen: false };
+  if (proactiveCheckInFlight || !proactiveSettings.enabled || (!actions.message && !actions.phone && !actions.screen) || !String(proactiveSettings.message || "").trim()) return;
   // Never charge for an unsolicited message unless a valid push destination is ready.
   if (!apnsConfigured() || !pushTokens.some((device) => device.threadId === (proactiveSettings.threadId || "default"))) return;
   proactiveCheckInFlight = true;
@@ -621,7 +623,7 @@ async function checkProactiveNudge() {
     thread.cacheKeepaliveAssistantContent = generated.modelContent;
     thread.cacheKeepaliveSnapshotKind = "proactive";
     thread.cacheLastChatContinuity = generated.cacheContinuity;
-    const invite = dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
+    const invite = actions.phone && dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
     await saveThreads(threads);
     if (invite) startIncomingCallRing(threadId, invite);
     proactiveSettings.scheduledForUserMessageId = lastUser.id;
@@ -1710,6 +1712,7 @@ const server = createServer(async (req, res) => {
       proactiveSettings.enabled = input.enabled;
       proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
       proactiveSettings.message = typeof input.message === "string" ? input.message.slice(0, 1000) : "";
+      if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
       proactiveSettings.intervalMin = min;
       proactiveSettings.intervalMax = max;
       proactiveSettings.scheduledForUserMessageId = null;
@@ -1783,6 +1786,7 @@ const server = createServer(async (req, res) => {
         if (typeof input.message === "string" && input.message.trim()) proactiveSettings.message = input.message.trim();
         proactiveSettings.intervalMin = Math.max(1, Number(input.intervalMin) || 60);
         proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, Number(input.intervalMax) || proactiveSettings.intervalMin);
+        if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
         if (!proactiveSettings.enabled) proactiveSettings.nextDueAt = null;
         await saveProactiveSettings();
         return send(res, 200, proactiveSettings);
