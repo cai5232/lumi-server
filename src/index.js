@@ -562,6 +562,11 @@ function stripPrivateReasoning(value) {
     .trim();
 }
 
+function extractThinkingText(value) {
+  const match = String(value || "").match(/<thinking\b[^>]*>([\s\S]*?)<\/thinking>/i);
+  return match?.[1]?.trim() || null;
+}
+
 function isInternalProactiveText(value) {
   return /(next[_ -]?wake|thinking|thought\s*process|content\s*block|reasoning|contentType|GPT|写代码|报错|哨兵模式|推送.{0,8}通知|通知.{0,8}(标签|内容)|后端|系统标签|模型调用)/i.test(String(value || ""));
 }
@@ -1371,6 +1376,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   const visibleRaw = stripPrivateReasoning(cleanedRaw);
+  const thinking = extractThinkingText(raw);
   let content = visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
@@ -1388,7 +1394,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
@@ -2190,7 +2196,12 @@ const server = createServer(async (req, res) => {
       const before = new Date(url.searchParams.get("before") || "").valueOf();
       const all = Array.isArray(threads[id].messages) ? threads[id].messages : [];
       const eligible = Number.isFinite(before) ? all.filter((message) => new Date(message.createdAt).valueOf() < before) : all;
-      const messages = eligible.slice(-limit);
+      const messages = eligible.slice(-limit).map((message) => ({
+        ...message,
+        ...(message.role === "assistant" && !message.thinking && message.modelContent
+          ? { thinking: extractThinkingText(message.modelContent) }
+          : {})
+      }));
       const hasMore = eligible.length > messages.length;
       return send(res, 200, { ...threads[id], messages, hasMore, nextBefore: hasMore ? messages[0]?.createdAt || null : null });
     }
@@ -2315,6 +2326,7 @@ const server = createServer(async (req, res) => {
         id: randomUUID(),
         role: "assistant",
         content: visibleContent,
+        thinking: generated.thinking,
         // Used only when reconstructing the exact model-side history for prompt cache.
         modelContent: generated.modelContent,
         contentType,
