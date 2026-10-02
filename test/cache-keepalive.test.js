@@ -49,6 +49,11 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
   const provider = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
+    if (req.url?.includes("/api/integrations/")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ related: "" }));
+      return;
+    }
     if (req.method === "GET") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end("[]");
@@ -78,6 +83,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`,
     LUMI_MODEL_API_KEY: "test",
     LUMI_MODEL_NAME: "anthropic/claude-sonnet-4.6",
+    LUMI_SYSTEM_PROMPT: "",
     LUMI_CACHE_KEEPALIVE_ENABLED: "true",
     LUMI_CACHE_KEEPALIVE_TOKEN: "test"
   };
