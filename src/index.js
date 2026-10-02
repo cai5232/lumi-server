@@ -13,7 +13,9 @@ const pushTokensPath = join(dataDir, "push-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
-const buildVersion = "0378901";
+// Release marker for the sentinel/thought/history fix. Surfaced by /health so
+// a Git-triggered Zeabur rollout can be verified without manual redeploys.
+const buildVersion = "33c698c";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
