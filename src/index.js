@@ -14,7 +14,7 @@ const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v2";
+const buildVersion = "sentinel-chat-v3";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -662,8 +662,8 @@ function extractThinkingText(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision)\s*>/gi, "")
+    .replace(/<(context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\s*>/gi, "")
     .trim();
 }
 
@@ -1275,7 +1275,16 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     else history.push({ ...message });
   }
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
-  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const activity = ensureActivity(thread);
+  const proactiveConfig = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+  const wakeAt = Date.parse(activity.nextWakeAt || "");
+  const wakeTime = Number.isFinite(wakeAt)
+    ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(wakeAt))
+    : "未安排";
+  const sentinelStatus = !proactive && proactiveConfig.enabled
+    ? `\n<sentinel_status>这是服务端当前真实的自主联系状态，回答用户关于主动联系/下次唤醒的问题时以此为准，不要要求用户手动添加 next_wakeup 标签，也不要编造。状态：${activity.mode === "sleeping" ? "睡眠中" : "哨兵待命"}；下一次系统唤醒时间：${wakeTime}（北京时间）；时间来源：${activity.nextWakeSource === "ai" ? "AI 已决定" : activity.nextWakeSource === "settings" ? "用户设置的首次静默时长" : "当前没有有效安排"}。若来源是用户设置，只能说系统已按用户设置安排首次触发，不能谎称是你亲自决定；若来源是 AI，才可说是自己安排。此状态和内部标签不可原样展示给用户。</sentinel_status>`
+    : "";
+  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${sentinelStatus}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
