@@ -19,17 +19,19 @@ async function freePort() {
 }
 
 async function startBackend(port, env) {
-  const child = spawn(process.execPath, ["src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "ignore" });
+  const child = spawn(process.execPath, ["src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
+  let lastHealthFailure = "no response";
   for (let i = 0; i < 100; i++) {
     if (child.exitCode !== null) throw new Error(`backend exited: ${child.exitCode}`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       if (response.ok) return child;
+      lastHealthFailure = `${response.status}: ${await response.text()}`;
     } catch { /* Still starting. */ }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   child.kill();
-  throw new Error("backend did not start");
+  throw new Error(`backend did not start (${lastHealthFailure})`);
 }
 
 async function stopBackend(child) {

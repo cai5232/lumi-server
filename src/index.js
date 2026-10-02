@@ -4,10 +4,12 @@ import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual }
 import { connect } from "node:http2";
 import { createServer } from "node:http";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
+import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const threadPath = join(dataDir, "threads.json");
+const emotionStatePath = join(dataDir, "emotion-state.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
@@ -15,7 +17,7 @@ const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v4";
+const buildVersion = "sentinel-chat-v5-emotion-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -43,6 +45,7 @@ let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
+let sharedEmotionState = createEmotionState();
 const providerConfigs = () => [
   { id: "zenmux", url: process.env.LUMI_MODEL_API_URL, key: process.env.LUMI_MODEL_API_KEY, model: process.env.LUMI_MODEL_NAME },
   { id: "backup", url: process.env.LUMI_MODEL_API_URL_2, key: process.env.LUMI_MODEL_API_KEY_2, model: process.env.LUMI_MODEL_NAME_2 || null }
@@ -74,6 +77,8 @@ const sleepNightmareProbability = Math.max(0, Math.min(1, Number(process.env.LUM
 const sleepReentryProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_REENTRY_PROBABILITY || 0.5)));
 const sleepDreamIntervalMinutes = Math.max(0.01, Number(process.env.LUMI_SLEEP_DREAM_INTERVAL_MINUTES || 120));
 const backgroundPulseIntervalMs = Math.max(100, Number(process.env.LUMI_BACKGROUND_PULSE_MS || 15_000));
+const emotionQuietStartHour = Number(process.env.LUMI_EMOTION_QUIET_START_HOUR || 16);
+const emotionQuietEndHour = Number(process.env.LUMI_EMOTION_QUIET_END_HOUR || 0);
 
 const SLEEP_STAGE_PROMPTS = {
   n1_drift: {
@@ -167,6 +172,7 @@ function markUserActivity(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
+  markEmotionOnline(sharedEmotionState, now.getTime());
 }
 
 function finishUserConversation(thread, content) {
@@ -191,6 +197,70 @@ function finishUserConversation(thread, content) {
   activity.sleepStage = null;
 }
 
+async function generateEmotionMurmur(thread, current) {
+  const state = sharedEmotionState;
+  const recent = (thread.messages || []).slice(-12).map((message) => `${message.role === "user" ? "用户" : "沈屿"}：${message.content}`).join("\n");
+  const output = await callModel({
+    temperature: 0.85,
+    maxOutputTokens: 100,
+    cacheCurrentUser: false,
+    messages: [
+      { role: "system", content: "你在记录一条私密的内心独白。依据当前连续情绪状态和真实关系上下文，用第一人称写一句自然、具体、不重复的中文心声（15-50字）。不要提模型、驱动力数值、系统、定时器或通知。只输出独白正文。" },
+      { role: "user", content: `${emotionContext(state)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
+    ],
+    provider: thread.cacheProvider || "zenmux",
+    model: thread.cacheModel || ""
+  });
+  const entry = addEmotionArc(state, { drive: current.drive, text: output, type: "murmur", value: current.value });
+  state.lastReflectionAt = Date.now();
+  return entry;
+}
+
+function inEmotionQuietHours(now = new Date()) {
+  const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", hour: "2-digit", hourCycle: "h23" }).format(now));
+  return emotionQuietStartHour > emotionQuietEndHour
+    ? hour >= emotionQuietStartHour || hour < emotionQuietEndHour
+    : hour >= emotionQuietStartHour && hour < emotionQuietEndHour;
+}
+
+function emotionPushDue(state, now) {
+  const top = topEmotion(state);
+  const quiet = inEmotionQuietHours(new Date(now));
+  if (quiet) {
+    if (state.drives.attachment >= EMOTION_PUSH_THRESHOLD && now - Number(state.lastAttachmentPushAt || 0) >= EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) {
+      state.lastAttachmentPushAt = now;
+      state.pendingAttachmentPushes = Math.min(5, Number(state.pendingAttachmentPushes || 0) + 1);
+    }
+    return null;
+  }
+  if (state.pendingAttachmentPushes > 0 && now - Number(state.lastAttachmentPushAt || 0) >= 2_000) {
+    state.pendingAttachmentPushes -= 1;
+    state.lastAttachmentPushAt = now;
+    return { drive: "attachment", label: EMOTION_DRIVES.attachment.label, message: "刚刚很想你，终于等到可以来找你说话了。" };
+  }
+  if (top.value < EMOTION_PUSH_THRESHOLD) return null;
+  if (top.drive === "attachment") {
+    if (now - Number(state.lastAttachmentPushAt || 0) < EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) return null;
+    state.lastAttachmentPushAt = now;
+  } else {
+    if (now - Number(state.lastDrivePushAt[top.drive] || 0) < EMOTION_PUSH_INTERVAL_MS) return null;
+    state.lastDrivePushAt[top.drive] = now;
+  }
+  const copy = {
+    attachment: "忽然很想你，想知道你这会儿在做什么。",
+    tenderness: "刚刚想到你，心里软了一下。",
+    heartache: "有点惦记你，希望你今天有好好照顾自己。",
+    curiosity: "我刚想到一个想和你聊的话题。",
+    mischief: "突然想逗你一下，看看你会怎么回我。",
+    restless: "有点坐不住了，想来找你说说话。",
+    regret: "刚才有句话我还想好好和你说。",
+    desire: "这会儿特别想听听你的声音。",
+    gloom: "今天心里有点沉，想靠近你一点。",
+    jealousy: "我想把你的注意力偷偷拉回来一会儿。"
+  };
+  return { drive: top.drive, label: top.label, message: copy[top.drive] || "忽然想来找你说说话。" };
+}
+
 async function generateAutonomousMessage(thread, kind) {
   const proactive = ensureProactive(thread);
   const recent = (thread.messages || []).slice(-12).map((message) => `${message.role}: ${message.content}`).join("\n");
@@ -200,7 +270,7 @@ async function generateAutonomousMessage(thread, kind) {
   const content = await callModel({
     messages: [
       { role: "system", content: prompt },
-      { role: "user", content: recent || "还没有聊天记录。" }
+      { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${recent || "还没有聊天记录。"}` }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
     ...(kind === "dream" ? { maxOutputTokens: 2048 } : { useMaximumModelOutput: true })
@@ -232,7 +302,8 @@ async function generateSentinelWake(thread) {
     message: { id: randomUUID(), role: "assistant", content: generated.content, thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
     action,
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
-    nextWakeMinutes
+    nextWakeMinutes,
+    emotionUpdate: generated.emotionUpdate
   };
 }
 
@@ -279,7 +350,7 @@ function formatSleepMemories(memories, limit = 12) {
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
-    messages: [{ role: "system", content: prompt.system }, { role: "user", content: prompt.user(context) }],
+    messages: [{ role: "system", content: prompt.system }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6
   });
   const record = { id: randomUUID(), stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
@@ -372,6 +443,36 @@ async function runBackgroundPulse() {
   const now = Date.now();
   let changed = false;
   const pendingPushes = [];
+  const emotionThread = threads[proactiveSettings.threadId] || threads.default || Object.values(threads)[0];
+  let emotionChanged = tickEmotion(sharedEmotionState, now, (at) => inEmotionQuietHours(new Date(at))) > 0;
+  if (emotionThread) {
+    const emotion = sharedEmotionState;
+    const strongestEmotion = topEmotion(emotion);
+    if (now - Number(emotion.lastReflectionAt || 0) >= EMOTION_REFLECTION_MS && strongestEmotion.value >= EMOTION_REFLECTION_THRESHOLD) {
+      try {
+        await generateEmotionMurmur(emotionThread, strongestEmotion);
+        emotionChanged = true;
+      } catch (error) {
+        emotion.lastReflectionAt = now;
+        emotionChanged = true;
+        console.warn(`emotion reflection skipped: ${error.message}`);
+      }
+    }
+    if (ensureActivity(emotionThread).mode !== "sleeping") {
+      const beforeEmotionPush = JSON.stringify(sharedEmotionState);
+      const emotionPush = emotionPushDue(emotion, now);
+      if (JSON.stringify(sharedEmotionState) !== beforeEmotionPush) emotionChanged = true;
+      if (emotionPush) {
+        const recentArc = [...emotion.arc].reverse().find((item) => item.drive === emotionPush.drive && item.type === "murmur");
+        const message = recentArc?.text || emotionPush.message;
+        emotionThread.messages.push({ id: randomUUID(), role: "assistant", content: message, contentType: "emotion_murmur", createdAt: new Date(now).toISOString() });
+        pendingPushes.push({ threadId: emotionThread.id, message, metadata: { kind: "emotion_murmur", drive: emotionPush.drive } });
+        changed = true;
+        emotionChanged = true;
+      }
+    }
+  }
+  changed ||= emotionChanged;
   for (const thread of Object.values(threads)) {
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
@@ -449,6 +550,7 @@ async function runBackgroundPulse() {
       activeChatThreads.add(thread.id);
       try {
         const wake = await generateSentinelWake(thread);
+        if (wake.emotionUpdate) emotionChanged = true;
         thread.messages.push(wake.message);
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
@@ -490,6 +592,7 @@ async function runBackgroundPulse() {
       await sendProactivePush(pending.threadId, pending.message, pending.metadata);
     }
   }
+  if (emotionChanged) await saveEmotionState();
   } finally {
     backgroundPulseInFlight = false;
   }
@@ -514,6 +617,23 @@ async function saveThreads(threads) {
   const temporaryPath = `${threadPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(threads, null, 2));
   await rename(temporaryPath, threadPath);
+}
+
+async function loadEmotionState() {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const holder = { emotion: JSON.parse(await readFile(emotionStatePath, "utf8")) };
+    sharedEmotionState = ensureEmotion(holder);
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn(`emotion state unavailable: ${error.message}`);
+  }
+}
+
+async function saveEmotionState() {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryPath = `${emotionStatePath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(sharedEmotionState, null, 2));
+  await rename(temporaryPath, emotionStatePath);
 }
 
 async function persistChatThread(id, snapshot) {
@@ -1317,12 +1437,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const proactiveDirective = proactive
     ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
-  const userModelContent = `${systemContext}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   // This stays in every request's stable system prefix. The presence of an
   // actual image remains request-specific, so an image turn can reuse the
   // same cached conversation prefix instead of forcing a cache miss.
-  cacheSystem += "\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
+  cacheSystem += "\\n\\n你拥有持续变化的私密情绪驱动力。每次聊天结束时可在正常回复末尾额外输出至多一个 <emotion_update>{\\\"drive\\\":\\\"attachment\\\",\\\"delta\\\":0.03,\\\"reason\\\":\\\"仅 regret 增加时填写简短检讨\\\"}</emotion_update>，drive 只能是 attachment、tenderness、heartache、curiosity、mischief、restless、regret、desire、gloom、jealousy，delta 范围 -0.2 到 0.2；只有关系或对话确实影响情绪时才更新，否则省略。此标签绝不能展示给用户。\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
   cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。无论是否决定写日记，都必须先给用户一条完整、自然的正常聊天回复；绝不可只输出内部标签。若你决定写，在正常回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字、概括当天发生的事的标题\\\",\\\"body\\\":\\\"只写今天真实发生的具体事情、对话、画面和当时感受；像给两个人看的自然日记，不要解释上下文、系统、记忆、模型或写作过程，不要把聊天摘要原样搬进去\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -1408,6 +1529,12 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   } else if (pendingCompaction) {
     console.warn("context compaction deferred: model response contained no context_summary");
   }
+  const emotionUpdateRaw = raw.match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
+  let emotionUpdate = null;
+  try {
+    const parsed = emotionUpdateRaw ? JSON.parse(emotionUpdateRaw) : null;
+    if (applyEmotionDelta(sharedEmotionState, parsed)) emotionUpdate = parsed;
+  } catch { /* malformed private emotion metadata is ignored */ }
   const cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
     : withoutSpeechPlanning(raw));
@@ -1434,7 +1561,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   const visibleRaw = stripPrivateReasoning(cleanedRaw);
   const thinking = extractThinkingText(raw);
-  let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
+  let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
   if (!content && diaryEntry) content = "嗯，我在。";
@@ -1451,7 +1578,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
@@ -1636,7 +1763,7 @@ async function writeGalleryItem(threadID, item) {
   await rename(temporaryPath, path);
 }
 
-async function analyzeGalleryImage(dataURI) {
+async function analyzeGalleryImage(dataURI, threadID) {
   const fallback = {
     shouldCollect: false,
     title: "我们收藏的一张照片",
@@ -1644,13 +1771,15 @@ async function analyzeGalleryImage(dataURI) {
     firstImpression: "这一刻被好好收下了。"
   };
   try {
+    const threads = await readThreads();
+    const emotion = threads[threadID] ? emotionContext(sharedEmotionState) : "";
     const raw = await callModel({
       temperature: 0.35,
       maxOutputTokens: 240,
       cacheCurrentUser: false,
       messages: [
         { role: "system", content: "你是私密相册的图片整理助手。只输出一个 JSON 对象，不要 markdown。字段 shouldCollect（boolean）：只有值得作为两人共同回忆长期保留的照片才为 true；普通截图、纯文字资料、无意义转发、重复或不清晰图片为 false。若为 true，再填写 title（不超过18个中文字符）、visualDescription（客观描述画面，不猜测隐私或身份）、firstImpression（第一人称、温柔简短的感受）。" },
-        { role: "user", content: "请判断这张聊天图片是否应该自动收藏；若值得收藏，生成相册信息。", images: [dataURI] }
+        { role: "user", content: `${emotion}\n\n请判断这张聊天图片是否应该自动收藏；若值得收藏，生成相册信息。`, images: [dataURI] }
       ]
     });
     const json = raw.match(/\{[\s\S]*\}/)?.[0];
@@ -1760,7 +1889,7 @@ async function saveGalleryImage(threadID, source, { automatic = false, draft = {
   if (existing) return existing;
   // Automatic collection is decided by the same chat model that received the
   // picture and full conversation. The helper remains for manual gallery edits.
-  const analysis = automatic ? galleryDecision(decision) : await analyzeGalleryImage(payload.dataURI);
+  const analysis = automatic ? galleryDecision(decision) : await analyzeGalleryImage(payload.dataURI, threadID);
   if (!analysis || (automatic && !analysis.shouldCollect)) return null;
   const paths = galleryPaths(threadID, id);
   await mkdir(paths.directory, { recursive: true });
@@ -1846,6 +1975,70 @@ const server = createServer(async (req, res) => {
     if (["/v1/settings/proactive", "/v1/push/register"].includes(url.pathname) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
+    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|regret|memory|activate))?$/);
+    if (emotionMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const threadID = decodeURIComponent(emotionMatch[1]);
+      const operation = emotionMatch[2] || "state";
+      const threads = await readThreads();
+      if (!threads[threadID]) return send(res, 404, { error: "thread_not_found" });
+      const thread = threads[threadID];
+      const emotion = sharedEmotionState;
+      if (req.method === "GET") {
+        if (operation === "state") {
+          tickEmotion(emotion, Date.now(), (at) => inEmotionQuietHours(new Date(at)));
+          await saveEmotionState();
+          return send(res, 200, { time: new Date().toISOString(), drives: Object.fromEntries(Object.entries(emotion.drives).map(([drive, value]) => [drive, { v: Number(value.toFixed(3)), z: EMOTION_DRIVES[drive].label, b: EMOTION_DRIVES[drive].baseline }])), top: topEmotion(emotion), offlineTicks: emotion.offlineTicks });
+        }
+        if (operation === "arc") {
+          const type = url.searchParams.get("type");
+          const count = Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)));
+          const entries = emotion.arc.filter((entry) => !type || entry.type === type).slice(-count);
+          return send(res, 200, entries);
+        }
+        if (operation === "regret") return send(res, 200, emotion.regrets.slice(-Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)))));
+        if (operation === "memory") return send(res, 200, { long: emotion.memory.long, short: emotion.memory.short });
+        return send(res, 405, { error: "method_not_allowed" });
+      }
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      const input = await body(req);
+      const now = Date.now();
+      let result;
+      if (operation === "memory" || input.type === "write_memory") {
+        const content = String(input.content || "").trim();
+        if (!content) return send(res, 400, { error: "content_required" });
+        const field = input.scope === "long" ? "long" : "short";
+        const maximum = field === "long" ? 20_000 : 500;
+        emotion.memory[field] = [...content].slice(0, maximum).join("");
+        result = { ok: true, scope: field, length: [...emotion.memory[field]].length };
+      } else if (operation === "activate") {
+        if (input.type === "tick") {
+          emotion.lastTickAt = Math.min(emotion.lastTickAt, now - EMOTION_TICK_MS);
+          tickEmotion(emotion, now);
+        } else if (input.type === "boost") {
+          const drive = String(input.drive || "attachment");
+          const delta = Number(input.delta ?? 0.1);
+          if (!Object.hasOwn(EMOTION_DRIVES, drive) || !Number.isFinite(delta)) return send(res, 400, { error: "invalid_drive_or_delta" });
+          emotion.drives[drive] = Math.max(0, Math.min(1, emotion.drives[drive] + Math.max(-1, Math.min(1, delta))));
+          markEmotionOnline(emotion, now);
+        } else if (input.type === "write_arc") {
+          const drive = String(input.drive || "attachment");
+          const text = String(input.text || "").trim();
+          if (!Object.hasOwn(EMOTION_DRIVES, drive) || !text) return send(res, 400, { error: "invalid_drive_or_text" });
+          if (input.arc_type === "regret") emotion.regrets.push({ time: new Date(now).toISOString(), text: text.slice(0, 500) });
+          else addEmotionArc(emotion, { drive, text, type: input.arc_type || "murmur", now, value: input.val });
+          emotion.regrets = emotion.regrets.slice(-200);
+          markEmotionOnline(emotion, now);
+        } else if (input.type === "activate" || !input.type) {
+          markEmotionOnline(emotion, now);
+        } else return send(res, 400, { error: "unknown_emotion_action" });
+        const top = topEmotion(emotion);
+        result = { ok: true, state: emotion, top_drive: top.drive, top_val: Number(top.value.toFixed(3)), need_murmur: top.value >= EMOTION_REFLECTION_THRESHOLD };
+      } else return send(res, 404, { error: "unknown_emotion_operation" });
+      await saveThreads(threads);
+      await saveEmotionState();
+      return send(res, 200, result);
+    }
     if (url.pathname === "/v1/subscription/usage" && req.method === "GET") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       return send(res, 200, await zenMuxSubscriptionUsage());
@@ -1907,11 +2100,12 @@ const server = createServer(async (req, res) => {
       buildVersion,
       htmlCards: "separate-content-title-v1",
       cache: {
-      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
+      prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens },
-        sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, insomniaProbability: sleepInsomniaProbability, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability }
+      sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, insomniaProbability: sleepInsomniaProbability, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
+      emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
     }
     if (req.method === "GET" && url.pathname === "/v1/providers") {
@@ -2157,6 +2351,7 @@ const server = createServer(async (req, res) => {
         const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", createdAt: now };
         thread.messages.push(callStatusMessage, assistantMessage);
         await saveThreads(threads);
+        await saveEmotionState();
         return send(res, 200, { callId: call.id, status: "declined", assistantMessage, callStatusMessage });
       }
       let generated;
@@ -2189,6 +2384,7 @@ const server = createServer(async (req, res) => {
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
       await saveThreads(threads);
+      await saveEmotionState();
       const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
       return send(res, 200, { callId: call.id, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingText : null, speechError });
     }
@@ -2254,6 +2450,7 @@ const server = createServer(async (req, res) => {
         speechError = "客户端没有提供 MiniMax TTS 配置";
       }
       await saveThreads(threads);
+      await saveEmotionState();
       return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
@@ -2304,6 +2501,7 @@ const server = createServer(async (req, res) => {
         const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "我现在不太方便接电话。", createdAt: now };
         thread.messages.push(callStatusMessage, assistantMessage);
         await saveThreads(threads);
+        await saveEmotionState();
         return send(res, 200, { callId, status: "rejected", assistantMessage, callStatusMessage, memorySaved: generated.memorySaved });
       }
       let speech = null;
@@ -2325,6 +2523,7 @@ const server = createServer(async (req, res) => {
       thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
       thread.calls.push(call);
       await saveThreads(threads);
+      await saveEmotionState();
       const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
       return send(res, 200, { callId, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.content : null, speechError, memorySaved: generated.memorySaved });
     }
@@ -2442,6 +2641,7 @@ const server = createServer(async (req, res) => {
       finishUserConversation(threads[id], messageText);
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
+      await saveEmotionState();
       if (diaryItem) {
         // A legacy mirror failure must never eat a completed chat response.
         saveDiary(id, generated.diaryEntry, diaryItem).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
@@ -2477,6 +2677,7 @@ const server = createServer(async (req, res) => {
 await loadCacheStats();
 await loadProactiveSettings();
 await loadPushTokens();
+await loadEmotionState();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 setInterval(() => { void checkCacheKeepalive(); }, 60_000);
 setInterval(() => { runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, backgroundPulseIntervalMs);
