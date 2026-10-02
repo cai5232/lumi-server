@@ -310,18 +310,6 @@ async function generateSentinelWake(thread) {
   };
 }
 
-async function recentSharedScreen(threadId, notBefore = Date.now() - 15_000) {
-  const dir = join(screenShareDir, threadId.replace(/[^a-zA-Z0-9_-]/g, "_"));
-  try {
-    const state = JSON.parse(await readFile(join(dir, "state.json"), "utf8"));
-    const capturedAt = Date.parse(state.updatedAt || "");
-    if (!state.active || !Number.isFinite(capturedAt) || capturedAt < notBefore) return null;
-    const frame = await readFile(join(dir, "latest.jpg"));
-    if (frame.length < 4 || frame.length > 2_000_000 || frame[0] !== 0xff || frame[1] !== 0xd8) return null;
-    return { image: `data:image/jpeg;base64,${frame.toString("base64")}`, capturedAt };
-  } catch { return null; }
-}
-
 async function recentScreenPeek(threadId, after) {
   const frame = screenPeekFrames.get(threadId);
   if (!frame || frame.capturedAt < after) return null;
@@ -329,8 +317,6 @@ async function recentScreenPeek(threadId, after) {
 }
 
 async function autonomousScreen(threadId) {
-  const shared = await recentSharedScreen(threadId);
-  if (shared) return shared;
   if (!screenPeekConfigured()) return null;
   const requestedAt = Date.now();
   if (requestedAt - (screenPeekTriggerAt.get(threadId) || 0) < 5 * 60_000) return null;
