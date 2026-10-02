@@ -14,10 +14,12 @@ const emotionStatePath = join(dataDir, "emotion-state.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
+const voipTokensPath = join(dataDir, "voip-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
 const screenPeekFrames = new Map();
+const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
 const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1";
@@ -44,6 +46,9 @@ let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
 let pushTokens = [];
+let voipTokens = [];
+const foregroundThreads = new Map();
+const nativeCallPushes = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
@@ -321,15 +326,69 @@ async function autonomousScreen(threadId) {
   const requestedAt = Date.now();
   if (requestedAt - (screenPeekTriggerAt.get(threadId) || 0) < 5 * 60_000) return null;
   screenPeekTriggerAt.set(threadId, requestedAt);
-  await sendScreenPeekTrigger();
+  const request = { requestedAt, status: "waiting" };
+  screenPeekRequests.set(threadId, request);
+  setTimeout(() => {
+    if (screenPeekRequests.get(threadId) === request) screenPeekRequests.delete(threadId);
+  }, 10 * 60_000).unref();
+  try { await sendScreenPeekTrigger(); }
+  catch (error) {
+    screenPeekRequests.delete(threadId);
+    throw error;
+  }
   const deadline = requestedAt + 45_000;
   while (Date.now() < deadline) {
     const fresh = await recentScreenPeek(threadId, requestedAt);
-    if (fresh) return fresh;
+    if (fresh) {
+      request.status = "received";
+      return fresh;
+    }
     await new Promise((resolve) => setTimeout(resolve, 1_500));
   }
   console.warn(`screen peek timed out for thread ${threadId}`);
+  request.status = "fallback_pending";
   return null;
+}
+
+async function completeLateScreenPeek(threadId) {
+  const request = screenPeekRequests.get(threadId);
+  const frame = screenPeekFrames.get(threadId);
+  if (request?.status !== "fallback_sent" || !frame || frame.capturedAt < request.requestedAt) return;
+  if (activeChatThreads.has(threadId)) {
+    setTimeout(() => { void completeLateScreenPeek(threadId); }, 2_000).unref();
+    return;
+  }
+  request.status = "processing";
+  activeChatThreads.add(threadId);
+  try {
+    const threads = await readThreads();
+    const thread = threads[threadId];
+    const pending = thread?.messages?.findLast((message) => message.contentType === "screen_request" && message.screenStatus === "pending" && Date.parse(message.createdAt) >= request.requestedAt);
+    if (!pending) return;
+    const generated = await generateReply({
+      input: "<internal_screen_peek>你自主要求查看屏幕，现在截图已经送达。请根据画面和聊天上下文自然回复，只描述看得见的内容，不要提及内部标签。</internal_screen_peek>",
+      images: [`data:${frame.mimeType};base64,${frame.bytes.toString("base64")}`],
+      thread,
+      proactive: true,
+      sentinelActions: ["message"],
+      provider: thread.cacheProvider || "zenmux",
+      model: thread.cacheModel || ""
+    });
+    if (!generated.content || !generated.thinking) throw new Error("late screen peek reply was incomplete");
+    pending.screenStatus = "received";
+    const message = { id: randomUUID(), role: "assistant", content: generated.content, thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "screen_peek", screenCapturedAt: new Date(frame.capturedAt).toISOString(), createdAt: new Date().toISOString() };
+    thread.messages.push(message);
+    await saveThreads(threads);
+    screenPeekFrames.delete(threadId);
+    request.status = "received";
+    console.info(`late screen peek completed for thread ${threadId}`);
+    await sendProactivePush(threadId, message.content, { kind: "screen_peek" });
+  } catch (error) {
+    request.status = "fallback_sent";
+    console.warn(`late screen peek failed for thread ${threadId}: ${error.message}`);
+  } finally {
+    activeChatThreads.delete(threadId);
+  }
 }
 
 async function describeAutonomousScreen(thread, wake, screen) {
@@ -610,7 +669,10 @@ async function runBackgroundPulse() {
             } catch (error) {
               console.warn(`autonomous screen peek skipped: ${error.message}`);
             } finally {
-              if (screen.source === "peek") screenPeekFrames.delete(thread.id);
+              if (screen.source === "peek" && screenSeen) {
+                screenPeekFrames.delete(thread.id);
+                screenPeekRequests.delete(thread.id);
+              }
             }
           }
         }
@@ -620,12 +682,14 @@ async function runBackgroundPulse() {
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
         if (wake.action === "screen" && !screenSeen) {
+          const request = screenPeekRequests.get(thread.id);
+          if (request) request.status = "fallback_pending";
           thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
           pushMessage = "沈屿想看你的屏幕";
           pushMetadata = { kind: "screen_request" };
         } else if (wake.action === "phone") {
           const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
-          pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, metadata: { kind: "incoming_call", callId: invite.id }, startCallRing: () => startIncomingCallRing(thread.id, invite) });
+          pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, call: invite, startCallRing: () => startIncomingCallRing(thread.id, invite) });
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
         }
@@ -654,7 +718,14 @@ async function runBackgroundPulse() {
     // Persist chat history before the notification can be tapped and refreshed.
     for (const pending of pendingPushes) {
       pending.startCallRing?.();
-      await sendProactivePush(pending.threadId, pending.message, pending.metadata);
+      if (pending.call) await sendIncomingCallPush(pending.threadId, pending.call);
+      else await sendProactivePush(pending.threadId, pending.message, pending.metadata);
+    }
+    for (const [threadId, request] of screenPeekRequests) {
+      if (request.status === "fallback_pending") {
+        request.status = "fallback_sent";
+        void completeLateScreenPeek(threadId);
+      }
     }
   }
   if (emotionChanged) await saveEmotionState();
@@ -780,12 +851,24 @@ async function loadPushTokens() {
   } catch (error) {
     if (error?.code !== "ENOENT") console.warn(`push tokens unavailable: ${error.message}`);
   }
+  try {
+    const saved = JSON.parse(await readFile(voipTokensPath, "utf8"));
+    voipTokens = Array.isArray(saved) ? saved.filter((item) => item && typeof item.token === "string") : [];
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn(`VoIP tokens unavailable: ${error.message}`);
+  }
 }
 
 async function savePushTokens() {
   const temporaryPath = `${pushTokensPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(pushTokens, null, 2));
   await rename(temporaryPath, pushTokensPath);
+}
+
+async function saveVoIPTokens() {
+  const temporaryPath = `${voipTokensPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(voipTokens, null, 2));
+  await rename(temporaryPath, voipTokensPath);
 }
 
 function apnsConfigured() {
@@ -816,7 +899,7 @@ function apnsBearerToken() {
   return apnsJwtCache.token;
 }
 
-async function sendAPNs(device, message, metadata = null) {
+async function sendAPNs(device, message, metadata = null, voip = false) {
   const host = device.environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
   const bearer = apnsBearerToken();
   const client = connect(host);
@@ -829,9 +912,10 @@ async function sendAPNs(device, message, metadata = null) {
       ":method": "POST",
       ":path": `/3/device/${device.token}`,
       authorization: `bearer ${bearer}`,
-      "apns-topic": process.env.LUMI_APNS_TOPIC || "com.cai5232.LumiPush",
-      "apns-push-type": "alert",
+      "apns-topic": `${process.env.LUMI_APNS_TOPIC || "com.cai5232.LumiPush"}${voip ? ".voip" : ""}`,
+      "apns-push-type": voip ? "voip" : "alert",
       "apns-priority": "10",
+      ...(voip ? { "apns-expiration": "0" } : {}),
       "content-type": "application/json"
     });
     request.on("response", (headers) => { status = Number(headers[":status"] || 0); });
@@ -842,7 +926,9 @@ async function sendAPNs(device, message, metadata = null) {
       resolve({ status, body: responseBody });
     });
     request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
-    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, category: "LUMI_MESSAGE", sound: "default", "mutable-content": 1 }, ...(metadata || {}) }));
+    request.end(JSON.stringify(voip
+      ? { aps: {}, ...(metadata || {}) }
+      : { aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, category: "LUMI_MESSAGE", sound: "default", "mutable-content": 1 }, ...(metadata || {}) }));
   });
 }
 
@@ -909,6 +995,44 @@ async function sendProactivePush(threadId, message, metadata = null) {
   }
 }
 
+async function sendIncomingCallPush(threadId, call) {
+  const foreground = (foregroundThreads.get(threadId) || 0) > Date.now();
+  const devices = voipTokens.filter((item) => item.threadId === threadId);
+  if (foreground || devices.length === 0) {
+    await sendProactivePush(threadId, `📞 ${call.reason}`, { kind: "incoming_call", callId: call.id });
+    return;
+  }
+  if (nativeCallPushes.has(call.id)) return;
+  nativeCallPushes.add(call.id);
+  let delivered = false;
+  for (const device of devices) {
+    try {
+      let result = await sendAPNs(device, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason }, true);
+      if (result.status === 400 && /BadDeviceToken|DeviceTokenNotForTopic/i.test(result.body)) {
+        const alternate = device.environment === "sandbox" ? "production" : "sandbox";
+        const retry = await sendAPNs({ ...device, environment: alternate }, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason }, true);
+        if (retry.status >= 200 && retry.status < 300) {
+          device.environment = alternate;
+          await saveVoIPTokens();
+        }
+        result = retry;
+      }
+      if (result.status >= 200 && result.status < 300) delivered = true;
+      else {
+        console.warn(`VoIP APNs delivery failed (${result.status}): ${result.body}`);
+        if (result.status === 410 || /BadDeviceToken|Unregistered/.test(result.body)) {
+          voipTokens = voipTokens.filter((item) => item.token !== device.token);
+          await saveVoIPTokens();
+        }
+      }
+    } catch (error) { console.warn(`VoIP APNs delivery failed: ${error.message}`); }
+  }
+  if (!delivered) {
+    nativeCallPushes.delete(call.id);
+    await sendProactivePush(threadId, `📞 ${call.reason}`, { kind: "incoming_call", callId: call.id });
+  }
+}
+
 function extractDialMarker(content) {
   const source = String(content || "");
   const match = source.match(/[⟪《【\[]\s*(?:拨号|dial)\s*[:：]?\s*([^⟫》】\]]*)[⟫》】\]]/i);
@@ -934,7 +1058,7 @@ async function createIncomingCallInvite(thread, reason) {
     state: "pending",
     reason: String(reason || "想听听你的声音").slice(0, 120),
     createdAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 30_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 60_000).toISOString(),
     turns: []
   };
   thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
@@ -950,7 +1074,7 @@ function startIncomingCallRing(threadID, call) {
       const threads = await readThreads();
       const current = threads[threadID]?.calls?.find((item) => item.id === call.id);
       if (!current || current.state !== "pending") return;
-      await sendProactivePush(threadID, `📞 ${call.reason} ·仍在响`, { kind: "incoming_call", callId: call.id });
+      await sendIncomingCallPush(threadID, call);
       setTimeout(() => { void ring(); }, 2_000);
     } catch (error) {
       console.warn(`incoming call ring stopped: ${error.message}`);
@@ -2037,7 +2161,7 @@ const server = createServer(async (req, res) => {
           !timingSafeEqual(Buffer.from(expected), Buffer.from(supplied))) return send(res, 401, { error: "unauthorized" });
       return send(res, 200, await checkCacheKeepalive());
     }
-    if (["/v1/settings/proactive", "/v1/push/register"].includes(url.pathname) && !pushRequestAuthorized(req)) {
+    if (["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
     const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|regret|memory|activate))?$/);
@@ -2110,7 +2234,7 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
     if (url.pathname === "/v1/push/status" && req.method === "GET") {
-      return send(res, 200, { apnsConfigured: apnsConfigured(), registeredDevices: pushTokens.length });
+      return send(res, 200, { apnsConfigured: apnsConfigured(), registeredDevices: pushTokens.length, registeredVoIPDevices: voipTokens.length });
     }
     if (url.pathname === "/v1/push/register" && req.method === "POST") {
       const input = await body(req);
@@ -2121,6 +2245,23 @@ const server = createServer(async (req, res) => {
       pushTokens = [item, ...pushTokens.filter((entry) => entry.token !== token)];
       await savePushTokens();
       return send(res, 200, { registered: true });
+    }
+    if (url.pathname === "/v1/push/voip/register" && req.method === "POST") {
+      const input = await body(req);
+      const token = String(input.token || "").toLowerCase();
+      const environment = input.environment === "sandbox" ? "sandbox" : input.environment === "production" ? "production" : "";
+      if (!/^[a-f0-9]{64,256}$/.test(token) || !environment) return send(res, 400, { error: "invalid_voip_token" });
+      const item = { token, environment, threadId: typeof input.threadId === "string" && input.threadId ? input.threadId : "default", updatedAt: new Date().toISOString() };
+      voipTokens = [item, ...voipTokens.filter((entry) => entry.token !== token)];
+      await saveVoIPTokens();
+      return send(res, 200, { registered: true });
+    }
+    if (url.pathname === "/v1/push/presence" && req.method === "POST") {
+      const input = await body(req);
+      const threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
+      if (input.foreground === true) foregroundThreads.set(threadId, Date.now() + 20_000);
+      else foregroundThreads.delete(threadId);
+      return send(res, 200, { foreground: input.foreground === true });
     }
     if (url.pathname === "/v1/settings/proactive" && req.method === "PUT") {
       const input = await body(req);
@@ -2207,10 +2348,13 @@ const server = createServer(async (req, res) => {
       const updatedAt = new Date(capturedAt).toISOString();
       const frame = { bytes: image, mimeType, capturedAt };
       screenPeekFrames.set(threadID, frame);
+      const pending = screenPeekRequests.get(threadID);
+      console.info(`screen peek upload received for thread ${threadID}; request=${pending?.status || "none"}; bytes=${size}`);
       setTimeout(() => {
         if (screenPeekFrames.get(threadID) === frame) screenPeekFrames.delete(threadID);
-      }, 2 * 60_000).unref();
-      return send(res, 202, { accepted: true, updatedAt });
+      }, 10 * 60_000).unref();
+      if (pending?.status === "fallback_sent") void completeLateScreenPeek(threadID);
+      return send(res, 202, { accepted: true, matchedRequest: Boolean(pending && pending.status !== "received"), updatedAt });
     }
     if (screenMatch) {
       const threadID = decodeURIComponent(screenMatch[1]);
@@ -2739,7 +2883,8 @@ const server = createServer(async (req, res) => {
       await saveProactiveSettings();
       // Normal replies can finish while the iOS app is suspended. Reuse the
       // registered APNs destination so the user is notified when the reply is ready.
-      await sendProactivePush(id, invite ? `📞 ${invite.reason}` : visibleContent, invite ? { kind: "incoming_call", callId: invite.id } : null);
+      if (invite) await sendIncomingCallPush(id, invite);
+      else await sendProactivePush(id, visibleContent);
       return { userMessage: storedUserMessage, assistantMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
