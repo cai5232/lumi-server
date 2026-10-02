@@ -84,7 +84,7 @@ const SLEEP_STAGE_PROMPTS = {
   },
   rem: {
     system: "你是 REM 梦境导演。把记忆和语义知识编织成连续、奇异但有情绪真相的第一人称梦境。",
-    user: ({ seeds, semantic, goals, cycle }) => `梦境周期 ${cycle}。种子：\n${seeds}\n\n语义背景：${semantic}\n\n目标：${goals}\n\n写 3 个连续场景，每段以 SCENE 1/2/3 开头，末行 DREAM_EMOTION: <词>。`
+    user: ({ seeds, semantic, goals, cycle, previousDream, contextSummary, retrievedMemories }) => `梦境周期 ${cycle}。种子：\n${seeds}\n\n语义背景：${semantic}\n\n目标：${goals}\n\n最近对话压缩摘要：${contextSummary || "（无）"}\n\n长期记忆：${retrievedMemories || "（无）"}\n\n上一段梦境（必须承接意象、人物或未完成动作，不要另起炉灶）：${previousDream || "（这是第一段梦）"}\n\n写 3 个连续场景，每段以 SCENE 1/2/3 开头，末行 DREAM_EMOTION: <词>。`
   },
   nightmare: {
     system: "你是噩梦阶段：受控的对抗性模拟器。放大真实失败模式，但必须给出可行的恢复路径。",
@@ -106,7 +106,7 @@ const seed = () => ({
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }],
   proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null },
   activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), nextWakeAt: null, sleepPendingAt: null, sleepStage: null },
-  sleep: { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false }
+  sleep: { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null }
 });
 
 function ensureProactive(thread) {
@@ -121,8 +121,10 @@ function ensureActivity(thread) {
     thread.activity = { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), nextWakeAt: null, sleepPendingAt: null };
   }
   ensureProactive(thread);
-  if (!thread.sleep) thread.sleep = { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false };
+  if (!thread.sleep) thread.sleep = { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null };
   if (!Array.isArray(thread.sleep.pendingDreams)) thread.sleep.pendingDreams = [];
+  if (typeof thread.sleep.dreamArc !== "string") thread.sleep.dreamArc = "";
+  if (!Object.prototype.hasOwnProperty.call(thread.sleep, "nightmare")) thread.sleep.nightmare = null;
   return thread.activity;
 }
 
@@ -167,12 +169,15 @@ async function generateAutonomousMessage(thread, kind) {
 
 async function generateSentinelWake(thread) {
   const proactive = ensureProactive(thread);
-  const recent = (thread.messages || []).slice(-12).map((message) => `${message.role}: ${message.content}`).join("\n");
+  const context = await buildAutonomousContext(thread);
+  const recent = context.raw.map((message) => `${message.role}: ${message.content}`).join("\n");
+  const contextSummary = context.summary ? `\n<context_summary>\n${context.summary}\n</context_summary>` : "";
+  const retrievedMemories = context.memories.length ? `\n<retrieved_memories>\n${context.memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>` : "";
   const raw = await callModel({
     messages: [
       {
         role: "system",
-        content: `你是一个会主动关心用户的 AI。根据主动消息设定“${proactive.message}”自然地发起联系。你还要自己决定下一次主动联系的间隔，单位是分钟，必须是 1 到 1440 的整数。只输出 JSON，不要 Markdown：{"message":"要发给用户的话","nextWakeMinutes":整数}`
+        content: `你是一个会主动关心用户的 AI。根据主动消息设定“${proactive.message}”自然地发起联系。你还要自己决定下一次主动联系的间隔，单位是分钟，必须是 1 到 1440 的整数。自主唤醒必须结合最近十几条原文、对话压缩摘要和长期记忆，保持上下文连续。${contextSummary}${retrievedMemories}只输出 JSON，不要 Markdown：{"message":"要发给用户的话","nextWakeMinutes":整数}`
       },
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
@@ -188,12 +193,21 @@ async function generateSentinelWake(thread) {
   };
 }
 
+async function buildAutonomousContext(thread) {
+  const raw = contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16);
+  const summary = String(thread.contextSummary || "").trim();
+  const query = [summary, ...raw.map((message) => message.content)].filter(Boolean).join("\n").slice(-2400);
+  const memories = await searchMemories(query || "最近聊天 上下文");
+  return { raw, summary, memories };
+}
+
 function safeJSON(text, fallback = {}) {
   try { return JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || text); } catch { return fallback; }
 }
 
-function sleepMemories(thread) {
-  return (thread.messages || []).slice(-80).map((m, index) => ({
+function sleepMemories(thread, context = {}) {
+  const raw = Array.isArray(context.raw) ? context.raw : contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16);
+  const memories = raw.map((m, index) => ({
     id: m.id || `m${index}`,
     ts: Date.parse(m.createdAt || 0) || Date.now(),
     content: `${m.role === "user" ? "用户" : "AI"}：${m.content}`,
@@ -203,6 +217,9 @@ function sleepMemories(thread) {
     reward: 0,
     expectedReward: 0
   }));
+  if (context.summary) memories.push({ id: "context-summary", ts: Date.now(), content: `对话压缩摘要：${context.summary}`, valence: 0, arousal: 0.3, rehearsalCount: 0, reward: 0, expectedReward: 0 });
+  for (const [index, memory] of (context.memories || []).entries()) memories.push({ id: `retrieved-memory-${index + 1}`, ts: Date.now(), content: `长期记忆：${memory}`, valence: 0, arousal: 0.25, rehearsalCount: 0, reward: 0, expectedReward: 0 });
+  return memories;
 }
 
 function salience(memory, goals = []) {
@@ -232,7 +249,8 @@ async function runFullSleepCycle(thread) {
   const sleep = thread.sleep;
   if (sleep.running) return;
   sleep.running = true;
-  const all = sleepMemories(thread);
+  const context = await buildAutonomousContext(thread);
+  const all = sleepMemories(thread, context);
   const goals = thread.goals || [];
   const obstacles = thread.obstacles || [];
   const scored = all.sort((a, b) => salience(b, goals) - salience(a, goals));
@@ -251,7 +269,8 @@ async function runFullSleepCycle(thread) {
         if (fact?.fact && Number(fact.confidence ?? 0.6) >= 0.6) sleep.semantic.push({ id: randomUUID(), fact: fact.fact, sources: fact.sources || seedIds, confidence: Number(fact.confidence ?? 0.6), createdAt: new Date().toISOString() });
       }
       activity.sleepStage = `rem_${cycle + 1}`;
-      const rem = await runSleepStage(thread, "rem", cycle, { seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1 }, seedIds);
+      const rem = await runSleepStage(thread, "rem", cycle, { seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1, previousDream: sleep.dreamArc, contextSummary: context.summary, retrievedMemories: context.memories.join("；") }, seedIds);
+      sleep.dreamArc = rem.content;
       sleep.pendingDreams.push({ content: rem.content, sleepCycle: cycle + 1 });
       nightLog.push({ stage: "rem", cycle, text: rem.content });
       if (cycle >= 1 && Math.random() < 0.35 && seeds.some((m) => m.valence < -0.3)) {
@@ -260,7 +279,10 @@ async function runFullSleepCycle(thread) {
         const nightmare = await runSleepStage(thread, "nightmare", cycle, { trauma: formatSleepMemories(trauma, 3), competence: thread.competence || "尚未明确" }, trauma.map((m) => m.id));
         nightLog.push({ stage: "nightmare", cycle, text: nightmare.content });
         activity.sleepStage = "nightmare_awake";
-        if (Math.random() < 0.5) { activity.mode = "sentinel"; activity.sleepStage = "insomnia"; break; }
+        sleep.nightmare = { status: "awake", cycle: cycle + 1, content: nightmare.content, options: ["send_message", "continue_sleep", "sentinel"], createdAt: new Date().toISOString() };
+        // The state is deliberately left pending so the user can choose whether
+        // to send the awakening message, try sleeping again, or switch to sentinel.
+        break;
       }
       if (cycle === sleepCycles - 1) {
         activity.sleepStage = "lucid";
@@ -268,6 +290,7 @@ async function runFullSleepCycle(thread) {
         nightLog.push({ stage: "lucid", cycle, text: lucid.content });
       }
     }
+    if (sleep.nightmare?.status === "awake") return;
     activity.sleepStage = "reflection";
     const reflection = await runSleepStage(thread, "reflection", sleepCycles, { summary: nightLog.map((x) => `[${x.stage} cycle ${x.cycle}]\n${x.text.slice(0, 900)}`).join("\n\n"), state: JSON.stringify({ goals, competence: thread.competence || null }) });
     const parsed = safeJSON(reflection.content, { _parseError: true, raw: reflection.content.slice(0, 500) });
@@ -1812,6 +1835,25 @@ const server = createServer(async (req, res) => {
         else if (input.action === "sleep_abort") {
           activity.mode = "sentinel"; activity.sleepPendingAt = null; activity.sleepUntil = null; activity.nextDreamAt = null; activity.sleepStage = "aborted";
           activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
+        } else if (["nightmare_message", "nightmare_continue", "nightmare_sentinel"].includes(input.action)) {
+          const sleep = threads[id].sleep;
+          const nightmare = sleep?.nightmare;
+          if (!nightmare || nightmare.status !== "awake") return send(res, 409, { error: "no_nightmare_waiting" });
+          if (input.action === "nightmare_message") {
+            threads[id].messages.push({ id: randomUUID(), role: "assistant", content: nightmare.content, contentType: "nightmare", createdAt: new Date().toISOString() });
+            activity.mode = "sleeping";
+            activity.sleepStage = "awake_after_nightmare";
+            activity.nextDreamAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
+          } else if (input.action === "nightmare_continue" && Math.random() < 0.5) {
+            activity.mode = "sleeping";
+            activity.sleepStage = "sleeping_again";
+            activity.nextDreamAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
+          } else {
+            activity.mode = "sentinel";
+            activity.sleepStage = "insomnia";
+            activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
+          }
+          sleep.nightmare = null;
         }
         await saveThreads(threads);
         return send(res, 200, activity);
