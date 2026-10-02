@@ -535,7 +535,7 @@ async function sendAPNs(device, message, metadata = null) {
       resolve({ status, body: responseBody });
     });
     request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
-    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, sound: "default" }, ...(metadata || {}) }));
+    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, sound: "default", "mutable-content": 1 }, ...(metadata || {}) }));
   });
 }
 
