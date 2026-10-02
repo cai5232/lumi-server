@@ -105,7 +105,7 @@ const seed = () => ({
   title: "沈屿",
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }],
   proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null },
-  activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), nextWakeAt: null, sleepPendingAt: null, sleepStage: null },
+  activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, sleepPendingAt: null, sleepStage: null },
   sleep: { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null }
 });
 
@@ -118,7 +118,7 @@ function ensureProactive(thread) {
 
 function ensureActivity(thread) {
   if (!thread.activity) {
-    thread.activity = { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), nextWakeAt: null, sleepPendingAt: null };
+    thread.activity = { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, sleepPendingAt: null };
   }
   ensureProactive(thread);
   if (!thread.sleep) thread.sleep = { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null };
@@ -361,8 +361,10 @@ async function runBackgroundPulse() {
       try {
         const wake = await generateSentinelWake(thread);
         thread.messages.push(wake.message);
+        activity.lastWakeAt = wake.message.createdAt;
         activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
         proactive.nextDueAt = activity.nextWakeAt;
+        await sendProactivePush(thread.id, wake.message.content, { kind: "sentinel_wake" });
         changed = true;
       } catch (error) { console.warn(`sentinel skipped: ${error.message}`); }
     }
@@ -532,8 +534,17 @@ async function sendAPNs(device, message, metadata = null) {
       resolve({ status, body: responseBody });
     });
     request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
-    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: String(message || "有一条新消息").replace(/<[^>]*>/g, "").slice(0, 220) }, sound: "default" }, ...(metadata || {}) }));
+    request.end(JSON.stringify({ aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, sound: "default" }, ...(metadata || {}) }));
   });
+}
+
+function pushText(message) {
+  return String(message || "有一条新消息")
+    .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 220) || "有一条新消息";
 }
 
 async function sendProactivePush(threadId, message, metadata = null) {
