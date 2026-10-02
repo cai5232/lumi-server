@@ -363,7 +363,7 @@ async function completeLateScreenPeek(threadId) {
   try {
     const threads = await readThreads();
     const thread = threads[threadId];
-    const pending = thread?.messages?.findLast((message) => message.contentType === "screen_request" && message.screenStatus === "pending" && Date.parse(message.createdAt) >= request.requestedAt);
+    const pending = thread?.messages?.findLast((message) => message.contentType === "screen_peek_missing" && message.screenStatus === "pending" && Date.parse(message.createdAt) >= request.requestedAt);
     if (!pending) return;
     const generated = await generateReply({
       input: "<internal_screen_peek>你自主要求查看屏幕，现在截图已经送达。请根据画面和聊天上下文自然回复，只描述看得见的内容，不要提及内部标签。</internal_screen_peek>",
@@ -376,6 +376,7 @@ async function completeLateScreenPeek(threadId) {
     });
     if (!generated.content || !generated.thinking) throw new Error("late screen peek reply was incomplete");
     pending.screenStatus = "received";
+    pending.content = "自动截屏已送达";
     const message = { id: randomUUID(), role: "assistant", content: generated.content, thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "screen_peek", screenCapturedAt: new Date(frame.capturedAt).toISOString(), createdAt: new Date().toISOString() };
     thread.messages.push(message);
     await saveThreads(threads);
@@ -684,9 +685,9 @@ async function runBackgroundPulse() {
         if (wake.action === "screen" && !screenSeen) {
           const request = screenPeekRequests.get(thread.id);
           if (request) request.status = "fallback_pending";
-          thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
-          pushMessage = "沈屿想看你的屏幕";
-          pushMetadata = { kind: "screen_request" };
+          thread.messages.push({ id: randomUUID(), role: "assistant", content: "自动截屏还没送达，请检查快捷指令的邮件自动化", contentType: "screen_peek_missing", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
+          pushMessage = "自动截屏还没送达，请检查快捷指令的邮件自动化";
+          pushMetadata = { kind: "screen_peek_missing" };
         } else if (wake.action === "phone") {
           const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
           pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, call: invite, startCallRing: () => startIncomingCallRing(thread.id, invite) });
