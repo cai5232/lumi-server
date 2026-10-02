@@ -860,7 +860,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
       ?? data?.output_text
       ?? data?.content;
   const content = Array.isArray(rawContent)
-    ? rawContent.map((block) => typeof block === "string" ? block : block?.text || block?.content || "").join("")
+    ? rawContent
+      .filter((block) => typeof block === "string" || !/^(thinking|reasoning|analysis)$/i.test(String(block?.type || block?.role || "")))
+      .map((block) => typeof block === "string" ? block : block?.text || block?.content || "")
+      .join("")
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim()) {
     const finishReason = data?.choices?.[0]?.finish_reason || data?.status || "unknown";
