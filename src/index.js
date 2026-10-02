@@ -540,15 +540,20 @@ async function sendAPNs(device, message, metadata = null) {
 }
 
 function pushText(message) {
-  return String(message || "有一条新消息")
-    // Thinking is private UI state. Remove complete and unterminated blocks
-    // so a partial/legacy model response can never leak into APNs.
-    .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
-    .replace(/<\/thinking>/gi, "")
+  return stripPrivateReasoning(message || "有一条新消息")
     .replace(/<[^>]+>/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 220) || "有一条新消息";
+}
+
+// Pushes must never expose model-private reasoning, including provider variants
+// that use <think>, <analysis>, or <reasoning> instead of <thinking>.
+function stripPrivateReasoning(value) {
+  return String(value || "")
+    .replace(/<(?:thinking|think|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/(?:thinking|think|analysis|reasoning)>|$)/gi, "")
+    .replace(/<\/(?:thinking|think|analysis|reasoning)>/gi, "")
+    .trim();
 }
 
 async function sendProactivePush(threadId, message, metadata = null) {
@@ -1345,7 +1350,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   catch { diaryAction = null; }
   const memoryContent = memoryMatch?.[1]?.trim();
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
-  let content = cleanedRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
+  const visibleRaw = stripPrivateReasoning(cleanedRaw);
+  let content = visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, "").trim();
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
   if (!content && diaryEntry) content = "嗯，我在。";
