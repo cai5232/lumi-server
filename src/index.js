@@ -280,6 +280,7 @@ async function runFullSleepCycle(thread) {
         nightLog.push({ stage: "nightmare", cycle, text: nightmare.content });
         activity.sleepStage = "nightmare_awake";
         sleep.nightmare = { status: "awake", cycle: cycle + 1, content: nightmare.content, options: ["send_message", "continue_sleep", "sentinel"], createdAt: new Date().toISOString() };
+        activity.nightmare = sleep.nightmare;
         // The state is deliberately left pending so the user can choose whether
         // to send the awakening message, try sleeping again, or switch to sentinel.
         break;
@@ -1854,6 +1855,7 @@ const server = createServer(async (req, res) => {
             activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
           }
           sleep.nightmare = null;
+          activity.nightmare = null;
         }
         await saveThreads(threads);
         return send(res, 200, activity);
