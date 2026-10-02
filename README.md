@@ -28,6 +28,22 @@ Zeabur 环境变量：
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
+## 自主唤醒时看屏幕
+
+在 Lumi 设置中开启“保活”和“查看屏幕”后，AI 可在自主唤醒时选择看屏幕。已由用户开启的系统屏幕共享有新画面时，后端会把该画面交给聊天模型，并用看到的内容生成回复。如果没有共享画面，可以选择配置邮件触发的 iPhone 快捷指令，让手机为本次唤醒截一张图。未收到新图时，后端不会把旧图冒充当前画面，而会沿用现有的看屏请求通知。
+
+邮件自动截图需要在 Zeabur 配置以下环境变量；所有口令只放在服务端变量和本人手机快捷指令中：
+
+- `LUMI_SCREEN_PEEK_TOKEN`：专用于截图上传的随机长口令，不要与 `LUMI_PUSH_API_TOKEN` 共用。
+- `LUMI_SCREEN_PEEK_SMTP_HOST`、`LUMI_SCREEN_PEEK_SMTP_PORT`（默认 `465`）、`LUMI_SCREEN_PEEK_SMTP_USER`、`LUMI_SCREEN_PEEK_SMTP_PASSWORD`：发信邮箱的 SMTP 信息和应用专用密码。
+- `LUMI_SCREEN_PEEK_EMAIL_FROM`：可选；默认用 SMTP 用户名作为发件人。
+- `LUMI_SCREEN_PEEK_EMAIL_TO`：iPhone 邮件自动化接收触发邮件的邮箱。
+- `LUMI_SCREEN_PEEK_EMAIL_SUBJECT`：独一无二的随机主题暗号，在 iPhone 自动化中使用同一个值。
+
+在 iPhone“快捷指令”中创建“截屏”→“获取 URL 内容”快捷指令。后一步 URL 为 `https://lumi-tokyo-api.zeabur.app/v1/chats/default/screen-peek/frame`，方法选 `POST`，请求体选“文件”并使用上一步截屏；添加请求头 `Authorization: Bearer <LUMI_SCREEN_PEEK_TOKEN>`。再创建“收到邮件”自动化，同时限定发件人和主题暗号，运行上述快捷指令，并选择“立即运行”。在快捷指令的隐私设置中允许锁定时运行。先手动运行快捷指令，确认上传返回 `accepted: true`，再用一封测试邮件验证自动化；锁屏状态也应单独实测。
+
+后端只接受带专用口令的 JPEG/PNG 截图，最大 3 MB。唤醒后最多等 45 秒的新图；每个聊天只在服务进程内暂存一张，交给模型后立即移除，未使用的图两分钟后过期。此方式要求单实例部署。截图会传给当前配置的聊天模型，因此不要在不希望分享屏幕内容时开启此功能。
+
 ## API
 
 - `GET /health`
