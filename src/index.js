@@ -12,6 +12,7 @@ const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
+const screenShareDir = join(dataDir, "screen-share");
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1741,6 +1742,36 @@ const server = createServer(async (req, res) => {
       if (typeof input.content !== "string" || !input.content.trim()) return send(res, 400, { error: "content_required" });
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
+    }
+    const screenMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/screen-share(?:\/(frame|status))?$/);
+    if (screenMatch) {
+      const threadID = decodeURIComponent(screenMatch[1]);
+      const operation = screenMatch[2] || "status";
+      const dir = join(screenShareDir, threadID.replace(/[^a-zA-Z0-9_-]/g, "_"));
+      const framePath = join(dir, "latest.jpg");
+      const statePath = join(dir, "state.json");
+      if (req.method === "POST" && operation === "frame") {
+        const input = await body(req);
+        const data = String(input.jpegBase64 || input.frame || "").replace(/^data:image\/jpeg;base64,/i, "");
+        if (!data || data.length > 2_000_000) return send(res, 400, { error: "jpeg_required" });
+        await mkdir(dir, { recursive: true });
+        await writeFile(framePath, Buffer.from(data, "base64"));
+        await writeFile(statePath, JSON.stringify({ active: true, updatedAt: new Date().toISOString(), width: Number(input.width || 0), height: Number(input.height || 0) }));
+        return send(res, 202, { accepted: true, updatedAt: new Date().toISOString() });
+      }
+      if (req.method === "GET" && operation === "status") {
+        try { return send(res, 200, JSON.parse(await readFile(statePath, "utf8"))); }
+        catch { return send(res, 200, { active: false, updatedAt: null }); }
+      }
+      if (req.method === "GET" && operation === "frame") {
+        try { return sendBinary(res, 200, await readFile(framePath), "image/jpeg"); }
+        catch (error) { return send(res, error?.code === "ENOENT" ? 404 : 500, { error: "frame_unavailable" }); }
+      }
+      if (req.method === "DELETE") {
+        await writeFile(statePath, JSON.stringify({ active: false, updatedAt: new Date().toISOString() }));
+        return send(res, 200, { stopped: true });
+      }
+      return send(res, 405, { error: "method_not_allowed" });
     }
     const activityMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity$/);
     if (url.pathname === "/v1/settings/proactive") {
