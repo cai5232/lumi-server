@@ -13,33 +13,18 @@ npm run dev
 
 Zeabur 环境变量：
 
-- `LUMI_MODEL_API_URL`：OpenAI 兼容地址；可填完整的 `/chat/completions`，也可填到 `/v1`，服务会自动补齐路径
+- `LUMI_MODEL_API_URL`：OpenAI 兼容的 Chat Completions 完整地址
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
-- `LUMI_MODEL_API_URL_2`：可选备用中转地址；同样支持基础 `/v1` 地址或完整 `/chat/completions` 地址
-- `LUMI_MODEL_API_KEY_2`：备用中转 API Key
-- `LUMI_MODEL_NAME_2`：可选备用模型名称；建议显式填写，避免自动选择 `/models` 返回的第一个模型
-- `ZENMUX_MANAGEMENT_API_KEY`：ZenMux Subscription Management 创建的管理密钥；仅供后端读取 5 小时 / 7 天订阅额度，不能放进 App 或前端
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
 - `LUMI_CONTEXT_LIMIT`：可选，单个聊天窗口的估算 Token 上限，默认 `200000`
-- `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.85`
+- `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.86`
 - `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
-- `LUMI_MEMORY_API_KEY`：记忆库内部 Nook Token，填 memorycore 的 `OMBRE_NOOK_API_TOKEN`；用于检索/写入接口
-- `LUMI_MEMORY_PASSWORD`：如果 memorycore 只提供密码登录，可填记忆库密码，后端会自动登录并复用会话
-- `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/api/integrations/nook/recall`（POST，发送 `query` 和 `limit`）
-- `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/api/integrations/nook/memories`；该路径会写入可被 `/api/search` 检索的 buckets
-- `LUMI_MEMORY_CACHE_TTL_MS`：可选，记忆检索缓存时间，默认 `300000`（5 分钟）；写入新记忆后会自动清空
-- `LUMI_PROMPT_CACHE_ENABLED`：可选，Prompt Cache 开关，默认开启；设为 `false` 可关闭
-- `LUMI_PROMPT_CACHE_TTL`：可选，Prompt Cache 时长，默认 `1h`，也可填 `5m`；Zeabur 中显式设置的变量优先于代码默认值
-- `LUMI_CACHE_KEEPALIVE_ENABLED`：可选，设为 `true` 才启动模型缓存保活；保活会产生付费模型请求，默认关闭
-- `LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS`：可选，最后一条真实用户消息之后最多保活多久；`1h` 缓存默认 24 小时，`5m` 缓存默认 12 分钟
-- `LUMI_COMPACT_TAIL_TOKENS`：上下文压缩后保留的完整最近对话轮 token 预算，默认 `20000`
-- `LUMI_NATIVE_ANTHROPIC`：可选，默认关闭；设为 `true` 才切换 Claude 到 ZenMux Anthropic 原生接口，保持关闭可继续使用 OpenAI 兼容聊天接口
-- `LUMI_APNS_KEY_ID`、`LUMI_APNS_TEAM_ID`、`LUMI_APNS_PRIVATE_KEY_BASE64`：Apple 推送凭据
-- `LUMI_APNS_TOPIC`：可选，默认 `com.cai5232.LumiPush`
-- `LUMI_PUSH_API_TOKEN`：必填随机长口令，保护推送登记和保活设置接口
+- `LUMI_MEMORY_API_KEY`：可选，记忆库 API Key
+- `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
+- `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/memories`
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
@@ -47,27 +32,10 @@ Zeabur 环境变量：
 
 - `GET /health`
 - `GET /v1/chats/:id`
-- `GET /v1/subscription/usage`，需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`；返回 ZenMux 订阅的 5 小时和 7 天额度
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
-- `POST /v1/chats/:id/messages` 支持 `Idempotency-Key: <每次发送唯一 UUID>`；同一请求号重复到达时复用已保存的回复，不再次调用模型。旧版 App 的完全相同请求在短时间内也会合并，避免网络自动重试产生三笔费用。
-- `POST /v1/chats/:id/messages` 也支持 `images`（base64 data URL 数组）、`emojiCatalog` 和语音授权；只有 AI 明确选择 `<speech>...</speech>` 才生成语音，TTS Key 只随本次请求传入、不落盘
-- MiniMax 音色只使用 App 中手动填写的 Voice ID，不拉取音色目录；TTS Key 只随本次消息请求传入、不落盘
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
-- `GET /v1/settings/proactive` / `PUT /v1/settings/proactive`，需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`，用于读取/保存主动联系设置（默认关闭）
-- `GET /v1/push/status`，查看 APNs 是否已配置及登记设备数量
-- `POST /v1/push/register`，需要同一 Bearer 口令；由 App 自动登记 iOS 推送令牌
 
-`GET /health` 会返回 Prompt Cache 的读写 token、缓存命中率和记忆检索缓存命中次数，便于确认缓存是否真正生效。缓存命中率按 `cache_read / (cache_read + cache_creation)` 计算，没有样本时返回 `null`。
-保活后收到下一条真实消息时，`cache.prompt.lastChatContinuity` 会记录本次聊天与上次保活的系统提示词、模型、助手回复缓存前缀是否一致，以及这次真实聊天的缓存读取/写入 token。只记录一致性结果和哈希前 16 位，不把提示词或聊天内容写入日志；如果前缀一致但 `readTokens` 为 0，还需要检查模型网关的实际缓存路由与用量记录。
-开启保活后，后端仅对默认聊天在缓存仍可能有效、最近一轮没有图片且空闲时间未超限时，按 `1h` 档约 45 分钟或 `5m` 档约 4 分钟发送一次短模型探测。探测先读取上一轮用户消息的缓存，再把原始 AI 回复写到同一缓存前缀；下一次保活和用户发消息都会在这条 AI 回复处设置相同的缓存断点。探测不写入用户可见聊天；模型必须成功返回，且报告缓存读取 token，才继续后续保活。`/health` 中 `cache.prompt.keepalive` 单独显示尝试数、命中数、累计与最近一次缓存读取和重写 token，以及最近错误；计数在进程重启后清零。普通 `/health` 请求不会触发保活。第三方模型网关可能不透传缓存控制或命中统计，此时不会继续付费探测。长期不聊天时，关闭保活通常更省钱。
-Claude 缓存按稳定的系统提示词和历史消息设置断点；每次变化的时间戳、检索到的记忆和本轮输入放在断点之后，并把发送给模型的原文保存在服务端历史中，保证下一轮的缓存前缀完全一致。连续请求是否命中以模型返回的 `cache_read_input_tokens` 为准，首次写入、提示词改动或过期后的请求仍会产生缓存写入费用。
-语音开关作为本轮动态上下文传递，开关变化不会改写缓存的系统提示词；部署这一版后的第一轮仍可能因提示词升级重新写入一次缓存。
-同一个健康接口也返回上下文压缩次数、当前活跃历史 token 估算及触发阈值。默认历史达到 200k 窗口的 85% 时，触发该阈值的正常回复会在同一次模型调用中附带私有 `<context_summary>`，随后再截短历史并保留最近约 20k token 的完整对话；摘要最多输出 25k token，并与后续新增历史继续融合。因此压缩不会额外发起一次模型请求，也不会让触发压缩的那条回复丢失原有缓存前缀。
-
-主动联系设置由 `/v1/settings/proactive` 保存到 `LUMI_DATA_DIR`，默认关闭。开启后，只有 APNs 已配置且至少有一台登记设备时，后端才会在静默时长届满时发起一次模型调用；该调用只带最近 8 条对话、摘要最多 4000 字符、最多生成 256 tokens，以控制冷启动账单。同一条用户消息不会重复收费，直到用户再次发消息才重新计时。它不是缓存保活请求；Anthropic 的缓存过期后，不能无成本地维持命中率。回复保存在聊天历史并经 Apple Push Notification service 发送系统通知。模型供应商需要返回 `usage.prompt_tokens_details.cached_tokens`（或 Anthropic 对应字段）才会有 Prompt Cache 命中统计。
-
-当窗口估算 Token（包含当前输入）达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
+当窗口估算 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
-每条普通回复调用一次聊天模型；记忆关键词由后端本地提取，避免为检索另付一次模型调用。关键词只送给记忆库，不会塞进聊天提示词；Lumi 通过 Memory Core 的 `/api/integrations/nook/recall` 读取 `related` 结果，返回的记忆原文和系统时间戳以标明 `source="system"` 的上下文放在本轮输入前，并从 `/health` 暴露搜索结果数与最近错误。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会先创建潜流草稿，再调用 memorycore 的更新接口确认，最后在客户端显示“-------沈屿记下了这一刻-------”。
-颜文字库第一轮只发送心情标签名；AI 自行决定是否输出 `<emoji_mood>`。选中标签后，后端从对应类别本地选择一个颜文字，不再为此额外调用一次模型；其他类别的颜文字不会送给模型。
+每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会移除该标记并在客户端显示“-------沈屿记下了这一刻-------”。
