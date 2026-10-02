@@ -4,6 +4,7 @@ import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual }
 import { connect } from "node:http2";
 import { createServer } from "node:http";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
+import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 
 const port = Number(process.env.PORT || 8787);
@@ -16,8 +17,10 @@ const pushTokensPath = join(dataDir, "push-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
+const screenPeekFrames = new Map();
+const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -307,6 +310,51 @@ async function generateSentinelWake(thread) {
   };
 }
 
+async function recentScreenPeek(threadId, after) {
+  const frame = screenPeekFrames.get(threadId);
+  if (!frame || frame.capturedAt < after) return null;
+  return { image: `data:${frame.mimeType};base64,${frame.bytes.toString("base64")}`, capturedAt: frame.capturedAt, source: "peek" };
+}
+
+async function autonomousScreen(threadId) {
+  if (!screenPeekConfigured()) return null;
+  const requestedAt = Date.now();
+  if (requestedAt - (screenPeekTriggerAt.get(threadId) || 0) < 5 * 60_000) return null;
+  screenPeekTriggerAt.set(threadId, requestedAt);
+  await sendScreenPeekTrigger();
+  const deadline = requestedAt + 45_000;
+  while (Date.now() < deadline) {
+    const fresh = await recentScreenPeek(threadId, requestedAt);
+    if (fresh) return fresh;
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
+  console.warn(`screen peek timed out for thread ${threadId}`);
+  return null;
+}
+
+async function describeAutonomousScreen(thread, wake, screen) {
+  const seen = await generateReply({
+    input: "<internal_screen_peek>你刚才自主决定查看屏幕。下面附的是此刻新收到的用户屏幕画面。请结合画面与现有聊天上下文，自然地说出你想说的话；只谈真正看得见的内容，不要猜测未显示的信息。不要提及内部标签。</internal_screen_peek>",
+    images: [screen.image],
+    thread,
+    proactive: true,
+    sentinelActions: ["message"],
+    provider: thread.cacheProvider || "zenmux",
+    model: thread.cacheModel || ""
+  });
+  if (!seen.content || !seen.thinking) throw new Error("screen peek reply was incomplete");
+  wake.message = {
+    ...wake.message,
+    content: seen.content,
+    thinking: seen.thinking,
+    modelContent: seen.modelContent,
+    precedingUserModelContent: seen.userModelContent,
+    contentType: "screen_peek",
+    screenCapturedAt: new Date(screen.capturedAt).toISOString()
+  };
+  if (seen.emotionUpdate) wake.emotionUpdate = seen.emotionUpdate;
+}
+
 async function buildAutonomousContext(thread) {
   const raw = contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16);
   const summary = String(thread.contextSummary || "").trim();
@@ -550,11 +598,28 @@ async function runBackgroundPulse() {
       activeChatThreads.add(thread.id);
       try {
         const wake = await generateSentinelWake(thread);
+        let screenSeen = false;
+        if (wake.action === "screen") {
+          let screen = null;
+          try { screen = await autonomousScreen(thread.id); }
+          catch (error) { console.warn(`autonomous screen capture unavailable: ${error.message}`); }
+          if (screen) {
+            try {
+              await describeAutonomousScreen(thread, wake, screen);
+              screenSeen = true;
+            } catch (error) {
+              console.warn(`autonomous screen peek skipped: ${error.message}`);
+            } finally {
+              if (screen.source === "peek") screenPeekFrames.delete(thread.id);
+            }
+          }
+        }
+        if (wake.action === "screen") wake.message.createdAt = new Date().toISOString();
         if (wake.emotionUpdate) emotionChanged = true;
         thread.messages.push(wake.message);
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
-        if (wake.action === "screen") {
+        if (wake.action === "screen" && !screenSeen) {
           thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
           pushMessage = "沈屿想看你的屏幕";
           pushMetadata = { kind: "screen_request" };
@@ -2123,6 +2188,30 @@ const server = createServer(async (req, res) => {
       return send(res, saved ? 201 : 502, { saved });
     }
     const screenMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/screen-share(?:\/(frame|status|decision))?$/);
+    const screenPeekMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/screen-peek\/frame$/);
+    if (screenPeekMatch) {
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      if (!screenPeekAuthorized(req.headers.authorization)) return send(res, 401, { error: "unauthorized" });
+      const threadID = decodeURIComponent(screenPeekMatch[1]);
+      const chunks = [];
+      let size = 0;
+      for await (const chunk of req) {
+        size += chunk.length;
+        if (size > 3_000_000) return send(res, 413, { error: "screen_image_too_large" });
+        chunks.push(chunk);
+      }
+      const image = Buffer.concat(chunks);
+      const mimeType = screenImageType(image);
+      if (!mimeType) return send(res, 400, { error: "jpeg_or_png_required" });
+      const capturedAt = Date.now();
+      const updatedAt = new Date(capturedAt).toISOString();
+      const frame = { bytes: image, mimeType, capturedAt };
+      screenPeekFrames.set(threadID, frame);
+      setTimeout(() => {
+        if (screenPeekFrames.get(threadID) === frame) screenPeekFrames.delete(threadID);
+      }, 2 * 60_000).unref();
+      return send(res, 202, { accepted: true, updatedAt });
+    }
     if (screenMatch) {
       const threadID = decodeURIComponent(screenMatch[1]);
       const operation = screenMatch[2] || "status";
