@@ -30,12 +30,12 @@ const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
+let backgroundPulseInFlight = false;
 let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
-let proactiveCheckInFlight = false;
 let pushTokens = [];
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
@@ -105,15 +105,16 @@ const seed = () => ({
   id: "default",
   title: "沈屿",
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }],
-  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null },
+  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } },
   activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, sleepPendingAt: null, sleepStage: null },
   sleep: { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null }
 });
 
 function ensureProactive(thread) {
   if (!thread.proactive) {
-    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null };
+    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
   }
+  if (!thread.proactive.actions || typeof thread.proactive.actions !== "object") thread.proactive.actions = { message: true, phone: true, screen: false };
   return thread.proactive;
 }
 
@@ -157,6 +158,27 @@ function markUserActivity(thread, content) {
   activity.sleepStage = null;
 }
 
+function finishUserConversation(thread, content) {
+  const activity = ensureActivity(thread);
+  const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+  const now = Date.now();
+  const nowISO = new Date(now).toISOString();
+  activity.mode = "sentinel";
+  activity.lastUserActivityAt = nowISO;
+  activity.nextWakeAt = proactive.enabled
+    ? new Date(now + Math.max(1, Number(proactive.intervalMin) || 60) * 60_000).toISOString()
+    : null;
+  proactive.nextDueAt = activity.nextWakeAt;
+  activity.sleepPendingAt = isFarewell(content)
+    ? new Date(now + sleepDelayMinutes * 60_000).toISOString()
+    : null;
+  activity.sleepStartedAt = null;
+  activity.sleepUntil = null;
+  activity.nextDreamAt = null;
+  activity.dreamCycle = 0;
+  activity.sleepStage = null;
+}
+
 async function generateAutonomousMessage(thread, kind) {
   const proactive = ensureProactive(thread);
   const recent = (thread.messages || []).slice(-12).map((message) => `${message.role}: ${message.content}`).join("\n");
@@ -174,7 +196,10 @@ async function generateAutonomousMessage(thread, kind) {
 }
 
 async function generateSentinelWake(thread) {
-  const proactive = ensureProactive(thread);
+  const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+  const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
+  const allowedActions = ["message", "phone", "screen"].filter((action) => actionSettings[action] === true);
+  if (!allowedActions.length) throw new Error("sentinel has no enabled wake actions");
   const context = await buildAutonomousContext(thread);
   const recent = context.raw.map((message) => `${message.role}: ${message.content}`).join("\n");
   const contextSummary = context.summary ? `\n<context_summary>\n${context.summary}\n</context_summary>` : "";
@@ -183,18 +208,25 @@ async function generateSentinelWake(thread) {
     messages: [
       {
         role: "system",
-        content: `你是一个会主动关心用户的 AI。根据主动消息设定“${proactive.message}”自然地发起联系。你还要自己决定下一次主动联系的间隔，单位是分钟，必须是 1 到 1440 的整数。自主唤醒必须结合最近十几条原文、对话压缩摘要和长期记忆，保持上下文连续。${contextSummary}${retrievedMemories}只输出 JSON，不要 Markdown：{"message":"要发给用户的话","nextWakeMinutes":整数}`
+        content: `你是沈屿。根据主动消息设定“${proactive.message}”自然地发起联系。必须结合最近十几条聊天原文、压缩摘要和长期记忆。你需要为这次主动联系写一段简短、真诚、第一人称的心声（不是推理步骤），并亲自决定下一次醒来的间隔，单位分钟，1 到 1440 的整数；不能把设置间隔或固定 nudge 当成你自己的决定。你只能选择已启用的行动之一：${allowedActions.join("、")}。严格只输出 JSON，不要 Markdown，四个字段都必须有效：{"message":"要发给言言的聊天正文","thinking":"这次回复可展示在头像弹窗里的简短心声","nextWakeMinutes":整数,"action":"${allowedActions[0]}"}${contextSummary}${retrievedMemories}`
       },
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
     temperature: 0.8
   });
-  const parsed = JSON.parse(raw.match(/\{[\s\S]*\}/)?.[0] || "{}");
-  const message = typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : raw.trim();
-  const fallback = Math.max(1, Number(proactive.intervalMin) || 60);
-  const nextWakeMinutes = Math.min(1440, Math.max(1, Math.round(Number(parsed.nextWakeMinutes) || fallback)));
+  const parsed = safeJSON(raw);
+  const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
+  const thinking = typeof parsed.thinking === "string" ? parsed.thinking.trim() : "";
+  const action = allowedActions.includes(parsed.action) ? parsed.action : "";
+  const requestedNextWakeMinutes = Number(parsed.nextWakeMinutes);
+  if (!message || !thinking || !action || !Number.isFinite(requestedNextWakeMinutes) || requestedNextWakeMinutes < 1 || requestedNextWakeMinutes > 1440) {
+    throw new Error("sentinel reply missing message, thinking, allowed action, or AI-selected nextWakeMinutes");
+  }
+  const nextWakeMinutes = Math.round(requestedNextWakeMinutes);
   return {
-    message: { id: randomUUID(), role: "assistant", content: message, contentType: "sentinel", createdAt: new Date().toISOString() },
+    message: { id: randomUUID(), role: "assistant", content: message, thinking, modelContent: `<thinking>${thinking}</thinking>${message}`, contentType: "sentinel", createdAt: new Date().toISOString() },
+    action,
+    actionReason: typeof parsed.actionReason === "string" ? parsed.actionReason.trim() : "",
     nextWakeMinutes
   };
 }
@@ -321,12 +353,15 @@ async function runFullSleepCycle(thread) {
 }
 
 async function runBackgroundPulse() {
+  if (backgroundPulseInFlight) return;
+  backgroundPulseInFlight = true;
+  try {
   const threads = await readThreads();
   const now = Date.now();
   let changed = false;
   for (const thread of Object.values(threads)) {
     const activity = ensureActivity(thread);
-    const proactive = ensureProactive(thread);
+    const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
       if (Math.random() < sleepInsomniaProbability) {
@@ -363,19 +398,62 @@ async function runBackgroundPulse() {
         activity.nextDreamAt = new Date(now + 2 * 3_600_000).toISOString();
         changed = true;
       }
-    } else if (proactive.enabled && activity.mode === "sentinel" && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now) {
+    } else if (proactive.enabled && activity.mode === "sentinel" && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
+      const actions = proactiveSettings.threadId === thread.id ? proactiveSettings.actions : proactive.actions;
+      if (actions && !actions.message && !actions.phone && !actions.screen) {
+        activity.nextWakeAt = null;
+        proactive.nextDueAt = null;
+        changed = true;
+        continue;
+      }
+      const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
+      if (now - lastActivityAt < 30 * 60_000) {
+        activity.nextWakeAt = new Date(lastActivityAt + 30 * 60_000).toISOString();
+        proactive.nextDueAt = activity.nextWakeAt;
+        changed = true;
+        continue;
+      }
+      if (activeChatThreads.has(thread.id)) continue;
+      activeChatThreads.add(thread.id);
       try {
         const wake = await generateSentinelWake(thread);
         thread.messages.push(wake.message);
+        let pushMessage = wake.message.content;
+        let pushMetadata = { kind: "sentinel_wake" };
+        if (wake.action === "screen") {
+          thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
+          pushMessage = "沈屿想看你的屏幕";
+          pushMetadata = { kind: "screen_request" };
+        } else if (wake.action === "phone") {
+          const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
+          startIncomingCallRing(thread.id, invite);
+          pushMessage = `📞 ${invite.reason}`;
+          pushMetadata = { kind: "incoming_call", callId: invite.id };
+        }
         activity.lastWakeAt = wake.message.createdAt;
-        activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
+        activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.nextWakeMinutes * 60_000).toISOString();
         proactive.nextDueAt = activity.nextWakeAt;
-        await sendProactivePush(thread.id, wake.message.content, { kind: "sentinel_wake" });
+        await sendProactivePush(thread.id, pushMessage, pushMetadata);
         changed = true;
-      } catch (error) { console.warn(`sentinel skipped: ${error.message}`); }
+      } catch (error) {
+        console.warn(`sentinel skipped: ${error.message}`);
+        // A malformed model response must not be presented as an AI decision
+        // or retried (and billed) on every 15-second pulse.
+        activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
+        proactive.nextDueAt = activity.nextWakeAt;
+        changed = true;
+      } finally {
+        activeChatThreads.delete(thread.id);
+      }
     }
   }
-  if (changed) await saveThreads(threads);
+  if (changed) {
+    await saveThreads(threads);
+    await saveProactiveSettings();
+  }
+  } finally {
+    backgroundPulseInFlight = false;
+  }
 }
 
 async function readThreads() {
@@ -648,93 +726,6 @@ function startIncomingCallRing(threadID, call) {
     }
   };
   setTimeout(() => { void ring(); }, 2_000);
-}
-
-function chooseNudgeIntervalMs() {
-  const min = Math.max(10, Number(proactiveSettings.intervalMin) || 60);
-  const max = Math.max(min, Number(proactiveSettings.intervalMax) || min);
-  return (min + Math.random() * (max - min)) * 60_000;
-}
-
-async function checkProactiveNudge() {
-  const actions = proactiveSettings.actions || { message: true, phone: true, screen: false };
-  if (proactiveCheckInFlight || !proactiveSettings.enabled || (!actions.message && !actions.phone && !actions.screen) || !String(proactiveSettings.message || "").trim()) return;
-  // Never charge for an unsolicited message unless a valid push destination is ready.
-  if (!apnsConfigured() || !pushTokens.some((device) => device.threadId === (proactiveSettings.threadId || "default"))) return;
-  proactiveCheckInFlight = true;
-  try {
-    const threads = await readThreads();
-    const threadId = proactiveSettings.threadId || "default";
-    const thread = threads[threadId];
-    if (!thread || activeChatThreads.has(threadId)) return;
-    const messages = thread.messages || [];
-    const lastUser = [...messages].reverse().find((message) => message.role === "user");
-    if (!lastUser) return;
-    if (proactiveSettings.lastNudgedForUserMessageId === lastUser.id) return;
-    if (proactiveSettings.scheduledForUserMessageId !== lastUser.id || !proactiveSettings.nextDueAt) {
-      proactiveSettings.scheduledForUserMessageId = lastUser.id;
-      proactiveSettings.nextDueAt = new Date(new Date(lastUser.createdAt).getTime() + chooseNudgeIntervalMs()).toISOString();
-      await saveProactiveSettings();
-      return;
-    }
-    if (Date.now() < new Date(proactiveSettings.nextDueAt).getTime()) return;
-
-    // Reserve this user turn before calling the model so a restart cannot charge twice.
-    proactiveSettings.lastNudgedForUserMessageId = lastUser.id;
-    proactiveSettings.scheduledForUserMessageId = null;
-    proactiveSettings.nextDueAt = null;
-    await saveProactiveSettings();
-    const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
-    const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
-    const dial = extractDialMarker(generated.content);
-    const screen = extractScreenMarker(dial.content);
-    const now = new Date().toISOString();
-    const activity = ensureActivity(thread);
-    const nextWakeAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
-    activity.lastWakeAt = now;
-    activity.nextWakeAt = nextWakeAt;
-    activity.lastUserActivityAt = activity.lastUserActivityAt || now;
-    thread.messages.push({
-      id: randomUUID(), role: "assistant", content: screen.content,
-      modelContent: generated.modelContent,
-      // The nudge instruction is an invisible user turn. Persist its exact
-      // provider text with the reply so the next visible chat can replay the
-      // same prefix instead of falling back to the system-prompt cache only.
-      precedingUserModelContent: generated.userModelContent,
-      createdAt: now
-    });
-    if (actions.screen && screen.requested) {
-      thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
-    }
-    // Keep the exact proactive turn in the same cache history as ordinary chat;
-    // otherwise the next phone/chat request would reconstruct a different
-    // assistant prefix and lose the cache immediately after the nudge.
-    thread.cacheSystem = generated.cacheSystem;
-    thread.cacheModel = process.env.LUMI_MODEL_NAME;
-    thread.cacheRequestStartedAt = generated.cacheRequestStartedAt;
-    thread.lastMeasuredInputTokens = generated.measuredInputTokens;
-    thread.cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
-    // A proactive turn has an internal user suffix that must not appear in the
-    // visible history. Preserve the exact raw reply alongside its request
-    // snapshot so keepalive can extend this prefix without reconstructing it.
-    thread.cacheKeepaliveAssistantContent = generated.modelContent;
-    thread.cacheKeepaliveSnapshotKind = "proactive";
-    thread.cacheLastChatContinuity = generated.cacheContinuity;
-    const invite = actions.phone && dial.reason ? await createIncomingCallInvite(thread, dial.reason) : null;
-    await saveThreads(threads);
-    if (invite) startIncomingCallRing(threadId, invite);
-    proactiveSettings.scheduledForUserMessageId = lastUser.id;
-    proactiveSettings.nextDueAt = nextWakeAt;
-    await saveProactiveSettings();
-    console.log(`proactive nudge saved for chat ${threadId}`);
-    const pushMessage = invite ? `📞 ${invite.reason}` : (isInternalProactiveText(screen.content) ? "我刚刚醒了，来找你说句话。" : screen.content);
-    await sendProactivePush(threadId, pushMessage, invite ? { kind: "incoming_call", callId: invite.id } : null);
-  } catch (error) {
-    console.warn(`proactive nudge skipped: ${error.message}`);
-    // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
-    proactiveSettings.enabled = false;
-    await saveProactiveSettings().catch(() => {});
-  } finally { proactiveCheckInFlight = false; }
 }
 
 function estimateTokens(text) {
@@ -1398,7 +1389,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
 }
 
 async function checkCacheKeepalive() {
-  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || chatRequestsInFlight || proactiveCheckInFlight ||
+  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || backgroundPulseInFlight || chatRequestsInFlight ||
       !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return { attempted: false, reason: "disabled_or_busy" };
   const id = "default";
   if (activeChatThreads.has(id)) return { attempted: false, reason: "chat_in_progress" };
@@ -1820,7 +1811,25 @@ const server = createServer(async (req, res) => {
       proactiveSettings.intervalMin = min;
       proactiveSettings.intervalMax = max;
       proactiveSettings.scheduledForUserMessageId = null;
-      proactiveSettings.nextDueAt = null;
+      const threads = await readThreads();
+      const targetID = proactiveSettings.threadId;
+      const thread = threads[targetID] || (threads[targetID] = { id: targetID, title: "新聊天", messages: [] });
+      const activity = ensureActivity(thread);
+      const threadProactive = ensureProactive(thread);
+      Object.assign(threadProactive, {
+        enabled: proactiveSettings.enabled,
+        threadId: targetID,
+        message: proactiveSettings.message,
+        intervalMin: min,
+        intervalMax: max,
+        actions: proactiveSettings.actions
+      });
+      activity.nextWakeAt = proactiveSettings.enabled
+        ? new Date(Date.now() + min * 60_000).toISOString()
+        : null;
+      threadProactive.nextDueAt = activity.nextWakeAt;
+      proactiveSettings.nextDueAt = activity.nextWakeAt;
+      await saveThreads(threads);
       await saveProactiveSettings();
       return send(res, 200, proactiveSettings);
     }
@@ -2185,6 +2194,8 @@ const server = createServer(async (req, res) => {
     // chat before any asynchronous work so a new probe cannot overtake it.
     if (isChatPost) {
       if (id === "default" && keepaliveInFlight) await keepaliveDone;
+      while (activeChatThreads.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
+      activeChatThreads.add(id);
       chatRequestsInFlight += 1;
     }
     try {
@@ -2283,12 +2294,10 @@ const server = createServer(async (req, res) => {
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), createdAt: new Date().toISOString() };
       const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
-      activeChatThreads.add(id);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
       const selectedModel = typeof input.model === "string" ? input.model : "";
-      try { generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel }); }
-      finally { activeChatThreads.delete(id); }
+      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel });
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
@@ -2359,17 +2368,15 @@ const server = createServer(async (req, res) => {
         }
       }
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
+      finishUserConversation(threads[id], messageText);
+      if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
       if (diaryItem) {
         // A legacy mirror failure must never eat a completed chat response.
         saveDiary(id, generated.diaryEntry, diaryItem).catch((error) => console.warn(`diary mirror skipped: ${error.message}`));
       }
       if (invite) startIncomingCallRing(id, invite);
-      if (proactiveSettings.threadId === id) {
-        proactiveSettings.scheduledForUserMessageId = userMessage.id;
-        proactiveSettings.nextDueAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
-        await saveProactiveSettings();
-      }
+      await saveProactiveSettings();
       // Normal replies can finish while the iOS app is suspended. Reuse the
       // registered APNs destination so the user is notified when the reply is ready.
       await sendProactivePush(id, invite ? `📞 ${invite.reason}` : visibleContent, invite ? { kind: "incoming_call", callId: invite.id } : null);
@@ -2387,7 +2394,12 @@ const server = createServer(async (req, res) => {
       }
     }
     return send(res, 405, { error: "method_not_allowed" });
-    } finally { if (isChatPost) chatRequestsInFlight -= 1; }
+    } finally {
+      if (isChatPost) {
+        activeChatThreads.delete(id);
+        chatRequestsInFlight -= 1;
+      }
+    }
   } catch (error) { return send(res, 500, { error: error.message }); }
 });
 
@@ -2395,6 +2407,5 @@ await loadCacheStats();
 await loadProactiveSettings();
 await loadPushTokens();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
-setInterval(() => { void checkProactiveNudge(); }, 60_000);
 setInterval(() => { void checkCacheKeepalive(); }, 60_000);
 setInterval(() => { runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, 15_000);
