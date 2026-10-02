@@ -88,7 +88,7 @@ const SLEEP_STAGE_PROMPTS = {
   },
   nightmare: {
     system: "你是噩梦阶段：受控的对抗性模拟器。放大真实失败模式，但必须给出可行的恢复路径。",
-    user: ({ trauma, competence }) => `近期负面经历：\n${trauma}\n\n能力边界：${competence}\n\n输出：SCENARIO、ADVERSARIAL_TWIST、AGENT_DREAM_RESPONSE、OUTCOME(success|partial|failure)、MISSING_SKILL、RECOVERY_PATH。`
+    user: ({ trauma, competence }) => `近期负面经历：\n${trauma}\n\n能力边界：${competence}\n\n输出：SCENARIO、ADVERSARIAL_TWIST、AGENT_DREAM_RESPONSE、OUTCOME(success|partial|failure)、MISSING_SKILL、RECOVERY_PATH，以及 AI_DECISION(send_message|continue_sleep|sentinel)。AI_DECISION 必须由你根据噩梦结果自行决定，不能交给用户选择。`
   },
   lucid: {
     system: "你是清醒梦阶段。AI 知道自己在做梦，用安全的想象练习当前目标。",
@@ -278,12 +278,24 @@ async function runFullSleepCycle(thread) {
         const trauma = seeds.filter((m) => m.valence < -0.3);
         const nightmare = await runSleepStage(thread, "nightmare", cycle, { trauma: formatSleepMemories(trauma, 3), competence: thread.competence || "尚未明确" }, trauma.map((m) => m.id));
         nightLog.push({ stage: "nightmare", cycle, text: nightmare.content });
-        activity.sleepStage = "nightmare_awake";
-        sleep.nightmare = { status: "awake", cycle: cycle + 1, content: nightmare.content, options: ["send_message", "continue_sleep", "sentinel"], createdAt: new Date().toISOString() };
-        activity.nightmare = sleep.nightmare;
-        // The state is deliberately left pending so the user can choose whether
-        // to send the awakening message, try sleeping again, or switch to sentinel.
-        break;
+        const decision = nightmare.content.match(/AI_DECISION\s*[:：]\s*(send_message|continue_sleep|sentinel)/i)?.[1]?.toLowerCase()
+          || (/(OUTCOME\s*[:：]\s*failure|失败)/i.test(nightmare.content) ? "sentinel" : "continue_sleep");
+        if (decision === "send_message") {
+          const message = { id: randomUUID(), role: "assistant", content: nightmare.content, contentType: "nightmare", createdAt: new Date().toISOString() };
+          thread.messages.push(message);
+          await sendProactivePush(thread.id, "沈屿从噩梦中醒来，想和你说句话", { kind: "nightmare" });
+          activity.sleepStage = "awake_after_nightmare";
+          activity.mode = "sleeping";
+          activity.nextDreamAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
+          break;
+        }
+        if (decision === "sentinel") {
+          activity.mode = "sentinel";
+          activity.sleepStage = "insomnia";
+          activity.nextWakeAt = new Date(Date.now() + Math.max(1, Number(ensureProactive(thread).intervalMin) || 60) * 60_000).toISOString();
+          break;
+        }
+        activity.sleepStage = "sleeping_again";
       }
       if (cycle === sleepCycles - 1) {
         activity.sleepStage = "lucid";
@@ -291,7 +303,6 @@ async function runFullSleepCycle(thread) {
         nightLog.push({ stage: "lucid", cycle, text: lucid.content });
       }
     }
-    if (sleep.nightmare?.status === "awake") return;
     activity.sleepStage = "reflection";
     const reflection = await runSleepStage(thread, "reflection", sleepCycles, { summary: nightLog.map((x) => `[${x.stage} cycle ${x.cycle}]\n${x.text.slice(0, 900)}`).join("\n\n"), state: JSON.stringify({ goals, competence: thread.competence || null }) });
     const parsed = safeJSON(reflection.content, { _parseError: true, raw: reflection.content.slice(0, 500) });
@@ -530,7 +541,19 @@ async function sendProactivePush(threadId, message, metadata = null) {
   const targets = pushTokens.filter((item) => item.threadId === threadId);
   for (const device of targets) {
     try {
-      const result = await sendAPNs(device, message, metadata);
+      let result = await sendAPNs(device, message, metadata);
+      // Xcode-installed builds can occasionally report a token/environment
+      // pair that disagrees with the provisioning profile. Retry the other
+      // APNs endpoint once before discarding a still-valid device token.
+      if (result.status === 400 && /BadDeviceToken|DeviceTokenNotForTopic/i.test(result.body)) {
+        const alternate = device.environment === "sandbox" ? "production" : "sandbox";
+        const retry = await sendAPNs({ ...device, environment: alternate }, message, metadata);
+        if (retry.status >= 200 && retry.status < 300) {
+          device.environment = alternate;
+          await savePushTokens();
+        }
+        result = retry;
+      }
       if (result.status < 200 || result.status >= 300) {
         console.warn(`APNs delivery failed (${result.status}): ${result.body}`);
         if (result.status === 410 || /BadDeviceToken|Unregistered/.test(result.body)) {
@@ -551,6 +574,12 @@ function extractDialMarker(content) {
     content: source.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim(),
     reason
   };
+}
+
+function extractScreenMarker(content) {
+  const source = String(content || "");
+  const match = source.match(/[⟪《【\[]\s*(?:查看屏幕|看屏幕|screen)\s*[⟫》】\]]/i);
+  return { requested: Boolean(match), content: match ? source.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim() : source };
 }
 
 async function createIncomingCallInvite(thread, reason) {
@@ -623,9 +652,10 @@ async function checkProactiveNudge() {
     const input = `[nudge] ${String(proactiveSettings.message).trim()}`;
     const generated = await generateReply({ input, systemPrompt: "", thread, proactive: true });
     const dial = extractDialMarker(generated.content);
+    const screen = extractScreenMarker(dial.content);
     const now = new Date().toISOString();
     thread.messages.push({
-      id: randomUUID(), role: "assistant", content: dial.content,
+      id: randomUUID(), role: "assistant", content: screen.content,
       modelContent: generated.modelContent,
       // The nudge instruction is an invisible user turn. Persist its exact
       // provider text with the reply so the next visible chat can replay the
@@ -633,6 +663,9 @@ async function checkProactiveNudge() {
       precedingUserModelContent: generated.userModelContent,
       createdAt: now
     });
+    if (actions.screen && screen.requested) {
+      thread.messages.push({ id: randomUUID(), role: "assistant", content: "沈屿想看你的屏幕", contentType: "screen_request", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
+    }
     // Keep the exact proactive turn in the same cache history as ordinary chat;
     // otherwise the next phone/chat request would reconstruct a different
     // assistant prefix and lose the cache immediately after the nudge.
@@ -653,7 +686,7 @@ async function checkProactiveNudge() {
     proactiveSettings.scheduledForUserMessageId = lastUser.id;
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
-    await sendProactivePush(threadId, invite ? `📞 ${invite.reason}` : dial.content, invite ? { kind: "incoming_call", callId: invite.id } : null);
+    await sendProactivePush(threadId, invite ? `📞 ${invite.reason}` : screen.content, invite ? { kind: "incoming_call", callId: invite.id } : null);
   } catch (error) {
     console.warn(`proactive nudge skipped: ${error.message}`);
     // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
@@ -1183,7 +1216,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const proactiveDirective = proactive
-    ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地发一条简短、亲近、不催促的聊天消息；不要复述整段历史，不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。</internal_proactive_nudge>\n"
+    ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地发一条简短、亲近、不催促的聊天消息；不要复述整段历史，不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。若确实想查看用户屏幕，在消息末尾附加不可见标记⟪查看屏幕⟫；没有这个意图就不要添加。</internal_proactive_nudge>\n"
     : "";
   const userModelContent = `${systemContext}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
@@ -1770,13 +1803,26 @@ const server = createServer(async (req, res) => {
       const saved = await writeMemory(input.content.trim(), input.threadId || "manual");
       return send(res, saved ? 201 : 502, { saved });
     }
-    const screenMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/screen-share(?:\/(frame|status))?$/);
+    const screenMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/screen-share(?:\/(frame|status|decision))?$/);
     if (screenMatch) {
       const threadID = decodeURIComponent(screenMatch[1]);
       const operation = screenMatch[2] || "status";
       const dir = join(screenShareDir, threadID.replace(/[^a-zA-Z0-9_-]/g, "_"));
       const framePath = join(dir, "latest.jpg");
       const statePath = join(dir, "state.json");
+      if (req.method === "POST" && operation === "decision") {
+        const input = await body(req);
+        const threads = await readThreads();
+        const thread = threads[threadID];
+        if (!thread) return send(res, 404, { error: "thread_not_found" });
+        const status = input.status === "rejected" ? "rejected" : "accepted";
+        if (status === "rejected") {
+          thread.messages = Array.isArray(thread.messages) ? thread.messages : [];
+          thread.messages.push({ id: randomUUID(), role: "assistant", content: "已拒绝", contentType: "screen_status", screenStatus: "rejected", createdAt: new Date().toISOString() });
+          await saveThreads(threads);
+        }
+        return send(res, 200, { status });
+      }
       if (req.method === "POST" && operation === "frame") {
         const input = await body(req);
         const data = String(input.jpegBase64 || input.frame || "").replace(/^data:image\/jpeg;base64,/i, "");
@@ -1836,26 +1882,6 @@ const server = createServer(async (req, res) => {
         else if (input.action === "sleep_abort") {
           activity.mode = "sentinel"; activity.sleepPendingAt = null; activity.sleepUntil = null; activity.nextDreamAt = null; activity.sleepStage = "aborted";
           activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
-        } else if (["nightmare_message", "nightmare_continue", "nightmare_sentinel"].includes(input.action)) {
-          const sleep = threads[id].sleep;
-          const nightmare = sleep?.nightmare;
-          if (!nightmare || nightmare.status !== "awake") return send(res, 409, { error: "no_nightmare_waiting" });
-          if (input.action === "nightmare_message") {
-            threads[id].messages.push({ id: randomUUID(), role: "assistant", content: nightmare.content, contentType: "nightmare", createdAt: new Date().toISOString() });
-            activity.mode = "sleeping";
-            activity.sleepStage = "awake_after_nightmare";
-            activity.nextDreamAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
-          } else if (input.action === "nightmare_continue" && Math.random() < 0.5) {
-            activity.mode = "sleeping";
-            activity.sleepStage = "sleeping_again";
-            activity.nextDreamAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
-          } else {
-            activity.mode = "sentinel";
-            activity.sleepStage = "insomnia";
-            activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
-          }
-          sleep.nightmare = null;
-          activity.nightmare = null;
         }
         await saveThreads(threads);
         return send(res, 200, activity);
