@@ -544,11 +544,12 @@ async function sendAPNs(device, message, metadata = null) {
 }
 
 function pushText(message) {
-  return stripPrivateReasoning(message || "有一条新消息")
+  const cleaned = stripPrivateReasoning(message || "有一条新消息")
     .replace(/<[^>]+>/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 220) || "有一条新消息";
+  return isInternalProactiveText(cleaned) ? "我刚刚醒了，来找你说句话。" : cleaned;
 }
 
 // Pushes must never expose model-private reasoning, including provider variants
@@ -561,7 +562,7 @@ function stripPrivateReasoning(value) {
 }
 
 function isInternalProactiveText(value) {
-  return /(next[_ -]?wake|thinking|thought\s*process|content\s*block|reasoning|contentType|推送.{0,8}通知|通知.{0,8}(标签|内容)|后端|系统标签|模型调用)/i.test(String(value || ""));
+  return /(next[_ -]?wake|thinking|thought\s*process|content\s*block|reasoning|contentType|GPT|写代码|报错|哨兵模式|推送.{0,8}通知|通知.{0,8}(标签|内容)|后端|系统标签|模型调用)/i.test(String(value || ""));
 }
 
 async function sendProactivePush(threadId, message, metadata = null) {
