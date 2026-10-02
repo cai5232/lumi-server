@@ -13,6 +13,7 @@ const pushTokensPath = join(dataDir, "push-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
+const buildVersion = "0378901";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1821,6 +1822,7 @@ const server = createServer(async (req, res) => {
       const activeThread = (await readThreads()).default;
       return send(res, 200, {
       ok: true,
+      buildVersion,
       htmlCards: "separate-content-title-v1",
       cache: {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
