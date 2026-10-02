@@ -120,6 +120,7 @@ function ensureActivity(thread) {
   if (!thread.activity) {
     thread.activity = { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, sleepPendingAt: null };
   }
+  if (!Object.prototype.hasOwnProperty.call(thread.activity, "lastWakeAt")) thread.activity.lastWakeAt = null;
   ensureProactive(thread);
   if (!thread.sleep) thread.sleep = { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null };
   if (!Array.isArray(thread.sleep.pendingDreams)) thread.sleep.pendingDreams = [];
