@@ -541,7 +541,10 @@ async function sendAPNs(device, message, metadata = null) {
 
 function pushText(message) {
   return String(message || "有一条新消息")
-    .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "")
+    // Thinking is private UI state. Remove complete and unterminated blocks
+    // so a partial/legacy model response can never leak into APNs.
+    .replace(/<thinking\b[^>]*>[\s\S]*?(?:<\/thinking>|$)/gi, "")
+    .replace(/<\/thinking>/gi, "")
     .replace(/<[^>]+>/g, "")
     .replace(/\s+/g, " ")
     .trim()
