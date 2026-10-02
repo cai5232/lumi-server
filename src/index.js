@@ -193,7 +193,7 @@ async function generateAutonomousMessage(thread, kind) {
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
-    maxOutputTokens: kind === "dream" ? 2048 : 8192
+    ...(kind === "dream" ? { maxOutputTokens: 2048 } : { useMaximumModelOutput: true })
   });
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
 }
@@ -216,7 +216,7 @@ async function generateSentinelWake(thread) {
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
     temperature: 0.8,
-    maxOutputTokens: 8192
+    useMaximumModelOutput: true
   });
   const parsed = safeJSON(raw);
   const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
@@ -796,7 +796,7 @@ function cacheUsage(usage = {}) {
   return { read, created };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "" }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "" }) {
   let selected = providerConfig(provider, requestedModel);
   if (!selected.model && provider !== "zenmux") {
     const discovered = await listProviderModels(selected);
@@ -834,11 +834,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
   const requestBody = nativeAnthropic
     ? {
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
-        max_tokens: Number(maxOutputTokens || process.env.LUMI_MAX_OUTPUT_TOKENS || 8192),
+        max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system")
       }
-    : { model, messages: preparedMessages, temperature, ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
+    : { model, messages: preparedMessages, temperature, ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
   const response = await fetch(apiURL, {
     method: "POST",
@@ -863,7 +863,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, cacheCu
       const backupModels = await listProviderModels(backup);
       const fallbackModel = backup.model || backupModels[0] || requestedModel;
       if (fallbackModel) {
-        return callModel({ messages, temperature, maxOutputTokens, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel });
+        return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel });
       }
     }
     throw new Error(providerError);
@@ -1324,9 +1324,10 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
   const raw = await callModel({
-    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? 8192 : pendingCompaction
+    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
+    useMaximumModelOutput: proactive,
     messages: cacheRequestMessages,
     provider,
     model,
