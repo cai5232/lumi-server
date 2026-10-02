@@ -15,7 +15,7 @@ const diaryPath = join(dataDir, "diaries.json");
 const screenShareDir = join(dataDir, "screen-share");
 // Release marker for the sentinel/thought/history fix. Surfaced by /health so
 // a Git-triggered Zeabur rollout can be verified without manual redeploys.
-const buildVersion = "33c698c";
+const buildVersion = "e18cb4d";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
