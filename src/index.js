@@ -556,6 +556,10 @@ function stripPrivateReasoning(value) {
     .trim();
 }
 
+function isInternalProactiveText(value) {
+  return /(next[_ -]?wake|thinking|thought\s*process|content\s*block|reasoning|contentType|推送.{0,8}通知|通知.{0,8}(标签|内容)|后端|系统标签|模型调用)/i.test(String(value || ""));
+}
+
 async function sendProactivePush(threadId, message, metadata = null) {
   if (!apnsConfigured()) { console.warn("proactive push skipped: APNs credentials are not configured"); return; }
   const targets = pushTokens.filter((item) => item.threadId === threadId);
@@ -674,6 +678,11 @@ async function checkProactiveNudge() {
     const dial = extractDialMarker(generated.content);
     const screen = extractScreenMarker(dial.content);
     const now = new Date().toISOString();
+    const activity = ensureActivity(thread);
+    const nextWakeAt = new Date(Date.now() + chooseNudgeIntervalMs()).toISOString();
+    activity.lastWakeAt = now;
+    activity.nextWakeAt = nextWakeAt;
+    activity.lastUserActivityAt = activity.lastUserActivityAt || now;
     thread.messages.push({
       id: randomUUID(), role: "assistant", content: screen.content,
       modelContent: generated.modelContent,
@@ -704,9 +713,11 @@ async function checkProactiveNudge() {
     await saveThreads(threads);
     if (invite) startIncomingCallRing(threadId, invite);
     proactiveSettings.scheduledForUserMessageId = lastUser.id;
+    proactiveSettings.nextDueAt = nextWakeAt;
     await saveProactiveSettings();
     console.log(`proactive nudge saved for chat ${threadId}`);
-    await sendProactivePush(threadId, invite ? `📞 ${invite.reason}` : screen.content, invite ? { kind: "incoming_call", callId: invite.id } : null);
+    const pushMessage = invite ? `📞 ${invite.reason}` : (isInternalProactiveText(screen.content) ? "我刚刚醒了，来找你说句话。" : screen.content);
+    await sendProactivePush(threadId, pushMessage, invite ? { kind: "incoming_call", callId: invite.id } : null);
   } catch (error) {
     console.warn(`proactive nudge skipped: ${error.message}`);
     // Leave it disabled after a failed trigger; do not loop into repeated paid attempts.
