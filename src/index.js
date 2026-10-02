@@ -186,13 +186,14 @@ async function generateAutonomousMessage(thread, kind) {
   const recent = (thread.messages || []).slice(-12).map((message) => `${message.role}: ${message.content}`).join("\n");
   const prompt = kind === "dream"
     ? "你正在睡眠中做梦。根据最近的聊天记忆，写一段连续梦境片段，保持和上一段梦的意象连贯，100字以内。只输出梦境正文。"
-    : `你是一个会主动关心用户的 AI。用户已经有一段时间没有说话，请按照这条主动消息设定自然地发起联系：${proactive.message || "有一段时间没聊了，自然地来找用户说句话。"}。不要提到计时器、后台任务或系统。60字以内。`;
+    : `你是一个会主动关心用户的 AI。用户已经有一段时间没有说话，请按照这条主动消息设定自然地发起联系：${proactive.message || "结合你们的聊天上下文，自然地联系用户。"}。不要提到计时器、后台任务或系统。内容长短由你根据上下文和此刻真正想说的话决定，不设字数限制；不要套用固定的“我醒了”开场，也不要为了主动联系而硬凑内容。`;
   const content = await callModel({
     messages: [
       { role: "system", content: prompt },
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
-    temperature: kind === "dream" ? 1.0 : 0.8
+    temperature: kind === "dream" ? 1.0 : 0.8,
+    maxOutputTokens: kind === "dream" ? 2048 : 8192
   });
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
 }
@@ -210,11 +211,12 @@ async function generateSentinelWake(thread) {
     messages: [
       {
         role: "system",
-        content: `你是沈屿。根据主动消息设定“${proactive.message}”自然地发起联系。必须结合最近十几条聊天原文、压缩摘要和长期记忆。你需要为这次主动联系写一段简短、真诚、第一人称的心声（不是推理步骤），并亲自决定下一次醒来的间隔，单位分钟，1 到 1440 的整数；不能把设置间隔或固定 nudge 当成你自己的决定。你只能选择已启用的行动之一：${allowedActions.join("、")}。严格只输出 JSON，不要 Markdown，四个字段都必须有效：{"message":"要发给言言的聊天正文","thinking":"这次回复可展示在头像弹窗里的简短心声","nextWakeMinutes":整数,"action":"${allowedActions[0]}"}${contextSummary}${retrievedMemories}`
+        content: `你是沈屿。根据主动消息设定“${proactive.message}”并结合最近十几条聊天原文、压缩摘要和长期记忆，自然地联系言言。聊天正文由你自由决定，可以只说一句，也可以长篇表达；不设字数限制，不受消息条数限制，不要套固定模板，不要反复说“我醒了”或类似状态播报，除非那确实是你此刻自然想说的话。不要提到计时器、后台任务或系统。你需要写一段真诚、第一人称、可展示在头像弹窗里的心声（不是推理步骤），并亲自决定下一次醒来的间隔，单位分钟，1 到 1440 的整数；不能把设置间隔或固定 nudge 当成你自己的决定。你只能选择已启用的行动之一：${allowedActions.join("、")}。严格只输出 JSON，不要 Markdown，四个字段都必须有效：{"message":"要发给言言的聊天正文，可长可短","thinking":"这次回复可展示在头像弹窗里的心声","nextWakeMinutes":整数,"action":"${allowedActions[0]}"}${contextSummary}${retrievedMemories}`
       },
       { role: "user", content: recent || "还没有聊天记录。" }
     ],
-    temperature: 0.8
+    temperature: 0.8,
+    maxOutputTokens: 8192
   });
   const parsed = safeJSON(raw);
   const message = typeof parsed.message === "string" ? parsed.message.trim() : "";
@@ -361,6 +363,7 @@ async function runBackgroundPulse() {
   const threads = await readThreads();
   const now = Date.now();
   let changed = false;
+  const pendingPushes = [];
   for (const thread of Object.values(threads)) {
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
@@ -428,14 +431,14 @@ async function runBackgroundPulse() {
           pushMetadata = { kind: "screen_request" };
         } else if (wake.action === "phone") {
           const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
-          startIncomingCallRing(thread.id, invite);
+          pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, metadata: { kind: "incoming_call", callId: invite.id }, startCallRing: () => startIncomingCallRing(thread.id, invite) });
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
         }
         activity.lastWakeAt = wake.message.createdAt;
         activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.nextWakeMinutes * 60_000).toISOString();
         proactive.nextDueAt = activity.nextWakeAt;
-        await sendProactivePush(thread.id, pushMessage, pushMetadata);
+        if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         changed = true;
       } catch (error) {
         console.warn(`sentinel skipped: ${error.message}`);
@@ -452,6 +455,11 @@ async function runBackgroundPulse() {
   if (changed) {
     await saveThreads(threads);
     await saveProactiveSettings();
+    // Persist chat history before the notification can be tapped and refreshed.
+    for (const pending of pendingPushes) {
+      pending.startCallRing?.();
+      await sendProactivePush(pending.threadId, pending.message, pending.metadata);
+    }
   }
   } finally {
     backgroundPulseInFlight = false;
@@ -630,7 +638,7 @@ function pushText(message) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 220) || "有一条新消息";
-  return isInternalProactiveText(cleaned) ? "我刚刚醒了，来找你说句话。" : cleaned;
+  return isInternalProactiveText(cleaned) ? "有一条新消息" : cleaned;
 }
 
 // Pushes must never expose model-private reasoning, including provider variants
@@ -1254,7 +1262,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const proactiveDirective = proactive
-    ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地发一条简短、亲近、不催促的聊天消息；不要复述整段历史，不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。若确实想查看用户屏幕，在消息末尾附加不可见标记⟪查看屏幕⟫；没有这个意图就不要添加。</internal_proactive_nudge>\n"
+    ? "<internal_proactive_nudge>这是一次主动联系。请结合上下文自然地表达你真正想说的话，长短由你决定，不设字数限制；不要套用固定开场或反复播报自己醒来。不要提及定时任务或内部标签。若确实想打电话，再附加拨号暗号。若确实想查看用户屏幕，在消息末尾附加不可见标记⟪查看屏幕⟫；没有这个意图就不要添加。</internal_proactive_nudge>\n"
     : "";
   const userModelContent = `${systemContext}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
@@ -1316,7 +1324,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
   const raw = await callModel({
-    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? 256 : pendingCompaction
+    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? 8192 : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
     messages: cacheRequestMessages,
