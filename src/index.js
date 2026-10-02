@@ -139,8 +139,12 @@ function markUserActivity(thread, content) {
   const now = new Date();
   activity.mode = "sentinel";
   activity.lastUserActivityAt = now.toISOString();
-  const interval = Math.max(1, Number(proactive.intervalMin) || 60);
-  activity.nextWakeAt = proactive.enabled ? new Date(now.getTime() + interval * 60_000).toISOString() : null;
+  // Settings are stored globally for the default chat while older threads
+  // also carry a copied per-thread object. Prefer the live global setting so
+  // a newly sent message immediately gets a real next-wake timestamp.
+  const configured = proactiveSettings.threadId === thread.id ? proactiveSettings : proactive;
+  const interval = Math.max(1, Number(configured.intervalMin) || 60);
+  activity.nextWakeAt = configured.enabled ? new Date(now.getTime() + interval * 60_000).toISOString() : null;
   proactive.nextDueAt = activity.nextWakeAt;
   activity.sleepPendingAt = isFarewell(content)
     ? new Date(now.getTime() + sleepDelayMinutes * 60_000).toISOString()
