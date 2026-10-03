@@ -1760,7 +1760,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     availableWakeTools.push("邮箱/写信：你可调用mail_inbox查看最近邮件，mail_search按UNSEEN、FROM、SUBJECT或SINCE条件查找，mail_read用UID读取正文，mail_folders列出文件夹。需要引用邮件内容时先查找并读取。mail_send会立刻向外部收件人发送邮件；自主唤醒本身不代表用户授权发送，只有聊天历史中有明确的发送请求或明确授权才可调用，否则只在聊天里提出可以代拟。工具调用会使用当前聊天选定的Claude模型及同一聊天历史、压缩摘要、检索记忆和情绪上下文。");
   }
   const autonomousCapabilityGuide = proactive && availableWakeTools.length
-    ? `\\n<available_autonomous_tools>\\n${availableWakeTools.map((tool) => "- " + tool).join("\\n")}\\n你可以按上下文选择这些能力，不要为了展示功能而调用。</available_autonomous_tools>`
+    ? `\n<available_autonomous_tools>\n${availableWakeTools.map((tool) => "- " + tool).join("\n")}\n你可以按上下文选择这些能力，不要为了展示功能而调用。</available_autonomous_tools>`
     : "";
   const proactiveDirective = proactive
     ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${autonomousCapabilityGuide}${dreamRecall ? "这是你自然醒后的第一次主动联系。如果有可回忆的昨晚梦境，第一段必须先用你自己的话告诉用户梦里发生了什么；语气、重点、细节组织和情绪都由你自己决定，不要套固定句式，不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
