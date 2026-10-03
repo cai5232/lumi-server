@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { EMOTION_DRIVES, EMOTION_EXPRESSION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "../src/emotion.js";
+import { EMOTION_DRIVES, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "../src/emotion.js";
 
 test("Murmur drives decay toward baselines and attachment grows after six offline ticks", () => {
   const now = 1_000_000;
@@ -52,13 +52,16 @@ test("drive updates are clamped, regret gets an audit entry, and arcs remain rea
   assert.match(emotionContext(state), /近期内心独白/);
 });
 
-test("high drives add compact Murmur expression cues without sending the full lexicon", () => {
+
+test("emotion context exposes the top three states without fixed expression phrases", () => {
   const state = createEmotionState(1000);
-  state.drives.attachment = EMOTION_EXPRESSION_THRESHOLD;
-  const high = emotionContext(state);
-  assert.match(high, /想见她/);
-  assert.match(high, /情绪表达方向/);
-  state.drives.attachment = EMOTION_EXPRESSION_THRESHOLD - 0.01;
-  const low = emotionContext(state);
-  assert.doesNotMatch(low, /情绪表达方向/);
+  state.drives.attachment = 0.9;
+  state.drives.heartache = 0.8;
+  state.drives.tenderness = 0.7;
+  const context = emotionContext(state);
+  assert.match(context, /当前最强的三种情绪/);
+  assert.match(context, /attachment（想念，0.90）/);
+  assert.match(context, /heartache（心疼，0.80）/);
+  assert.match(context, /tenderness（心软，0.70）/);
+  assert.doesNotMatch(context, /想见她|她在干嘛|好久没消息了/);
 });
