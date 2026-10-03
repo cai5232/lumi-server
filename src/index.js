@@ -181,6 +181,8 @@ function markUserActivity(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
+  // A user-initiated message supersedes the pending first-wake dream mention.
+  thread.pendingDreamRecall = "";
   markEmotionOnline(sharedEmotionState, now.getTime());
 }
 
@@ -204,6 +206,7 @@ function finishUserConversation(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
+  thread.pendingDreamRecall = "";
 }
 
 async function generateEmotionMurmur(thread, current) {
@@ -722,6 +725,9 @@ async function runBackgroundPulse() {
         }
         if (wake.action === "screen") wake.message.createdAt = new Date().toISOString();
         if (wake.emotionUpdate) emotionChanged = true;
+        const wakeDreamWasPending = Boolean(thread.pendingDreamRecall);
+        thread.pendingDreamRecall = "";
+        if (wakeDreamWasPending) wake.message.contentType = "sentinel_wake_dream";
         thread.messages.push(wake.message);
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
@@ -1715,7 +1721,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
   const proactiveDirective = proactive
-    ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
+    ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${dreamRecall ? "这是你自然醒后的第一次主动联系。请把昨晚梦境作为第一优先，用你自己的语气自然告诉用户梦里发生了什么；不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const dreamRecall = (proactive || isDreamRecallRequest(input))
