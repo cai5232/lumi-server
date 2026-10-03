@@ -1221,8 +1221,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
   const isClaude = /anthropic|claude/i.test(model);
-  // Native Anthropic is a ZenMux-only mode. Backup relays are OpenAI-compatible
-  // unless they get their own explicit native-API configuration.
+  // Native Anthropic is opt-in for the primary provider. Backup relays remain
+  // OpenAI-compatible unless they get their own explicit native-API configuration.
   const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
