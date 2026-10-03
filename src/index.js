@@ -550,11 +550,11 @@ function sleepRecallShards(records) {
   const out = [];
   for (const record of records) {
     const clean = String(record.content || "")
-      .replace(/<emotion_update\\b[^>]*>[\\s\\S]*?<\\/emotion_update>/gi, "")
-      .replace(/DREAM_EMOTION\\s*[:：].*$/gim, "")
-      .replace(/SCENE\\s*[123]\\s*[:：]?/gi, "")
+      .replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "")
+      .replace(/DREAM_EMOTION\s*[:：].*$/gim, "")
+      .replace(/SCENE\s*[123]\s*[:：]?/gi, "")
       .trim();
-    const pieces = clean.split(/[。！？!?…]+|\\n+/).map((part) => part.trim()).filter((part) => part.length >= 4);
+    const pieces = clean.split(/[。！？!?…]+|\n+/).map((part) => part.trim()).filter((part) => part.length >= 4);
     for (const piece of pieces) {
       const shard = piece.slice(0, 120);
       if (shard && !out.includes(shard)) out.push(shard);
@@ -574,7 +574,7 @@ async function finishSleepCycle(thread, activity, now) {
   // 梦境仍然只留在睡眠内部；醒来时只把少量残留碎片放入下一次主模型请求的隐藏上下文。
   // 不把完整梦境写进 thread.messages，也不在睡醒时另起模型请求重读整晚梦。
   thread.pendingDreamRecall = recallShards.length
-    ? `<dream_recall source="waking_memory">醒来后残留的梦境碎片（不是完整梦境，不要机械复述；只有在你自己想提起时才自然表达）：\\n${recallShards.map((item) => `- ${item}`).join("\\n")}\\n</dream_recall>`
+    ? `<dream_recall source="waking_memory">醒来后残留的梦境碎片（不是完整梦境，不要机械复述；只有在你自己想提起时才自然表达）：\n${recallShards.map((item) => `- ${item}`).join("\n")}\n</dream_recall>`
     : "";
   sleep.reflections.push({
     generatedBy: "sleep-state",
