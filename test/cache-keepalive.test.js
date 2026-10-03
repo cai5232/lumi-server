@@ -44,6 +44,7 @@ async function stopBackend(child) {
 test("keepalive reads the old prefix and the next chat reads its assistant prefix", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "lumi-cache-test-"));
   const seen = [];
+  const normalSeen = [];
   const cache = new Set();
   let releaseSecondKeepalive;
   let secondKeepaliveArrived;
@@ -69,8 +70,13 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     const hitKey = keys.filter((key) => cache.has(key)).at(-1);
     const hit = Boolean(hitKey);
     for (const key of keys) cache.add(key);
-    seen.push({ plain, breakpoints, keys, hit, hitKey });
-    if (seen.length === 3) {
+    const observation = {
+      plain, breakpoints, keys, hit, hitKey,
+      emotionEvaluation: plain.some((message) => typeof message.content === "string" && message.content.includes("情绪状态评估器"))
+    };
+    seen.push(observation);
+    if (!observation.emotionEvaluation) normalSeen.push(observation);
+    if (normalSeen.length === 3) {
       secondKeepaliveArrived();
       await new Promise((resolve) => { releaseSecondKeepalive = resolve; });
     }
@@ -99,7 +105,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     }).then((response) => response.json());
     const first = await chat("第一条消息", "稳定的系统提示词".repeat(500));
     assert.ok(first.assistantMessage, JSON.stringify(first));
-    assert.equal(seen.length, 1);
+    assert.equal(normalSeen.length, 1);
     await stopBackend(child);
     child = undefined;
     const path = join(dataDir, "threads.json");
@@ -111,10 +117,10 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
       method: "POST", headers: { authorization: "Bearer test" }
     }).then((response) => response.json());
     assert.equal(keepalive.hit, true, JSON.stringify(keepalive));
-    assert.equal(seen[1].hit, true);
-    const assistantKey = seen[1].keys.at(-1);
+    assert.equal(normalSeen[1].hit, true);
+    const assistantKey = normalSeen[1].keys.at(-1);
     assert.ok(assistantKey.includes("AI 原始回复"), "the refreshed boundary must contain the assistant response");
-    assert.deepEqual(seen[1].plain.at(-2).content, [first.assistantMessage.modelContent]);
+    assert.deepEqual(normalSeen[1].plain.at(-2).content, [first.assistantMessage.modelContent]);
     await stopBackend(child);
     child = undefined;
     const refreshedThreads = JSON.parse(await readFile(path, "utf8"));
@@ -127,17 +133,17 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     await secondKeepaliveStarted;
     const nextChatRequest = chat("第二条消息", "稳定的系统提示词".repeat(500));
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(seen.length, 3, "a real chat must wait for the running keepalive");
+    assert.equal(normalSeen.length, 3, "a real chat must wait for the running keepalive");
     releaseSecondKeepalive();
     const secondKeepalive = await secondKeepaliveRequest;
     assert.equal(secondKeepalive.hit, true, JSON.stringify(secondKeepalive));
-    assert.equal(seen[2].hitKey, assistantKey, "later keepalives must read the assistant prefix");
+    assert.equal(normalSeen[2].hitKey, assistantKey, "later keepalives must read the assistant prefix");
     const next = await nextChatRequest;
     assert.ok(next.assistantMessage, JSON.stringify(next));
-    assert.equal(seen[3].hit, true);
-    assert.equal(seen[3].hitKey, assistantKey, "the next chat must read the assistant prefix");
-    assert.equal(seen[0].plain[0].content[0], seen[1].plain[0].content[0], "original and keepalive system prompts must match byte for byte");
-    assert.equal(seen[1].plain[0].content[0], seen[3].plain[0].content[0], "keepalive and real chat system prompts must match byte for byte");
+    assert.equal(normalSeen[3].hit, true);
+    assert.equal(normalSeen[3].hitKey, assistantKey, "the next chat must read the assistant prefix");
+    assert.equal(normalSeen[0].plain[0].content[0], normalSeen[1].plain[0].content[0], "original and keepalive system prompts must match byte for byte");
+    assert.equal(normalSeen[1].plain[0].content[0], normalSeen[3].plain[0].content[0], "keepalive and real chat system prompts must match byte for byte");
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.equal(health.cache.prompt.lastChatContinuity.sameSystemPrompt, true);
     assert.equal(health.cache.prompt.lastChatContinuity.sameAssistantPrefix, true);
@@ -156,7 +162,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.equal(thirdKeepalive.hit, true);
     const changed = await chat("第三条消息", "不同的系统提示词".repeat(500));
     assert.ok(changed.assistantMessage);
-    assert.equal(seen[5].hit, false, "a changed system prompt invalidates the prefix");
+    assert.equal(normalSeen[5].hit, false, "a changed system prompt invalidates the prefix");
     const changedHealth = await fetch(`${base}/health`).then((response) => response.json());
     assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameSystemPrompt, false);
     assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameAssistantPrefix, false);
