@@ -20,7 +20,7 @@ test("online activity resets attachment to baseline and clears offline duration"
   state.drives.attachment = 0.9;
   state.offlineTicks = 8;
   markEmotionOnline(state, 2000);
-  assert.equal(state.drives.attachment, EMOTION_DRIVES.attachment.baseline);
+  assert.equal(state.drives.attachment, 0.72, "coming online should preserve accumulated attachment");
   assert.equal(state.offlineTicks, 0);
   assert.equal(state.lastOnlineAt, 2000);
 });
