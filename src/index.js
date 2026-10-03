@@ -1770,8 +1770,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
 }
 
 async function checkCacheKeepalive() {
-  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || backgroundPulseInFlight || chatRequestsInFlight ||
-      !/anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || "")) return { attempted: false, reason: "disabled_or_busy" };
+  if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || backgroundPulseInFlight || chatRequestsInFlight) {
+    return { attempted: false, reason: "disabled_or_busy" };
+  }
   const id = "default";
   if (activeChatThreads.has(id)) return { attempted: false, reason: "chat_in_progress" };
   keepaliveInFlight = true;
@@ -1780,7 +1781,12 @@ async function checkCacheKeepalive() {
   try {
     const threads = await readThreads();
     const thread = threads[id];
-    if (!thread?.cacheSystem || thread.cacheModel !== process.env.LUMI_MODEL_NAME) return { attempted: false, reason: "no_matching_chat_cache" };
+    const cacheProvider = thread?.cacheProvider || "zenmux";
+    const configuredCache = thread ? providerConfig(cacheProvider, thread.cacheModel || "") : null;
+    const cacheModel = thread?.cacheModel || configuredCache?.model || "";
+    if (!thread?.cacheSystem || !cacheModel || !/anthropic|claude/i.test(cacheModel)) {
+      return { attempted: false, reason: "no_matching_chat_cache" };
+    }
     const history = contextMessages(thread);
     const lastUser = [...history].reverse().find((message) => message.role === "user");
     lastUserMessageId = lastUser?.id || "";
@@ -1812,7 +1818,7 @@ async function checkCacheKeepalive() {
     const keepaliveMessages = [...cachedRequest,
       { role: "assistant", content: snapshotAssistant },
       { role: "user", content: "[缓存保活，请简短回复。]" }];
-    const assistantPrefixHash = assistantCachePrefixHash(keepaliveMessages, process.env.LUMI_MODEL_NAME);
+    const assistantPrefixHash = assistantCachePrefixHash(keepaliveMessages, cacheModel);
     if (!assistantPrefixHash) return { attempted: false, reason: "assistant_cache_boundary_missing" };
     if (messageTokens(keepaliveMessages) < 1024) return { attempted: false, reason: "prefix_too_short" };
     const startedAt = Date.now();
@@ -1825,8 +1831,8 @@ async function checkCacheKeepalive() {
       maxOutputTokens: 16,
       temperature: 0,
       cacheCurrentUser: false,
-      provider: thread.cacheProvider || "zenmux",
-      model: thread.cacheModel || "",
+      provider: cacheProvider,
+      model: cacheModel,
       onUsage: (usage) => { keepaliveUsage = usage; }
     });
     const { read: readTokens, created: writeTokens } = cacheUsage(keepaliveUsage);
@@ -2803,7 +2809,8 @@ const server = createServer(async (req, res) => {
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheRequestedSystemPrompt = typeof input.systemPrompt === "string" ? input.systemPrompt : "";
-      threads[id].cacheModel = selectedModel || process.env.LUMI_MODEL_NAME;
+      const selectedConfig = providerConfig(selectedProvider, selectedModel);
+      threads[id].cacheModel = selectedModel || selectedConfig.model;
       threads[id].cacheProvider = selectedProvider;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.compactionApplied ? 0 : generated.measuredInputTokens;
