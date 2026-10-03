@@ -1707,7 +1707,6 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       cacheContinuity.writeTokens = cachedWrite;
     }
   });
-  await evaluateEmotionAfterRequest({ thread, input, output: raw, kind: proactive ? "proactive" : callMode ? "call" : "chat" });
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
