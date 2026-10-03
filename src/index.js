@@ -107,7 +107,7 @@ const SLEEP_STAGE_PROMPTS = {
   },
   nightmare: {
     system: "你是噩梦阶段：受控的对抗性模拟器。放大真实失败模式，但必须给出可行的恢复路径。",
-    user: ({ trauma, competence }) => `近期记忆片段（可能没有明显负面内容）：\n${trauma}\n\n能力边界：${competence}\n\n请综合梦境感受、此刻状态和用户关系，自行选择下一步，不要把选择交给用户。严格输出以下两项：AI_DECISION: send_message 或 continue_sleep 或 sentinel；MESSAGE: 仅当选择 send_message 时，写一段可直接发给用户的自然中文消息，放进 <message>...</message>。不要把场景分析、恢复步骤或内部字段放进给用户的消息。`
+    user: ({ trauma, competence }) => `近期记忆片段（可能没有明显负面内容）：\n${trauma}\n\n能力边界：${competence}\n\n请综合完整睡眠上下文、梦境感受、此刻状态和用户关系，自行选择下一步，不要把选择交给用户。严格输出以下两项：AI_DECISION: send_message 或 continue_sleep 或 sentinel；MESSAGE: 仅当选择 send_message 时，写一段可直接发给用户的自然中文消息，放进 <message>...</message>。不要把场景分析、恢复步骤或内部字段放进给用户的消息。`
   },
   lucid: {
     system: "你是清醒梦阶段。AI 知道自己在做梦，用安全的想象练习当前目标。",
@@ -469,7 +469,7 @@ function formatSleepMemories(memories, limit = 12) {
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
-    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{\"changes\":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${prompt.user(context)}` }],
+    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
     provider: thread.cacheProvider || "zenmux",
     model: thread.cacheModel || ""
@@ -483,71 +483,15 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
 
 async function runSleepDreamSegment(thread, activity, now) {
   const sleep = thread.sleep;
-  if (sleep.running) return;
-  sleep.running = true;
-  try {
-    const context = await buildAutonomousContext(thread);
-    const all = sleepMemories(thread, context);
-    const goals = thread.goals || [];
-    const scored = all.sort((a, b) => salience(b, goals) - salience(a, goals));
-    const cycle = activity.dreamCycle || 0;
-    activity.sleepStage = `n1_drift_${cycle + 1}`;
-    const seeds = scored.slice(0, 6 + cycle);
-    const seedIds = seeds.map((m) => m.id);
-    const n1 = await runSleepStage(thread, "n1_drift", cycle, { goals: goals.join(", ") || "（无）", memories: formatSleepMemories(seeds) }, seedIds);
-    const n2 = await runSleepStage(thread, "n2_spindle", cycle, { n1: n1.content }, seedIds);
-    const semanticText = sleep.semantic.map((f) => `- ${f.fact}`).join("\n") || "（空）";
-    const n3 = await runSleepStage(thread, "n3_deep", cycle, { n2: n2.content, semantic: semanticText }, seedIds);
-    const n3Json = safeJSON(n3.content);
-    for (const fact of (n3Json.facts || [])) {
-      if (fact?.fact && Number(fact.confidence ?? 0.6) >= 0.6) sleep.semantic.push({ id: randomUUID(), fact: fact.fact, sources: fact.sources || seedIds, confidence: Number(fact.confidence ?? 0.6), createdAt: new Date().toISOString() });
-    }
-    activity.sleepStage = `rem_${cycle + 1}`;
-    const rem = await runSleepStage(thread, "rem", cycle, { seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1, previousDream: sleep.dreamArc, contextSummary: context.summary, retrievedMemories: context.memories.join("；") }, seedIds);
-    sleep.dreamArc = rem.content;
-    activity.dreamCycle = cycle + 1;
-    activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
-    activity.sleepStage = "sleeping";
-
-    if (shouldTriggerNightmare({ cycle, alreadyTriggered: Boolean(sleep.nightmare?.triggeredAt), roll: Math.random(), probability: sleepNightmareProbability })) {
-      activity.sleepStage = `nightmare_${cycle + 1}`;
-      const nightmare = await runSleepStage(thread, "nightmare", cycle, { trauma: formatSleepMemories(seeds.slice(0, 3), 3), competence: thread.competence || "尚未明确" }, seedIds.slice(0, 3));
-      const decision = resolveNightmareDecision(nightmare.content, Math.random(), sleepReentryProbability);
-      sleep.nightmare = { triggeredAt: new Date().toISOString(), cycle: cycle + 1, decision: decision.decision, reenteredSleep: decision.reenteredSleep };
-      if (decision.decision === "send_message" && decision.message) {
-        thread.messages.push({ id: randomUUID(), role: "assistant", content: decision.message, contentType: "nightmare", createdAt: new Date().toISOString() });
-        sleep.nightmare.pushMessage = decision.message;
-      }
-      if (decision.decision === "sentinel" || (decision.decision === "continue_sleep" && !decision.reenteredSleep) || decision.decision === "send_message") {
-        activity.mode = "sentinel";
-        activity.sleepStage = "insomnia";
-        const interval = Math.max(1, Number(ensureProactive(thread).intervalMin) || 60);
-        const proactive = ensureProactive(thread);
-        activity.nextWakeAt = proactive.enabled ? new Date(now + interval * 60_000).toISOString() : null;
-        activity.nextWakeSource = proactive.enabled ? "settings" : null;
-      } else {
-        activity.sleepStage = "sleeping_again";
-        activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
-      }
-    }
-    return sleep.nightmare?.triggeredAt && sleep.nightmare.cycle === cycle + 1 && sleep.nightmare.pushMessage
-      ? { message: sleep.nightmare.pushMessage, metadata: { kind: "nightmare" } }
-      : null;
-  } finally {
-    sleep.running = false;
-  }
-}
-
-async function finishSleepCycle(thread, activity, now) {
-  const sleep = thread.sleep;
-  const goals = thread.goals || [];
-  const obstacles = thread.obstacles || [];
-  const seedIds = sleep.dreams.filter((item) => item.createdAt >= activity.sleepStartedAt).flatMap((item) => item.seedIds || []);
-  const lucid = await runSleepStage(thread, "lucid", Math.max(0, activity.dreamCycle - 1), { goals: goals.join(", ") || "（无）", obstacles: obstacles.join("；") || "（无）" }, seedIds);
-  const nightRecords = sleep.dreams.filter((item) => item.createdAt >= activity.sleepStartedAt).map((item) => `[${item.stage} cycle ${item.cycle}]\n${item.content.slice(0, 900)}`);
-  const reflection = await runSleepStage(thread, "reflection", activity.dreamCycle || 0, { summary: nightRecords.join("\n\n"), state: JSON.stringify({ goals, competence: thread.competence || null, lucid: lucid.content }) }, seedIds);
-  const parsed = safeJSON(reflection.content, { _parseError: true, raw: reflection.content.slice(0, 500) });
-  sleep.reflections.push({ ...parsed, raw: reflection.content, createdAt: new Date(now).toISOString() });
+  const dreamRecords = sleep.dreams.filter((item) => item.createdAt >= activity.sleepStartedAt);
+  // 睡醒只结束本轮睡眠；不再额外发请求把整晚梦境重新读一遍。
+  // 梦境仍保留在 sleep.dreams，之后只有真正需要回忆/主动联系用户时才使用。
+  sleep.reflections.push({
+    generatedBy: "sleep-state",
+    dreamCount: dreamRecords.length,
+    dreamIds: dreamRecords.map((item) => item.id),
+    createdAt: new Date(now).toISOString()
+  });
   sleep.nextCycle += 1;
   activity.mode = "sentinel";
   activity.sleepStage = "awake";
