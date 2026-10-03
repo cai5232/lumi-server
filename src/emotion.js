@@ -88,9 +88,10 @@ export function tickEmotion(state, now = Date.now(), quietAt = () => false) {
 }
 
 export function markEmotionOnline(state, now = Date.now()) {
+  // Coming online ends offline accumulation, but does not erase the feeling
+  // that accumulated while the user was away.
   state.offlineTicks = 0;
   state.lastOnlineAt = now;
-  state.drives.attachment = EMOTION_DRIVES.attachment.baseline;
 }
 
 export function applyEmotionDelta(state, update, now = Date.now()) {
