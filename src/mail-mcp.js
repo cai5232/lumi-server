@@ -1,7 +1,7 @@
 import tls from "node:tls";
 import { timingSafeEqual } from "node:crypto";
 
-export const MAIL_OWNER_EMAIL = String(process.env.LUMI_MAIL_OWNER_EMAIL || "").trim();
+export const MAIL_OWNER_EMAIL = "yanvn2026@outlook.com";
 
 const VERSION = "1.0.0";
 const tools = [
