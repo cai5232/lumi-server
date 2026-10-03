@@ -428,7 +428,7 @@ function safeJSON(text, fallback = {}) {
 }
 
 function applyEmotionUpdateFromOutput(raw) {
-  const emotionUpdateRaw = String(raw || "").match(/<emotion_update\\b[^>]*>([\\s\\S]*?)<\\/emotion_update>/i)?.[1];
+  const emotionUpdateRaw = String(raw || "").match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
   if (!emotionUpdateRaw) return null;
   try {
     const parsed = JSON.parse(emotionUpdateRaw);
