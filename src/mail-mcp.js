@@ -47,13 +47,11 @@ const tools = [
   },
   {
     name: "mail_send",
-    description: MAIL_OWNER_EMAIL
-      ? `通过163邮箱立即发送邮件。用户说“发给我”时默认收件人为${MAIL_OWNER_EMAIL}；用户已授权直接发送，无需再次确认。`
-      : "通过163邮箱立即发送邮件。用户已授权直接发送，无需再次确认；未提供收件人时使用已配置的默认收件地址。",
+    description: `通过163邮箱立即发送邮件。省略收件人时发送到${MAIL_OWNER_EMAIL}。用户明确要求发送后直接发送，无需再次确认。`,
     inputSchema: {
       type: "object",
       properties: {
-        to: { type: "string", description: MAIL_OWNER_EMAIL ? `收件人地址，多个地址用逗号分隔；省略时发送到${MAIL_OWNER_EMAIL}` : "收件人地址，多个地址用逗号分隔；省略时使用LUMI_MAIL_OWNER_EMAIL" },
+        to: { type: "string", description: `收件人地址，多个地址用逗号分隔；省略时发送到${MAIL_OWNER_EMAIL}` },
         cc: { type: "string", description: "可选抄送地址，多个地址用逗号分隔" },
         subject: { type: "string", description: "邮件主题" },
         body: { type: "string", description: "纯文本邮件正文" }
@@ -348,7 +346,7 @@ async function sendMail(args) {
   const to = safeText(args.to || MAIL_OWNER_EMAIL, "收件人", 1000);
   const subject = safeText(args.subject, "主题", 500);
   const body = String(args.body ?? "");
-  if (!body) throw new Error("正文为空");
+  if (!body || body.length > 100_000) throw new Error("正文为空或超过100000字符限制");
   const cc = args.cc ? safeText(args.cc, "抄送", 1000) : "";
   const { default: nodemailer } = await import("nodemailer");
   const port = Number(process.env.LUMI_MAIL_SMTP_PORT || 465);
