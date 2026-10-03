@@ -300,7 +300,6 @@ async function readMail({ uid, folder = "INBOX", max_chars = 8000 }) {
     await conn.command("SELECT " + folderName(folder));
     const raw = (await fetchMessage(conn, uid, "")).toString("utf8");
     if (!raw) throw new Error("邮件不存在或无法读取");
-    const summary = { ...parseHeaders(raw), uid };
     const header = await messageSummary(conn, uid);
     return { ...header, body: extractPlainText(raw).slice(0, max_chars) };
   });
@@ -402,7 +401,7 @@ export async function handleMailMcp(req, res) {
     let result;
     if (message.method === "initialize") {
       result = {
-        protocolVersion: "2024-11-05",
+        protocolVersion: "2025-03-26",
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "lumi-163-mail", version: VERSION }
       };
