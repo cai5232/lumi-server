@@ -64,12 +64,14 @@ Zeabur 环境变量：
 
 让 Lumi 自己的 Claude API 对话使用邮箱工具，还需配置：
 
-- `LUMI_MAIL_MCP_URL`：公开 HTTPS 地址，例如 `https://你的Lumi域名/mcp`。
+- `LUMI_MAIL_MCP_URL`：公开 HTTPS 地址，例如当前部署域名 `https://lumi-tokyo-api.zeabur.app/mcp`。
 - `LUMI_MAIL_MCP_TOKEN`：与 MCP 入口鉴权使用的同一个随机长令牌。
 - `LUMI_NATIVE_ANTHROPIC=true`：启用 Claude Messages API 和 MCP Connector。
 - `LUMI_MODEL_API_URL=https://api.anthropic.com/v1`、`LUMI_MODEL_API_KEY`、`LUMI_MODEL_NAME`：Claude API 地址、密钥和 Claude 模型名称。
 
-此接法要求 Claude API 能从公网 HTTPS 访问 Lumi 的 `/mcp` 地址。也可以把 `https://你的Lumi域名/mcp` 和请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>` 配到 Claude Desktop、Claude Code 等 MCP 客户端。MCP 的 `mail_send` 会立即发信，使用时应确认收件人、主题和正文。
+此接法要求 Claude API 能从公网 HTTPS 访问 Lumi 的 `/mcp` 地址。也可以把此地址和请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>` 配到 Claude Desktop、Claude Code 等 MCP 客户端。MCP 的 `mail_send` 会立即发信；自主唤醒本身不视为发送授权。
+
+自主唤醒继续走当前聊天的模型和上下文：它沿用当前线程选定的模型、聊天历史、压缩摘要、检索记忆和情绪状态。唤醒请求会明确列出当时可用的能力及用法：窥屏仅在用户启用该动作且截图邮件/快捷指令配置完整时出现；邮箱工具仅在 Claude MCP Connector 和 163 邮箱配置完整时出现。模型可用 `mail_inbox`、`mail_search`、`mail_read` 获取邮件内容，用 `mail_send` 立即发信；只有上下文中存在用户明确的发送请求或授权时才能在自主唤醒中发送。
 
 ## API
 
