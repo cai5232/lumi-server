@@ -1633,7 +1633,7 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "" }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "" }) {
   provider = provider || thread?.cacheProvider || "zenmux";
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
@@ -1761,9 +1761,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const selectedBookIds = Array.isArray(thread.worldBookIds) ? thread.worldBookIds : worldBookSettings.activeBookIds;
   const activeBooks = worldBookSettings.books.filter(book => selectedBookIds.includes(book.id));
   const actualHistory = (callMode ? callHistory : thread.messages || []).filter(m => ['user', 'assistant'].includes(m.role)).map(m => ({ role: m.role, content: m.content || '', attachments: m.imageAttachmentCount || 0 }));
-  if (!proactive) actualHistory.push({ role: 'user', content: input, attachments: images.length });
+  if (!proactive) actualHistory.push({ role: 'user', content: worldBookInput, attachments: images.length });
   const activationKey = callMode ? 'callWorldBookActivation' : 'worldBookActivation';
-  const activation = evaluateBooks(activeBooks, [...history, { role: 'user', content: input }], actualHistory, thread[activationKey]);
+  const activation = evaluateBooks(activeBooks, actualHistory, actualHistory, thread[activationKey]);
   thread[activationKey] = activation.state;
   const worldBookSignature = createHash('sha256').update(JSON.stringify(activation.entries)).digest('hex');
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
@@ -2960,7 +2960,7 @@ const server = createServer(async (req, res) => {
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
       const selectedModel = typeof input.model === "string" ? input.model : "";
-      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel });
+      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel });
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
