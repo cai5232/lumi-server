@@ -44,6 +44,28 @@ Zeabur 环境变量：
 
 后端只接受带专用口令的 JPEG/PNG 截图，最大 3 MB。唤醒后最多等 45 秒的新图；每个聊天只在服务进程内暂存一张，交给模型后立即移除，未使用的图两分钟后过期。此方式要求单实例部署。截图会传给当前配置的聊天模型，因此不要在不希望分享屏幕内容时开启此功能。
 
+
+## 163 邮箱 MCP
+
+后端提供带 Bearer Token 鉴权的 Streamable HTTP MCP 端点：`POST /mcp`。Claude Desktop、Claude Code 等 MCP 客户端可连接此地址，并调用收件、读信、搜索、列出文件夹和发信工具。
+
+在 Zeabur 添加以下服务端环境变量：
+
+- `LUMI_MAIL_MCP_TOKEN`：随机生成的长令牌，MCP 客户端用它作为 Bearer Token。
+- `LUMI_MAIL_ADDRESS`：163邮箱完整地址。
+- `LUMI_MAIL_PASSWORD`：163邮箱设置中生成的客户端授权密码，不是网页登录密码。
+- `LUMI_MAIL_IMAP_HOST`：默认 `imap.163.com`。
+- `LUMI_MAIL_IMAP_PORT`：默认 `993`。
+- `LUMI_MAIL_SMTP_HOST`：默认 `smtp.163.com`。
+- `LUMI_MAIL_SMTP_PORT`：默认 `465`。
+- `LUMI_MAIL_DISPLAY_NAME`：可选的发件人显示名，默认 `Lumi`。
+
+在163邮箱网页端开启 IMAP/SMTP 服务并生成客户端授权密码。不要把授权密码或 MCP 令牌写进仓库。
+
+配置 MCP 客户端连接 `https://你的Lumi域名/mcp`，并设置请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>`。此端点会立即执行 `mail_send` 发信调用；客户端应让用户确认收件人、主题和正文后再调用。
+
+如果聊天系统直接通过 Claude API 调用模型，Claude API 不会自行连接 MCP 地址。调用端还需要一个 MCP 客户端，把这里的工具列表和工具调用结果接入 Claude API 的工具调用流程。
+
 ## API
 
 - `GET /health`
