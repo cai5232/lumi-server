@@ -1474,7 +1474,7 @@ async function searchMemories(input) {
 
 async function archiveDreamInNocturne(thread, record) {
   const raw = String(record?.content || "")
-    .replace(/<emotion_update\\b[^>]*>[\\s\\S]*?<\\/emotion_update>/gi, "")
+    .replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "")
     .trim();
   if (!raw) return false;
   try {
