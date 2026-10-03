@@ -29,6 +29,7 @@ const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/integrations/nook/recall";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
+const dreamArchivePath = process.env.LUMI_DREAM_ARCHIVE_PATH || "/api/integrations/nook/memories";
 const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
@@ -513,6 +514,8 @@ async function runSleepDreamSegment(thread, activity, now) {
     activity.sleepStage = `rem_${cycle + 1}`;
     const rem = await runSleepStage(thread, "rem", cycle, { ...stageContext, seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1, previousDream: sleep.dreamArc, contextSummary: context.summary, retrievedMemories: context.memories.join("；") }, seedIds);
     sleep.dreamArc = rem.content;
+    // 只归档原文供用户在 Nocturne 查看；不写入 Lumi 的普通记忆回忆链路。
+    void archiveDreamInNocturne(thread, rem);
     activity.dreamCycle = cycle + 1;
     activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
     activity.sleepStage = "sleeping";
@@ -1468,6 +1471,38 @@ async function searchMemories(input) {
     return [];
   }
 }
+
+async function archiveDreamInNocturne(thread, record) {
+  const raw = String(record?.content || "")
+    .replace(/<emotion_update\\b[^>]*>[\\s\\S]*?<\\/emotion_update>/gi, "")
+    .trim();
+  if (!raw) return false;
+  try {
+    await memoryRequest(dreamArchivePath, {
+      type: "dream",
+      record_type: "dream",
+      content: raw,
+      text: raw,
+      original_content: raw,
+      raw_text: raw,
+      status: "approved",
+      note_type: "dream",
+      source_kind: "lumi_sleep",
+      source_title: "Lumi 睡眠梦境",
+      dream_id: record.id,
+      cycle: record.cycle,
+      threadId: thread.id,
+      visibility: "private",
+      searchable: false,
+      include_in_recall: false
+    });
+    return true;
+  } catch (error) {
+    console.warn(`dream archive skipped: ${error.message}`);
+    return false;
+  }
+}
+
 
 async function writeMemory(content, threadId) {
   try {
