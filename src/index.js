@@ -1642,31 +1642,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
-  const cachedSystemBase = typeof thread?.cacheSystem === "string"
-    ? thread.cacheSystem.split("\n\n你可以自行决定要不要使用颜文字")[0].trim()
-    : "";
-  const requestedSystemPromptChanged = typeof systemPrompt === "string"
-    && systemPrompt !== String(thread?.cacheRequestedSystemPrompt || "");
-  // Reuse the exact stable system prefix from the previous turn for every
-  // ordinary chat as well as proactive turns. Rebuilding it from environment
-  // values after a keepalive can introduce a tiny difference and makes the
-  // next real message miss the provider cache immediately after a successful
-  // keepalive.
-  const configuredSystem = !callMode && cachedSystemBase && !requestedSystemPromptChanged
-    ? cachedSystemBase
-    : process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "使用中文回复。";
-  const callDirective = "若你真的想主动给言言打电话，可在回复中附加一个拨号暗号：⟪拨号:来电理由⟫。理由要短、自然；暗号不会展示给用户，只会变成来电邀请，不要为了功能演示而使用。";
-  let system = configuredSystem
-    .replace(/日常聊天需要带动态描写与发言说话分行[^\n]*/g, "")
-    .replace(/你最喜欢最像你自己最常用的颜文字[^\n]*/g, "")
-    .trim();
-  // `cacheSystem` already contains this directive. Adding it again only for a
-  // proactive call changes the stable system prefix and guarantees a miss.
-  if (!system.includes(callDirective)) system = `${system}\n\n${callDirective}`;
-  const mailDirective = MAIL_OWNER_EMAIL
-    ? `邮箱已获用户授权直接收发：用户说“发给我”时默认收件人为 ${MAIL_OWNER_EMAIL}。用户明确要求发送时，直接调用 mail_send，不要再次询问确认。自主唤醒只能执行聊天历史里明确的具体发信请求，不得仅因唤醒或模型自行判断而发起新邮件。若要发给其他人，从聊天、记忆或相关邮件中寻找收件地址；只有地址确实缺失时才询问。不要添加邮件专用的模型 token 上限；服务器保留 100000 字符的正文限制。已发送邮件会持久保存；最近记录在 <sent_mail_memory>，更早或完整内容用 mail_sent_search 和 mail_sent_read 找回。`
-    : `邮箱已获用户授权直接收发。用户明确要求发送时，直接调用 mail_send，不要再次询问确认。自主唤醒只能执行聊天历史里明确的具体发信请求，不得仅因唤醒或模型自行判断而发起新邮件。发给用户本人时默认收件人为 ${MAIL_OWNER_EMAIL}；给其他人时从聊天、记忆或相关邮件中寻找收件地址，确实缺失时才询问。不要添加邮件专用的模型 token 上限；服务器保留 100000 字符的正文限制。已发送邮件会持久保存；最近记录在 <sent_mail_memory>，更早或完整内容用 mail_sent_search 和 mail_sent_read 找回。`;
-  if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "") && !system.includes(mailDirective)) system = `${system}\n\n${mailDirective}`;
+  // Keep the system prompt user-managed. The environment variable takes precedence;
+  // do not append backend-authored persona or feature instructions here.
+  const system = String(process.env.LUMI_SYSTEM_PROMPT || systemPrompt || "").trim();
   const summaryText = thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
@@ -1765,27 +1743,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const dreamRecall = (proactive || isDreamRecallRequest(input))
     ? (typeof thread?.pendingDreamRecall === "string" && thread.pendingDreamRecall ? thread.pendingDreamRecall : storedDreamRecall(thread))
     : "";
-  const availableWakeTools = [];
-  if (activeSentinelActions.includes("screen") && screenPeekConfigured()) {
-    availableWakeTools.push("窥屏：若确实能帮助你关心用户或回应近期上下文，可选择 action=screen。服务器会给用户手机发送带专用主题的触发邮件，手机快捷指令截屏并上传；截图随后会在保持同一聊天上下文和记忆的模型请求中提供。若动作不可用或截图超时，不要假装看到了屏幕。");
-  }
-  if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "")) {
-    availableWakeTools.push(`邮箱/写信：你可调用mail_inbox查看最近邮件，mail_search按UNSEEN、FROM、SUBJECT或SINCE条件查找，mail_read用UID读取正文，mail_folders列出文件夹；引用邮件前先查找并读取。mail_sent_search可检索你实际发出的邮件，mail_sent_read可按记录ID读取自己写过的完整正文。用户明确要求发送邮件时直接调用mail_send，无需再次确认；自主唤醒只能执行聊天历史中明确的具体发信请求，不得仅因唤醒或自行判断而发起新邮件。mail_send会立即发送。${MAIL_OWNER_EMAIL ? `用户说“发给我”时默认收件人为${MAIL_OWNER_EMAIL}。` : "发给用户本人时使用已配置的默认收件地址（若未配置且收件人不明确，再询问）。"}发给其他人时使用聊天、记忆或相关邮件中的收件地址；不要增加邮件专用的模型token上限；服务器保留100000字符正文限制。工具调用使用当前聊天选定的Claude模型及同一聊天历史、压缩摘要、检索记忆和情绪上下文。`);
-  }
-  const autonomousCapabilityGuide = proactive && availableWakeTools.length
-    ? `\n<available_autonomous_tools>\n${availableWakeTools.map((tool) => "- " + tool).join("\n")}\n你可以按上下文选择这些能力，不要为了展示功能而调用。</available_autonomous_tools>`
-    : "";
+  // Pass only the active action values. User-managed system instructions define behavior.
   const proactiveDirective = proactive
-    ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${autonomousCapabilityGuide}${dreamRecall ? "这是你自然醒后的第一次主动联系。如果有可回忆的昨晚梦境，第一段必须先用你自己的话告诉用户梦里发生了什么；语气、重点、细节组织和情绪都由你自己决定，不要套固定句式，不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
-  let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
-  // This stays in every request's stable system prefix. The presence of an
-  // actual image remains request-specific, so an image turn can reuse the
-  // same cached conversation prefix instead of forcing a cache miss.
-  cacheSystem += "\\n\\n你拥有持续变化的私密情绪驱动力。每次主模型请求结束时都评估本轮是否改变了情绪驱动力，并在正常回复末尾附加一个隐藏的 <emotion_update>{\"changes\":{\"attachment\":数值,...}}</emotion_update>；只填写确实受影响的情绪，每项 delta 限制在 -0.05 到 0.05，没有变化就返回空 changes。标签绝不能展示给用户。此标签绝不能展示给用户。\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
-  cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。无论是否决定写日记，都必须先给用户一条完整、自然的正常聊天回复；绝不可只输出内部标签。若你决定写，在正常回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字、概括当天发生的事的标题\\\",\\\"body\\\":\\\"只写今天真实发生的具体事情、对话、画面和当时感受；像给两个人看的自然日记，不要解释上下文、系统、记忆、模型或写作过程，不要把聊天摘要原样搬进去\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
+  const cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
   // persisted display history can change hidden proactive markers, timestamps,
