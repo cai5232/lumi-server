@@ -211,8 +211,21 @@ function folderName(value = "INBOX") {
   return quote(folder);
 }
 
+function normalizeSearchQuery(query) {
+  const value = safeText(query, "搜索条件", 300).trim();
+  if (/^(ALL|UNSEEN|SEEN|ANSWERED|UNANSWERED|FLAGGED|UNFLAGGED|DELETED|UNDELETED|DRAFT|UNDRAFT|RECENT|OLD|NEW)$/i.test(value)) return value.toUpperCase();
+  const date = value.match(/^(SINCE|BEFORE|ON)\s+(\d{1,2}-[A-Za-z]{3}-\d{4})$/i);
+  if (date) return date[1].toUpperCase() + " " + date[2];
+  const text = value.match(/^(FROM|TO|SUBJECT|BODY|TEXT)\s+(.+)$/i);
+  if (!text) throw new Error("只支持单个IMAP搜索条件，例如UNSEEN、FROM地址、SUBJECT关键词或SINCE日期");
+  let term = text[2].trim();
+  if (term.startsWith('"') && term.endsWith('"') && term.length >= 2) term = term.slice(1, -1);
+  term = safeText(term, "搜索关键词", 200);
+  return text[1].toUpperCase() + " " + quote(term);
+}
+
 async function searchUIDs(conn, query, limit) {
-  const safeQuery = safeText(query, "搜索条件", 300);
+  const safeQuery = normalizeSearchQuery(query);
   const result = await conn.command("UID SEARCH " + safeQuery);
   const row = result.lines.find((line) => /^\* SEARCH(?:\s|$)/i.test(line));
   const ids = row ? row.replace(/^\* SEARCH\s*/i, "").trim().split(/\s+/).filter((id) => /^\d+$/.test(id)) : [];
