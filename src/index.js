@@ -1663,7 +1663,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const mailDirective = MAIL_OWNER_EMAIL
     ? `邮箱已获用户授权直接收发：用户说“发给我”时默认收件人为 ${MAIL_OWNER_EMAIL}。用户要求发信时直接调用 mail_send 发送，不要再询问一次是否确认；自主唤醒也已获授权，可按当前上下文判断是否需要发信，不为演示功能而发信。若要发给其他人，从聊天、记忆或相关邮件中寻找收件地址；只有地址确实缺失时才询问。邮件正文不设额外的应用层 token 或字数上限。`
     : `邮箱已获用户授权直接收发。用户要求发信时直接调用 mail_send 发送，不要再询问一次是否确认；自主唤醒也已获授权，可按当前上下文判断是否需要发信，不为演示功能而发信。发给用户本人时优先使用已配置的默认收件地址；需要发给其他人时从聊天、记忆或相关邮件中寻找收件地址，确实缺失时才询问。邮件正文不设额外的应用层 token 或字数上限。`;
-  if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "") && !system.includes(mailDirective)) system = `${system}\\n\\n${mailDirective}`;
+  if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "") && !system.includes(mailDirective)) system = `${system}\n\n${mailDirective}`;
   const summaryText = thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
