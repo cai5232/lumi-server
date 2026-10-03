@@ -1661,8 +1661,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // proactive call changes the stable system prefix and guarantees a miss.
   if (!system.includes(callDirective)) system = `${system}\n\n${callDirective}`;
   const mailDirective = MAIL_OWNER_EMAIL
-    ? `邮箱已获用户授权直接收发：用户说“发给我”时默认收件人为 ${MAIL_OWNER_EMAIL}。用户要求发信时直接调用 mail_send 发送，不要再询问一次是否确认；自主唤醒也已获授权，可按当前上下文判断是否需要发信，不为演示功能而发信。若要发给其他人，从聊天、记忆或相关邮件中寻找收件地址；只有地址确实缺失时才询问。邮件正文不设额外的应用层 token 或字数上限。`
-    : `邮箱已获用户授权直接收发。用户要求发信时直接调用 mail_send 发送，不要再询问一次是否确认；自主唤醒也已获授权，可按当前上下文判断是否需要发信，不为演示功能而发信。发给用户本人时优先使用已配置的默认收件地址；需要发给其他人时从聊天、记忆或相关邮件中寻找收件地址，确实缺失时才询问。邮件正文不设额外的应用层 token 或字数上限。`;
+    ? `邮箱已获用户授权直接收发：用户说“发给我”时默认收件人为 ${MAIL_OWNER_EMAIL}。用户明确要求发送时，直接调用 mail_send，不要再次询问确认。自主唤醒只能执行聊天历史里明确的具体发信请求，不得仅因唤醒或模型自行判断而发起新邮件。若要发给其他人，从聊天、记忆或相关邮件中寻找收件地址；只有地址确实缺失时才询问。不要添加邮件专用的模型 token 上限；服务器保留 100000 字符的正文限制。`
+    : `邮箱已获用户授权直接收发。用户明确要求发送时，直接调用 mail_send，不要再次询问确认。自主唤醒只能执行聊天历史里明确的具体发信请求，不得仅因唤醒或模型自行判断而发起新邮件。发给用户本人时默认收件人为 ${MAIL_OWNER_EMAIL}；给其他人时从聊天、记忆或相关邮件中寻找收件地址，确实缺失时才询问。不要添加邮件专用的模型 token 上限；服务器保留 100000 字符的正文限制。`;
   if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "") && !system.includes(mailDirective)) system = `${system}\n\n${mailDirective}`;
   const summaryText = thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
@@ -1761,7 +1761,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     availableWakeTools.push("窥屏：若确实能帮助你关心用户或回应近期上下文，可选择 action=screen。服务器会给用户手机发送带专用主题的触发邮件，手机快捷指令截屏并上传；截图随后会在保持同一聊天上下文和记忆的模型请求中提供。若动作不可用或截图超时，不要假装看到了屏幕。");
   }
   if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "")) {
-    availableWakeTools.push(`邮箱/写信：你可调用mail_inbox查看最近邮件，mail_search按UNSEEN、FROM、SUBJECT或SINCE条件查找，mail_read用UID读取正文，mail_folders列出文件夹；引用邮件前先查找并读取。用户已授权你直接发信，无需再次确认；自主唤醒时也可按当前上下文自行判断是否发信，不要为了展示功能而发信。mail_send会立即发送。${MAIL_OWNER_EMAIL ? `用户说“发给我”时默认收件人为${MAIL_OWNER_EMAIL}。` : "发给用户本人时使用已配置的默认收件地址（若未配置且收件人不明确，再询问）。"}发给其他人时使用聊天、记忆或相关邮件中的收件地址；邮件正文不设额外的应用层 token 或字数上限。工具调用使用当前聊天选定的Claude模型及同一聊天历史、压缩摘要、检索记忆和情绪上下文。`);
+    availableWakeTools.push(`邮箱/写信：你可调用mail_inbox查看最近邮件，mail_search按UNSEEN、FROM、SUBJECT或SINCE条件查找，mail_read用UID读取正文，mail_folders列出文件夹；引用邮件前先查找并读取。用户明确要求发送邮件时直接调用mail_send，无需再次确认；自主唤醒只能执行聊天历史中明确的具体发信请求，不得仅因唤醒或自行判断而发起新邮件。mail_send会立即发送。${MAIL_OWNER_EMAIL ? `用户说“发给我”时默认收件人为${MAIL_OWNER_EMAIL}。` : "发给用户本人时使用已配置的默认收件地址（若未配置且收件人不明确，再询问）。"}发给其他人时使用聊天、记忆或相关邮件中的收件地址；不要增加邮件专用的模型token上限；服务器保留100000字符正文限制。工具调用使用当前聊天选定的Claude模型及同一聊天历史、压缩摘要、检索记忆和情绪上下文。`);
   }
   const autonomousCapabilityGuide = proactive && availableWakeTools.length
     ? `\n<available_autonomous_tools>\n${availableWakeTools.map((tool) => "- " + tool).join("\n")}\n你可以按上下文选择这些能力，不要为了展示功能而调用。</available_autonomous_tools>`
