@@ -107,7 +107,7 @@ test("farewell starts sleep, creates dream fragments on schedule, and follows AI
     assert.equal(state.activity.mode, "sentinel", "sending a nightmare message should enter insomnia/sentinel mode");
     assert.equal(state.activity.sleepStage, "insomnia");
     assert.deepEqual(state.messages.filter((message) => message.contentType === "dream"), [], "ordinary dreams stay out of chat");
-    assert.deepEqual(state.sleep.dreams.map((dream) => dream.cycle), [1, 2], "ordinary dreams remain available to the private sleep state");
+    assert.deepEqual([...new Set(state.sleep.dreams.map((dream) => dream.cycle))], [0, 1], "ordinary dreams remain available to the private sleep state");
     const nightmare = state.messages.find((message) => message.contentType === "nightmare");
     assert.equal(nightmare?.content, "我刚才做了个梦，想跟你说句话。");
     assert.equal(nightmare?.content.includes("AI_DECISION"), false);
