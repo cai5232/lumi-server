@@ -492,29 +492,32 @@ async function runSleepDreamSegment(thread, activity, now) {
     const goals = thread.goals || [];
     const scored = all.sort((a, b) => salience(b, goals) - salience(a, goals));
     const cycle = activity.dreamCycle || 0;
-    activity.sleepStage = `n1_drift_${cycle + 1}`;
     const seeds = scored.slice(0, 6 + cycle);
     const seedIds = seeds.map((m) => m.id);
+    // 保留睡眠阶段状态，但 N1/N2/N3 只在本地整理，不各自消耗一次模型请求。
+    activity.sleepStage = `n1_drift_${cycle + 1}`;
     const recentConversation = context.raw.map((message) => `${message.role === "user" ? "用户" : "AI"}：${message.content}`).join("\n").slice(-12000);
     const contextHeader = [
       "【完整睡眠上下文】",
       `最近聊天：\n${recentConversation || "（无）"}`,
       `对话压缩摘要：${context.summary || "（无）"}`,
-      `长期记忆检索结果：${context.memories.join("；") || "（无）"}`
+      `长期记忆检索结果：${context.memories.join("；") || "（无）"}`,
+      `本地睡眠素材：\n${formatSleepMemories(seeds)}`
     ].join("\n\n");
-    const stageContext = { contextHeader };
-    const n1 = await runSleepStage(thread, "n1_drift", cycle, { ...stageContext, goals: goals.join(", ") || "（无）", memories: formatSleepMemories(seeds) }, seedIds);
-    const n2 = await runSleepStage(thread, "n2_spindle", cycle, { ...stageContext, n1: n1.content }, seedIds);
-    const semanticText = sleep.semantic.map((f) => `- ${f.fact}`).join("\n") || "（空）";
-    const n3 = await runSleepStage(thread, "n3_deep", cycle, { ...stageContext, n2: n2.content, semantic: semanticText }, seedIds);
-    const n3Json = safeJSON(n3.content);
-    for (const fact of (n3Json.facts || [])) {
-      if (fact?.fact && Number(fact.confidence ?? 0.6) >= 0.6) sleep.semantic.push({ id: randomUUID(), fact: fact.fact, sources: fact.sources || seedIds, confidence: Number(fact.confidence ?? 0.6), createdAt: new Date().toISOString() });
-    }
+    activity.sleepStage = `n2_spindle_${cycle + 1}`;
+    activity.sleepStage = `n3_deep_${cycle + 1}`;
     activity.sleepStage = `rem_${cycle + 1}`;
-    const rem = await runSleepStage(thread, "rem", cycle, { ...stageContext, seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1, previousDream: sleep.dreamArc, contextSummary: context.summary, retrievedMemories: context.memories.join("；") }, seedIds);
+    const rem = await runSleepStage(thread, "rem", cycle, {
+      contextHeader,
+      seeds: formatSleepMemories(seeds, 12),
+      semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）",
+      goals: goals.join(", ") || "（无）",
+      cycle: cycle + 1,
+      previousDream: sleep.dreamArc,
+      contextSummary: context.summary,
+      retrievedMemories: context.memories.join("；")
+    }, seedIds);
     sleep.dreamArc = rem.content;
-    // 只归档原文供用户在 Nocturne 查看；不写入 Lumi 的普通记忆回忆链路。
     void archiveDreamInNocturne(thread, rem);
     activity.dreamCycle = cycle + 1;
     activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
@@ -522,7 +525,7 @@ async function runSleepDreamSegment(thread, activity, now) {
 
     if (shouldTriggerNightmare({ cycle, alreadyTriggered: Boolean(sleep.nightmare?.triggeredAt), roll: Math.random(), probability: sleepNightmareProbability })) {
       activity.sleepStage = `nightmare_${cycle + 1}`;
-      const nightmare = await runSleepStage(thread, "nightmare", cycle, { ...stageContext, trauma: formatSleepMemories(seeds.slice(0, 3), 3), competence: thread.competence || "尚未明确" }, seedIds.slice(0, 3));
+      const nightmare = await runSleepStage(thread, "nightmare", cycle, { contextHeader, trauma: formatSleepMemories(seeds.slice(0, 3), 3), competence: thread.competence || "尚未明确" }, seedIds.slice(0, 3));
       const decision = resolveNightmareDecision(nightmare.content, Math.random(), sleepReentryProbability);
       sleep.nightmare = { triggeredAt: new Date().toISOString(), cycle: cycle + 1, decision: decision.decision, reenteredSleep: decision.reenteredSleep };
       if (decision.decision === "send_message" && decision.message) {
@@ -548,6 +551,7 @@ async function runSleepDreamSegment(thread, activity, now) {
     sleep.running = false;
   }
 }
+
 
 function sleepRecallShards(records) {
   const out = [];
