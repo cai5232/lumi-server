@@ -490,7 +490,6 @@ async function runSleepDreamSegment(thread, activity, now) {
     activity.sleepStage = `rem_${cycle + 1}`;
     const rem = await runSleepStage(thread, "rem", cycle, { seeds: formatSleepMemories(seeds, 6), semantic: sleep.semantic.map((f) => f.fact).join("；") || "（空）", goals: goals.join(", ") || "（无）", cycle: cycle + 1, previousDream: sleep.dreamArc, contextSummary: context.summary, retrievedMemories: context.memories.join("；") }, seedIds);
     sleep.dreamArc = rem.content;
-    thread.messages.push({ id: randomUUID(), role: "assistant", content: rem.content, contentType: "dream", sleepCycle: cycle + 1, createdAt: new Date(now).toISOString() });
     activity.dreamCycle = cycle + 1;
     activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
     activity.sleepStage = "sleeping";
@@ -551,35 +550,8 @@ async function runBackgroundPulse() {
   const now = Date.now();
   let changed = false;
   const pendingPushes = [];
-  const emotionThread = threads[proactiveSettings.threadId] || threads.default || Object.values(threads)[0];
-  let emotionChanged = tickEmotion(sharedEmotionState, now, (at) => inEmotionQuietHours(new Date(at))) > 0;
-  if (emotionThread) {
-    const emotion = sharedEmotionState;
-    const strongestEmotion = topEmotion(emotion);
-    if (now - Number(emotion.lastReflectionAt || 0) >= EMOTION_REFLECTION_MS && strongestEmotion.value >= EMOTION_REFLECTION_THRESHOLD) {
-      try {
-        await generateEmotionMurmur(emotionThread, strongestEmotion);
-        emotionChanged = true;
-      } catch (error) {
-        emotion.lastReflectionAt = now;
-        emotionChanged = true;
-        console.warn(`emotion reflection skipped: ${error.message}`);
-      }
-    }
-    if (ensureActivity(emotionThread).mode !== "sleeping") {
-      const beforeEmotionPush = JSON.stringify(sharedEmotionState);
-      const emotionPush = emotionPushDue(emotion, now);
-      if (JSON.stringify(sharedEmotionState) !== beforeEmotionPush) emotionChanged = true;
-      if (emotionPush) {
-        const recentArc = [...emotion.arc].reverse().find((item) => item.drive === emotionPush.drive && item.type === "murmur");
-        const message = recentArc?.text || emotionPush.message;
-        emotionThread.messages.push({ id: randomUUID(), role: "assistant", content: message, contentType: "emotion_murmur", createdAt: new Date(now).toISOString() });
-        pendingPushes.push({ threadId: emotionThread.id, message, metadata: { kind: "emotion_murmur", drive: emotionPush.drive } });
-        changed = true;
-        emotionChanged = true;
-      }
-    }
-  }
+  // Emotion is request-driven. The background pulse must not mutate or reflect it while idle.
+  let emotionChanged = false;
   changed ||= emotionChanged;
   for (const thread of Object.values(threads)) {
     const activity = ensureActivity(thread);
@@ -737,7 +709,21 @@ async function runBackgroundPulse() {
 
 async function readThreads() {
   await mkdir(dataDir, { recursive: true });
-  try { return JSON.parse(await readFile(threadPath, "utf8")); }
+  try {
+    const parsed = JSON.parse(await readFile(threadPath, "utf8"));
+    let sanitized = false;
+    for (const thread of Object.values(parsed || {})) {
+      if (!Array.isArray(thread?.messages)) continue;
+      const visibleMessages = thread.messages.filter((message) =>
+        message?.contentType !== "dream" && message?.contentType !== "emotion_murmur"
+      );
+      if (visibleMessages.length !== thread.messages.length) {
+        thread.messages = visibleMessages;
+        sanitized = true;
+      }
+    }
+    if (sanitized) await saveThreads(parsed);
+    return parsed;
   catch (error) {
     if (error?.code !== "ENOENT") {
       console.error(`thread history preserved; failed to read ${threadPath}: ${error.message}`);
