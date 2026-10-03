@@ -610,9 +610,10 @@ async function finishSleepCycle(thread, activity, now) {
   activity.mode = "sentinel";
   activity.sleepStage = "awake";
   const proactive = ensureProactive(thread);
-  const interval = Math.max(1, Number(proactive.intervalMin) || 60);
-  activity.nextWakeAt = proactive.enabled ? new Date(now + interval * 60_000).toISOString() : null;
-  activity.nextWakeSource = proactive.enabled ? "settings" : null;
+  // Natural wake is itself the first sentinel wake. Do not wait for the
+  // ordinary idle interval; the request will choose the next wake schedule.
+  activity.nextWakeAt = proactive.enabled ? new Date(now).toISOString() : null;
+  activity.nextWakeSource = proactive.enabled ? "sleep_wake" : null;
 }
 
 async function runBackgroundPulse() {
@@ -693,7 +694,7 @@ async function runBackgroundPulse() {
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
       // The configured interval is the first system wake after chat/settings.
       // Keep the plan's 30-minute recent-activity guard only for AI-written notes.
-      if (activity.nextWakeSource !== "settings" && now - lastActivityAt < 30 * 60_000) {
+      if (activity.nextWakeSource !== "settings" && activity.nextWakeSource !== "sleep_wake" && now - lastActivityAt < 30 * 60_000) {
         activity.nextWakeAt = new Date(lastActivityAt + 30 * 60_000).toISOString();
         activity.nextWakeSource = "ai";
         proactive.nextDueAt = activity.nextWakeAt;
