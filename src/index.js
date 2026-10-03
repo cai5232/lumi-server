@@ -1720,13 +1720,13 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
+  const dreamRecall = (proactive || isDreamRecallRequest(input))
+    ? (typeof thread?.pendingDreamRecall === "string" && thread.pendingDreamRecall ? thread.pendingDreamRecall : storedDreamRecall(thread))
+    : "";
   const proactiveDirective = proactive
     ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${dreamRecall ? "这是你自然醒后的第一次主动联系。请把昨晚梦境作为第一优先，用你自己的语气自然告诉用户梦里发生了什么；不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const dreamRecall = (proactive || isDreamRecallRequest(input))
-    ? (typeof thread?.pendingDreamRecall === "string" && thread.pendingDreamRecall ? thread.pendingDreamRecall : storedDreamRecall(thread))
-    : "";
   const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   // This stays in every request's stable system prefix. The presence of an
