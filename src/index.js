@@ -1224,17 +1224,17 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Native Anthropic is a ZenMux-only mode. Backup relays are OpenAI-compatible
   // unless they get their own explicit native-API configuration.
   const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
-  const normalizedBaseURL = configuredURL.replace(/\\/+$/, "");
-  const directAnthropicAPI = /^https:\\/\\/api\\.anthropic\\.com(?:\\/|$)/i.test(normalizedBaseURL);
+  const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
+  const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
   const apiURL = nativeAnthropic
     ? directAnthropicAPI
-      ? normalizedBaseURL.replace(/\\/v1$/i, "") + "/v1/messages"
-      : /\\/api\\/v1$/i.test(normalizedBaseURL)
-        ? normalizedBaseURL.replace(/\\/api\\/v1$/i, "/api/anthropic/v1/messages")
-        : /\\/messages$/i.test(normalizedBaseURL)
+      ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
+      : /\/api\/v1$/i.test(normalizedBaseURL)
+        ? normalizedBaseURL.replace(/\/api\/v1$/i, "/api/anthropic/v1/messages")
+        : /\/messages$/i.test(normalizedBaseURL)
           ? normalizedBaseURL
           : normalizedBaseURL + "/messages"
-    : /\\/chat\\/completions$/i.test(normalizedBaseURL)
+    : /\/chat\/completions$/i.test(normalizedBaseURL)
       ? normalizedBaseURL
       : normalizedBaseURL + "/chat/completions";
   const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
