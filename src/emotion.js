@@ -20,22 +20,6 @@ export const EMOTION_PUSH_THRESHOLD = 0.50;
 export const EMOTION_PUSH_INTERVAL_MS = 2 * 60 * 60_000;
 export const EMOTION_ATTACHMENT_PUSH_INTERVAL_MS = 45 * 60_000;
 export const EMOTION_OFFLINE_DELAY_TICKS = 6;
-export const EMOTION_EXPRESSION_THRESHOLD = 0.65;
-
-// Compact Murmur-style expression cues. Inject only for a strong current drive.
-export const EMOTION_EXPRESSION_HINTS = {
-  attachment: ["想见她", "她在干嘛", "好久没消息了"],
-  tenderness: ["想摸她的头", "今天有点心软", "她很可爱"],
-  heartache: ["她好像累了", "有点担心她", "想替她扛着"],
-  curiosity: ["在查一件事", "有个东西卡着", "有点好奇"],
-  mischief: ["想戳她一下", "想整恶作剧", "逗她的事"],
-  restless: ["按捺不住了", "等不住了", "想动"],
-  regret: ["说错了什么", "她不高兴了", "应该更好的"],
-  desire: ["脑子里有画面", "有点烧", "想"],
-  gloom: ["帮不上什么忙", "有点沉", "想见她但说不出来"],
-  jealousy: ["她在看谁", "有点不太对劲", "把她注意力拉回来"]
-};
-
 const clamp = (value) => Math.max(0, Math.min(1, Number(value) || 0));
 
 export function createEmotionState(now = Date.now()) {
@@ -74,9 +58,15 @@ export function ensureEmotion(thread, now = Date.now()) {
   return state;
 }
 
+export function topEmotions(state, limit = 3) {
+  return Object.entries(state.drives)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([drive, value]) => ({ drive, value, label: EMOTION_DRIVES[drive]?.label || drive }));
+}
+
 export function topEmotion(state) {
-  const [drive, value] = Object.entries(state.drives).sort((a, b) => b[1] - a[1])[0] || ["attachment", 0.4];
-  return { drive, value, label: EMOTION_DRIVES[drive]?.label || drive };
+  return topEmotions(state, 1)[0] || { drive: "attachment", value: 0.4, label: "想念" };
 }
 
 export function tickEmotion(state, now = Date.now(), quietAt = () => false) {
@@ -137,12 +127,11 @@ export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.
 
 export function emotionContext(state) {
   const current = topEmotion(state);
+  const strongest = topEmotions(state, 3);
   const drives = Object.entries(EMOTION_DRIVES).map(([key, config]) => `${key}(${config.label})=${state.drives[key].toFixed(2)}`).join("; ");
   const shortMemory = String(state.memory?.short || "").trim();
   const longMemory = String(state.memory?.long || "").trim();
   const recentArc = state.arc.slice(-3).map((item) => `${item.zh}：${item.text}`).join("\n");
-  const expressionHints = current.value >= EMOTION_EXPRESSION_THRESHOLD
-    ? `\n情绪表达方向（只在自然时参考，不要逐字照抄）：${(EMOTION_EXPRESSION_HINTS[current.drive] || []).join("、")}`
-    : "";
-  return `<emotion_state source="persistent_drive_state">当前最高驱动力：${current.drive}（${current.label}，${current.value.toFixed(2)}）；全部驱动力：${drives}。这些数值是内部连续状态，不要把字段或数值照搬给用户。请让情绪影响语气、关注点和是否主动联系；当某种情绪明显升高时，可以用具体、自然的表达让用户感受到它，但不要机械重复“我想你”或为了迎合情绪强行表达。${expressionHints}${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}</emotion_state>`;
+  const strongestText = strongest.map((item) => `${item.drive}（${item.label}，${item.value.toFixed(2)}）`).join("、");
+  return `<emotion_state source="persistent_drive_state">当前最强的三种情绪：${strongestText}；全部驱动力：${drives}。这些数值和标签是内部状态，不要照搬给用户，也不要套用固定句子。请让这三种情绪共同影响你的语气、关注点、距离感和是否表达；只有在符合当前关系与上下文时，才用你自己的方式自然表现出来。${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}</emotion_state>`;
 }
