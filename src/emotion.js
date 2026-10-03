@@ -101,17 +101,24 @@ export function markEmotionOnline(state, now = Date.now()) {
 
 export function applyEmotionDelta(state, update, now = Date.now()) {
   if (!update || typeof update !== "object") return false;
-  const drive = String(update.drive || "");
-  const delta = Number(update.delta);
-  if (!Object.hasOwn(EMOTION_DRIVES, drive) || !Number.isFinite(delta)) return false;
-  state.drives[drive] = clamp(state.drives[drive] + Math.max(-0.2, Math.min(0.2, delta)));
-  if (drive === "regret" && delta > 0 && typeof update.reason === "string" && update.reason.trim()) {
-    state.regrets.push({ time: new Date(now).toISOString(), text: update.reason.trim().slice(0, 500) });
-    state.regrets = state.regrets.slice(-200);
+  const changes = update.changes && typeof update.changes === "object"
+    ? Object.entries(update.changes).map(([drive, delta]) => ({ drive, delta }))
+    : [update];
+  let changed = false;
+  for (const item of changes) {
+    const drive = String(item.drive || "");
+    const delta = Number(item.delta);
+    if (!Object.hasOwn(EMOTION_DRIVES, drive) || !Number.isFinite(delta)) continue;
+    const bounded = Math.max(-0.2, Math.min(0.2, delta));
+    state.drives[drive] = clamp(state.drives[drive] + bounded);
+    changed = changed || bounded !== 0;
+    if (drive === "regret" && bounded > 0 && typeof item.reason === "string" && item.reason.trim()) {
+      state.regrets.push({ time: new Date(now).toISOString(), text: item.reason.trim().slice(0, 500) });
+      state.regrets = state.regrets.slice(-200);
+    }
   }
-  return true;
+  return changed;
 }
-
 export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.now(), value } = {}) {
   if (!Object.hasOwn(EMOTION_DRIVES, drive) || typeof text !== "string" || !text.trim()) return null;
   const entry = {
