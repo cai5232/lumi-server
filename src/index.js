@@ -5,6 +5,7 @@ import { connect } from "node:http2";
 import { createServer } from "node:http";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
+import { handleMailMcp } from "./mail-mcp.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 
 const port = Number(process.env.PORT || 8787);
@@ -64,6 +65,15 @@ function providerConfig(id = "zenmux", modelOverride = "") {
   const config = providerConfigs().find((item) => item.id === id);
   if (!config) throw new Error(`${id === "backup" ? "备用中转" : "ZenMux"}线路尚未配置`);
   return { ...config, model: modelOverride || config.model };
+}
+
+function mailMcpConfiguredFor(provider = "zenmux", model = "") {
+  return provider === "zenmux" &&
+    process.env.LUMI_NATIVE_ANTHROPIC === "true" &&
+    /anthropic|claude/i.test(model || process.env.LUMI_MODEL_NAME || "") &&
+    Boolean(process.env.LUMI_MAIL_MCP_URL && process.env.LUMI_MAIL_MCP_TOKEN &&
+      process.env.LUMI_MAIL_ADDRESS && process.env.LUMI_MAIL_PASSWORD) &&
+    process.env.LUMI_MAIL_MCP_ENABLED !== "false";
 }
 
 async function listProviderModels(config) {
@@ -1220,14 +1230,25 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
   const isClaude = /anthropic|claude/i.test(model);
-  // Native Anthropic is a ZenMux-only mode. Backup relays are OpenAI-compatible
-  // unless they get their own explicit native-API configuration.
+  // Native Anthropic is opt-in for the primary provider. Backup relays remain
+  // OpenAI-compatible unless they get their own explicit native-API configuration.
   const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
-  const apiURL = nativeAnthropic && /\/api\/v1\/?$/i.test(configuredURL)
-    ? configuredURL.replace(/\/api\/v1\/?$/i, "/api/anthropic/v1/messages")
-    : /\/chat\/completions\/?$/i.test(configuredURL)
-    ? configuredURL
-    : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
+  const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
+  const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
+  const apiURL = nativeAnthropic
+    ? directAnthropicAPI
+      ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
+      : /\/api\/v1$/i.test(normalizedBaseURL)
+        ? normalizedBaseURL.replace(/\/api\/v1$/i, "/api/anthropic/v1/messages")
+        : /\/messages$/i.test(normalizedBaseURL)
+          ? normalizedBaseURL
+          : normalizedBaseURL + "/messages"
+    : /\/chat\/completions$/i.test(normalizedBaseURL)
+      ? normalizedBaseURL
+      : normalizedBaseURL + "/chat/completions";
+  const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
+  const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
+  const mailMcpEnabled = nativeAnthropic && mailMcpConfiguredFor(provider, model);
 
   const providerMessages = messages.map((message) => {
     const { images = [], ...cleanMessage } = message;
@@ -1247,7 +1268,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
-        messages: preparedMessages.filter((message) => message.role !== "system")
+        messages: preparedMessages.filter((message) => message.role !== "system"),
+        ...(mailMcpEnabled ? {
+          mcp_servers: [{ type: "url", url: mailMcpURL, name: "lumi_mail", authorization_token: mailMcpToken }],
+          tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
+        } : {})
       }
     : { model, messages: preparedMessages, temperature, ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
@@ -1255,8 +1280,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-      ...(nativeAnthropic ? { "anthropic-version": "2023-06-01" } : {})
+      ...(directAnthropicAPI && nativeAnthropic ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
+      ...(nativeAnthropic ? {
+        "anthropic-version": "2023-06-01",
+        ...(mailMcpEnabled ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
+      } : {})
     },
     body: JSON.stringify(requestBody)
   });
@@ -1724,8 +1752,18 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   const dreamRecall = (proactive || isDreamRecallRequest(input))
     ? (typeof thread?.pendingDreamRecall === "string" && thread.pendingDreamRecall ? thread.pendingDreamRecall : storedDreamRecall(thread))
     : "";
+  const availableWakeTools = [];
+  if (activeSentinelActions.includes("screen") && screenPeekConfigured()) {
+    availableWakeTools.push("窥屏：若确实能帮助你关心用户或回应近期上下文，可选择 action=screen。服务器会给用户手机发送带专用主题的触发邮件，手机快捷指令截屏并上传；截图随后会在保持同一聊天上下文和记忆的模型请求中提供。若动作不可用或截图超时，不要假装看到了屏幕。");
+  }
+  if (mailMcpConfiguredFor(provider, model || thread?.cacheModel || "")) {
+    availableWakeTools.push("邮箱/写信：你可调用mail_inbox查看最近邮件，mail_search按UNSEEN、FROM、SUBJECT或SINCE条件查找，mail_read用UID读取正文，mail_folders列出文件夹。需要引用邮件内容时先查找并读取。mail_send会立刻向外部收件人发送邮件；自主唤醒本身不代表用户授权发送，只有聊天历史中有明确的发送请求或明确授权才可调用，否则只在聊天里提出可以代拟。工具调用会使用当前聊天选定的Claude模型及同一聊天历史、压缩摘要、检索记忆和情绪上下文。");
+  }
+  const autonomousCapabilityGuide = proactive && availableWakeTools.length
+    ? `\n<available_autonomous_tools>\n${availableWakeTools.map((tool) => "- " + tool).join("\n")}\n你可以按上下文选择这些能力，不要为了展示功能而调用。</available_autonomous_tools>`
+    : "";
   const proactiveDirective = proactive
-    ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${dreamRecall ? "这是你自然醒后的第一次主动联系。如果有可回忆的昨晚梦境，第一段必须先用你自己的话告诉用户梦里发生了什么；语气、重点、细节组织和情绪都由你自己决定，不要套固定句式，不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
+    ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。${autonomousCapabilityGuide}${dreamRecall ? "这是你自然醒后的第一次主动联系。如果有可回忆的昨晚梦境，第一段必须先用你自己的话告诉用户梦里发生了什么；语气、重点、细节组织和情绪都由你自己决定，不要套固定句式，不要逐字复述梦境原文，不要说成系统播报，也不要假装用户刚刚问了梦。" : ""}输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
@@ -2257,6 +2295,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/mcp") return handleMailMcp(req, res);
     if (url.pathname === "/v1/internal/cache-keepalive" && req.method === "POST") {
       const expected = String(process.env.LUMI_CACHE_KEEPALIVE_TOKEN || process.env.LUMI_PUSH_API_TOKEN || "");
       const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
