@@ -456,24 +456,28 @@ function formatSleepMemories(memories, limit = 12) {
 }
 
 async function evaluateEmotionAfterRequest({ thread, input = "", output = "", kind = "chat" }) {
-  const stateContext = emotionContext(sharedEmotionState);
-  const evaluation = await callModel({
-    messages: [
-      { role: "system", content: "你是一个私密的情绪状态评估器，不负责写回复。根据本轮输入、AI输出和当前状态，评估全部驱动力是否发生变化。只输出 JSON：{\"changes\":{\"attachment\":数值,\"tenderness\":数值,...}}。只填写确实受本轮影响的情绪；没有变化就返回 {\"changes\":{}}。每个 delta 限制在 -0.05 到 0.05，不要输出解释、台词或 markdown。" },
-      { role: "user", content: `${stateContext}\n\n请求类型：${kind}\n用户/睡眠输入：${String(input).slice(-5000)}\n\n主模型输出：${String(output).slice(-7000)}` }
-    ],
-    temperature: 0,
-    maxOutputTokens: 180,
-    cacheCurrentUser: false,
-    provider: thread?.cacheProvider || "zenmux",
-    model: thread?.cacheModel || ""
-  });
-  const parsed = safeJSON(evaluation, { changes: {} });
-  const changed = applyEmotionDelta(sharedEmotionState, parsed);
-  if (changed) await saveEmotionState();
-  return parsed;
+  try {
+    const stateContext = emotionContext(sharedEmotionState);
+    const evaluation = await callModel({
+      messages: [
+        { role: "system", content: "你是一个私密的情绪状态评估器，不负责写回复。根据本轮输入、AI输出和当前状态，评估全部驱动力是否发生变化。只输出 JSON：{\"changes\":{\"attachment\":数值,\"tenderness\":数值,...}}。只填写确实受本轮影响的情绪；没有变化就返回 {\"changes\":{}}。每个 delta 限制在 -0.05 到 0.05，不要输出解释、台词或 markdown。" },
+        { role: "user", content: `${stateContext}\n\n请求类型：${kind}\n用户/睡眠输入：${String(input).slice(-5000)}\n\n主模型输出：${String(output).slice(-7000)}` }
+      ],
+      temperature: 0,
+      maxOutputTokens: 180,
+      cacheCurrentUser: false,
+      provider: thread?.cacheProvider || "zenmux",
+      model: thread?.cacheModel || ""
+    });
+    const parsed = safeJSON(evaluation, { changes: {} });
+    const changed = applyEmotionDelta(sharedEmotionState, parsed);
+    if (changed) await saveEmotionState();
+    return parsed;
+  } catch (error) {
+    console.warn(`emotion evaluation skipped: ${error.message}`);
+    return { changes: {} };
+  }
 }
-
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
