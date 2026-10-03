@@ -60,11 +60,16 @@ Zeabur 环境变量：
 - `LUMI_MAIL_SMTP_PORT`：默认 `465`。
 - `LUMI_MAIL_DISPLAY_NAME`：可选的发件人显示名，默认 `Lumi`。
 
-在163邮箱网页端开启 IMAP/SMTP 服务并生成客户端授权密码。不要把授权密码或 MCP 令牌写进仓库。
+在163邮箱网页端开启 IMAP/SMTP 服务并生成客户端授权密码。不要把授权密码、Claude API Key或 MCP 令牌写进仓库。
 
-配置 MCP 客户端连接 `https://你的Lumi域名/mcp`，并设置请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>`。此端点会立即执行 `mail_send` 发信调用；客户端应让用户确认收件人、主题和正文后再调用。
+让 Lumi 自己的 Claude API 对话使用邮箱工具，还需配置：
 
-如果聊天系统直接通过 Claude API 调用模型，Claude API 不会自行连接 MCP 地址。调用端还需要一个 MCP 客户端，把这里的工具列表和工具调用结果接入 Claude API 的工具调用流程。
+- `LUMI_MAIL_MCP_URL`：公开 HTTPS 地址，例如 `https://你的Lumi域名/mcp`。
+- `LUMI_MAIL_MCP_TOKEN`：与 MCP 入口鉴权使用的同一个随机长令牌。
+- `LUMI_NATIVE_ANTHROPIC=true`：启用 Claude Messages API 和 MCP Connector。
+- `LUMI_MODEL_API_URL=https://api.anthropic.com/v1`、`LUMI_MODEL_API_KEY`、`LUMI_MODEL_NAME`：Claude API 地址、密钥和 Claude 模型名称。
+
+此接法要求 Claude API 能从公网 HTTPS 访问 Lumi 的 `/mcp` 地址。也可以把 `https://你的Lumi域名/mcp` 和请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>` 配到 Claude Desktop、Claude Code 等 MCP 客户端。MCP 的 `mail_send` 会立即发信，使用时应确认收件人、主题和正文。
 
 ## API
 
