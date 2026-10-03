@@ -455,12 +455,32 @@ function formatSleepMemories(memories, limit = 12) {
   return memories.slice(0, limit).map((m) => `- [${m.id}] valence=${m.valence.toFixed(2)} arousal=${m.arousal.toFixed(2)} :: ${m.content.slice(0, 220)}`).join("\n") || "（没有记忆）";
 }
 
+async function evaluateEmotionAfterRequest({ thread, input = "", output = "", kind = "chat" }) {
+  const stateContext = emotionContext(sharedEmotionState);
+  const evaluation = await callModel({
+    messages: [
+      { role: "system", content: "你是一个私密的情绪状态评估器，不负责写回复。根据本轮输入、AI输出和当前状态，评估全部驱动力是否发生变化。只输出 JSON：{\"changes\":{\"attachment\":数值,\"tenderness\":数值,...}}。只填写确实受本轮影响的情绪；没有变化就返回 {\"changes\":{}}。每个 delta 限制在 -0.05 到 0.05，不要输出解释、台词或 markdown。" },
+      { role: "user", content: `${stateContext}\n\n请求类型：${kind}\n用户/睡眠输入：${String(input).slice(-5000)}\n\n主模型输出：${String(output).slice(-7000)}` }
+    ],
+    temperature: 0,
+    maxOutputTokens: 180,
+    cacheCurrentUser: false,
+    provider: thread?.cacheProvider || "zenmux",
+    model: thread?.cacheModel || ""
+  });
+  const parsed = safeJSON(evaluation, { changes: {} });
+  const changed = applyEmotionDelta(sharedEmotionState, parsed);
+  if (changed) await saveEmotionState();
+  return parsed;
+}
+
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
     messages: [{ role: "system", content: prompt.system }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6
   });
+  await evaluateEmotionAfterRequest({ thread, input: prompt.user(context), output, kind: `sleep:${stage}` });
   const record = { id: randomUUID(), stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
   thread.sleep.dreams.push(record);
   return record;
@@ -1620,7 +1640,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // This stays in every request's stable system prefix. The presence of an
   // actual image remains request-specific, so an image turn can reuse the
   // same cached conversation prefix instead of forcing a cache miss.
-  cacheSystem += "\\n\\n你拥有持续变化的私密情绪驱动力。每次聊天结束时可在正常回复末尾额外输出至多一个 <emotion_update>{\\\"drive\\\":\\\"attachment\\\",\\\"delta\\\":0.03,\\\"reason\\\":\\\"仅 regret 增加时填写简短检讨\\\"}</emotion_update>，drive 只能是 attachment、tenderness、heartache、curiosity、mischief、restless、regret、desire、gloom、jealousy，delta 范围 -0.2 到 0.2；只有关系或对话确实影响情绪时才更新，否则省略。此标签绝不能展示给用户。\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
+  cacheSystem += "\\n\\n你拥有持续变化的私密情绪驱动力。每次主模型请求结束后，情绪评估请求会单独读取本轮内容并更新驱动力；主模型不要输出 emotion_update 标签。此标签绝不能展示给用户。\\n\\n当且仅当当前用户消息附带图片时，请结合完整对话上下文和图片，自行决定它是否值得进入两人的共同相册；普通截图、转发梗图、资料图不必收藏。仅当决定收藏时，在回复最后额外输出 <gallery_collection>{\\\"shouldCollect\\\":true,\\\"title\\\":\\\"不超过18个中文字符的标题\\\",\\\"visualDescription\\\":\\\"客观描述画面\\\",\\\"firstImpression\\\":\\\"以第一人称写下温柔简短的当时印象\\\"}</gallery_collection>。没有决定收藏时绝不能输出该标签；标签和 JSON 绝不能展示或解释给用户。";
   cacheSystem += "\\n\\n你可以结合完整聊天上下文，自行决定是否把一个真正值得回望的瞬间写成两人的日记；这项决定始终由你自己做，用户提到或要求日记也只是上下文，不构成强制命令。不要为了功能而频繁写，普通闲聊不要写。无论是否决定写日记，都必须先给用户一条完整、自然的正常聊天回复；绝不可只输出内部标签。若你决定写，在正常回复最后附加且仅附加一个 <diary_entry>{\\\"shouldWrite\\\":true,\\\"title\\\":\\\"不超过28字、概括当天发生的事的标题\\\",\\\"body\\\":\\\"只写今天真实发生的具体事情、对话、画面和当时感受；像给两个人看的自然日记，不要解释上下文、系统、记忆、模型或写作过程，不要把聊天摘要原样搬进去\\\",\\\"lock\\\":{\\\"type\\\":\\\"public\\\"}}</diary_entry>。日记格式完全由你自主选择：lock.type 为 public 表示正常展示；question 表示选择题上锁（必须给 question、2至4个 choices、且 answer 必须严格等于其中一个选项，答错后三分钟才可重试）；capsule 表示时间胶囊（给未来的 ISO 时间 unlockAt）。不要因用户是否命令而改变这项自主选择。日记标签及内部机制绝不能在可见回复中解释或展示。";
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -1694,6 +1714,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       cacheContinuity.writeTokens = cachedWrite;
     }
   });
+  await evaluateEmotionAfterRequest({ thread, input, output: raw, kind: proactive ? "proactive" : callMode ? "call" : "chat" });
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
@@ -1706,12 +1727,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   } else if (pendingCompaction) {
     console.warn("context compaction deferred: model response contained no context_summary");
   }
-  const emotionUpdateRaw = raw.match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
-  let emotionUpdate = null;
-  try {
-    const parsed = emotionUpdateRaw ? JSON.parse(emotionUpdateRaw) : null;
-    if (applyEmotionDelta(sharedEmotionState, parsed)) emotionUpdate = parsed;
-  } catch { /* malformed private emotion metadata is ignored */ }
+  const emotionUpdate = null;
   const cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
     : withoutSpeechPlanning(raw));
