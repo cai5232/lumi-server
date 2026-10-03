@@ -724,6 +724,7 @@ async function readThreads() {
     }
     if (sanitized) await saveThreads(parsed);
     return parsed;
+  }
   catch (error) {
     if (error?.code !== "ENOENT") {
       console.error(`thread history preserved; failed to read ${threadPath}: ${error.message}`);
