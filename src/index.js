@@ -546,15 +546,41 @@ async function runSleepDreamSegment(thread, activity, now) {
   }
 }
 
+function sleepRecallShards(records) {
+  const out = [];
+  for (const record of records) {
+    const clean = String(record.content || "")
+      .replace(/<emotion_update\\b[^>]*>[\\s\\S]*?<\\/emotion_update>/gi, "")
+      .replace(/DREAM_EMOTION\\s*[:：].*$/gim, "")
+      .replace(/SCENE\\s*[123]\\s*[:：]?/gi, "")
+      .trim();
+    const pieces = clean.split(/[。！？!?…]+|\\n+/).map((part) => part.trim()).filter((part) => part.length >= 4);
+    for (const piece of pieces) {
+      const shard = piece.slice(0, 120);
+      if (shard && !out.includes(shard)) out.push(shard);
+      if (out.length >= 5) break;
+    }
+    if (out.length >= 5) break;
+  }
+  return out.slice(0, 5);
+}
+
+
 async function finishSleepCycle(thread, activity, now) {
   const sleep = thread.sleep;
   const dreamRecords = sleep.dreams.filter((item) => item.createdAt >= activity.sleepStartedAt);
-  // 睡醒只结束本轮睡眠；不再额外发请求把整晚梦境重新读一遍。
-  // 梦境仍保留在 sleep.dreams，之后只有真正需要回忆/主动联系用户时才使用。
+  const dreamCandidates = dreamRecords.filter((item) => item.stage === "rem");
+  const recallShards = sleepRecallShards(dreamCandidates.slice(-2).reverse());
+  // 梦境仍然只留在睡眠内部；醒来时只把少量残留碎片放入下一次主模型请求的隐藏上下文。
+  // 不把完整梦境写进 thread.messages，也不在睡醒时另起模型请求重读整晚梦。
+  thread.pendingDreamRecall = recallShards.length
+    ? `<dream_recall source="waking_memory">醒来后残留的梦境碎片（不是完整梦境，不要机械复述；只有在你自己想提起时才自然表达）：\\n${recallShards.map((item) => `- ${item}`).join("\\n")}\\n</dream_recall>`
+    : "";
   sleep.reflections.push({
     generatedBy: "sleep-state",
     dreamCount: dreamRecords.length,
     dreamIds: dreamRecords.map((item) => item.id),
+    recalledShardCount: recallShards.length,
     createdAt: new Date(now).toISOString()
   });
   sleep.nextCycle += 1;
@@ -1639,7 +1665,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const dreamRecall = typeof thread?.pendingDreamRecall === "string" ? thread.pendingDreamRecall : "";
+  const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   // This stays in every request's stable system prefix. The presence of an
   // actual image remains request-specific, so an image turn can reuse the
@@ -1718,6 +1745,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       cacheContinuity.writeTokens = cachedWrite;
     }
   });
+  if (dreamRecall) thread.pendingDreamRecall = "";
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
@@ -1775,7 +1803,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
