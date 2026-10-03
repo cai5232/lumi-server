@@ -470,7 +470,9 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
     messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{\"changes\":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${prompt.user(context)}` }],
-    temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6
+    temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
+    provider: thread.cacheProvider || "zenmux",
+    model: thread.cacheModel || ""
   });
   const emotionUpdate = applyEmotionUpdateFromOutput(output);
   if (emotionUpdate) await saveEmotionState();
