@@ -1224,11 +1224,22 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Native Anthropic is a ZenMux-only mode. Backup relays are OpenAI-compatible
   // unless they get their own explicit native-API configuration.
   const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
-  const apiURL = nativeAnthropic && /\/api\/v1\/?$/i.test(configuredURL)
-    ? configuredURL.replace(/\/api\/v1\/?$/i, "/api/anthropic/v1/messages")
-    : /\/chat\/completions\/?$/i.test(configuredURL)
-    ? configuredURL
-    : `${configuredURL.replace(/\/$/, "")}/chat/completions`;
+  const normalizedBaseURL = configuredURL.replace(/\\/+$/, "");
+  const directAnthropicAPI = /^https:\\/\\/api\\.anthropic\\.com(?:\\/|$)/i.test(normalizedBaseURL);
+  const apiURL = nativeAnthropic
+    ? directAnthropicAPI
+      ? normalizedBaseURL.replace(/\\/v1$/i, "") + "/v1/messages"
+      : /\\/api\\/v1$/i.test(normalizedBaseURL)
+        ? normalizedBaseURL.replace(/\\/api\\/v1$/i, "/api/anthropic/v1/messages")
+        : /\\/messages$/i.test(normalizedBaseURL)
+          ? normalizedBaseURL
+          : normalizedBaseURL + "/messages"
+    : /\\/chat\\/completions$/i.test(normalizedBaseURL)
+      ? normalizedBaseURL
+      : normalizedBaseURL + "/chat/completions";
+  const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
+  const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
+  const mailMcpEnabled = nativeAnthropic && Boolean(mailMcpURL && mailMcpToken) && process.env.LUMI_MAIL_MCP_ENABLED !== "false";
 
   const providerMessages = messages.map((message) => {
     const { images = [], ...cleanMessage } = message;
@@ -1248,7 +1259,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
-        messages: preparedMessages.filter((message) => message.role !== "system")
+        messages: preparedMessages.filter((message) => message.role !== "system"),
+        ...(mailMcpEnabled ? {
+          mcp_servers: [{ type: "url", url: mailMcpURL, name: "lumi_mail", authorization_token: mailMcpToken }],
+          tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
+        } : {})
       }
     : { model, messages: preparedMessages, temperature, ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
@@ -1256,8 +1271,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${apiKey}`,
-      ...(nativeAnthropic ? { "anthropic-version": "2023-06-01" } : {})
+      ...(directAnthropicAPI && nativeAnthropic ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
+      ...(nativeAnthropic ? {
+        "anthropic-version": "2023-06-01",
+        ...(mailMcpEnabled ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
+      } : {})
     },
     body: JSON.stringify(requestBody)
   });
