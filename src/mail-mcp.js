@@ -1,9 +1,10 @@
 import tls from "node:tls";
 import { timingSafeEqual } from "node:crypto";
+import { normalizeMailThreadId, readSentMail, recordSentMail, searchSentMail } from "./mail-memory.js";
 
 export const MAIL_OWNER_EMAIL = "yanvn2026@outlook.com";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const tools = [
   {
     name: "mail_inbox",
@@ -57,6 +58,28 @@ const tools = [
         body: { type: "string", description: "纯文本邮件正文" }
       },
       required: ["subject", "body"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "mail_sent_search",
+    description: "检索你以前实际发出的邮件记录，可按收件人、主题或正文搜索。返回记录ID、时间、收件人、主题和正文预览。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "可选搜索词；省略时返回最近发出的邮件" },
+        limit: { type: "integer", minimum: 1, maximum: 30, description: "返回数量，默认10" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "mail_sent_read",
+    description: "按mail_sent_search给出的记录ID读取自己以前发出的邮件完整正文。",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "已发送邮件记录ID" } },
+      required: ["id"],
       additionalProperties: false
     }
   },
@@ -341,7 +364,7 @@ async function listFolders() {
   });
 }
 
-async function sendMail(args) {
+async function sendMail(args, threadId) {
   const cfg = config();
   const to = safeText(args.to || MAIL_OWNER_EMAIL, "收件人", 1000);
   const subject = safeText(args.subject, "主题", 500);
@@ -363,17 +386,25 @@ async function sendMail(args) {
       from: { name: cfg.displayName, address: cfg.address },
       to, ...(cc ? { cc } : {}), subject, text: body
     });
-    return { status: "sent", messageId: info.messageId, accepted: info.accepted };
+    let remembered = null;
+    try {
+      remembered = await recordSentMail({ threadId, to, cc, subject, body, messageId: info.messageId, accepted: info.accepted });
+    } catch (error) {
+      console.warn(`sent mail memory unavailable: ${error.message}`);
+    }
+    return { status: "sent", messageId: info.messageId, accepted: info.accepted, memorySaved: Boolean(remembered), memoryId: remembered?.id || null };
   } finally { transport.close(); }
 }
 
-async function callTool(name, args = {}) {
+async function callTool(name, args = {}, threadId = "default") {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("工具参数必须是对象");
   if (name === "mail_inbox") return inbox(args);
   if (name === "mail_read") return readMail(args);
   if (name === "mail_search") return searchMail(args);
   if (name === "mail_folders") return listFolders();
-  if (name === "mail_send") return sendMail(args);
+  if (name === "mail_send") return sendMail(args, threadId);
+  if (name === "mail_sent_search") return searchSentMail({ threadId, query: args.query, limit: args.limit });
+  if (name === "mail_sent_read") return readSentMail({ threadId, id: args.id });
   throw new Error("未知工具：" + String(name));
 }
 
@@ -405,6 +436,7 @@ async function readRequest(req) {
 export async function handleMailMcp(req, res) {
   if (req.method !== "POST") return respond(res, 405, { error: "method_not_allowed" }, { allow: "POST" });
   if (!authorized(req)) return respond(res, process.env.LUMI_MAIL_MCP_TOKEN ? 401 : 503, { error: process.env.LUMI_MAIL_MCP_TOKEN ? "unauthorized" : "mail_mcp_not_configured" });
+  const threadId = normalizeMailThreadId(new URL(req.url || "/mcp", "http://localhost").searchParams.get("threadId"));
   let message;
   try { message = await readRequest(req); }
   catch { return respond(res, 400, { error: "invalid_json" }); }
@@ -428,7 +460,7 @@ export async function handleMailMcp(req, res) {
       result = { tools };
     } else if (message.method === "tools/call") {
       const params = message.params || {};
-      const output = await callTool(params.name, params.arguments || {});
+      const output = await callTool(params.name, params.arguments || {}, threadId);
       result = { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], isError: false };
     } else {
       return respond(res, 200, { jsonrpc: "2.0", id: id ?? null, error: { code: -32601, message: "Method not found" } });

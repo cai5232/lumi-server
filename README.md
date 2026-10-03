@@ -71,7 +71,9 @@ Zeabur 环境变量：
 
 此接法要求 Claude API 能从公网 HTTPS 访问 Lumi 的 `/mcp` 地址。也可以把此地址和请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>` 配到 Claude Desktop、Claude Code 等 MCP 客户端。MCP 的 `mail_send` 会立即发信。“发给我”默认发至 `yanvn2026@outlook.com`。用户明确要求发信时，Lumi 会直接发送，不会二次确认；自主唤醒只能执行聊天历史中明确的具体发信请求，不会只因自行判断就发起邮件。邮件正文不增加模型 token 上限；服务器仍有 100000 字符上限，网易 SMTP 也有服务端大小限制。
 
-自主唤醒继续走当前聊天的模型和上下文：它沿用当前线程选定的模型、聊天历史、压缩摘要、检索记忆和情绪状态。唤醒请求会明确列出当时可用的能力及用法：窥屏仅在用户启用该动作且截图邮件/快捷指令配置完整时出现；邮箱工具仅在 Claude MCP Connector 和 163 邮箱配置完整时出现。模型可用 `mail_inbox`、`mail_search`、`mail_read` 获取邮件内容，用 `mail_send` 立即发信；只有上下文中存在用户明确的发送请求或授权时才能在自主唤醒中发送。
+自主唤醒继续走当前聊天的模型和上下文：它沿用当前线程选定的模型、聊天历史、压缩摘要、检索记忆和情绪状态。唤醒请求会明确列出当时可用的能力及用法：窥屏仅在用户启用该动作且截图邮件/快捷指令配置完整时出现；邮箱工具仅在 Claude MCP Connector 和 163 邮箱配置完整时出现。模型可用 `mail_inbox`、`mail_search`、`mail_read` 获取邮件内容，用 `mail_send` 立即发信；自主唤醒只执行聊天历史中明确的具体发信请求，无需二次确认。
+
+`mail_send` 成功后，后端按聊天线程把收件人、主题、完整正文、发信时间和 SMTP 消息 ID 写入 `LUMI_DATA_DIR/sent-mail.jsonl`。下一轮普通聊天和自主唤醒会自动看到最近五封已发送邮件的摘要；模型还可用 `mail_sent_search` 检索更早的发信记录，并用 `mail_sent_read` 读取完整正文。这个记录与聊天历史、压缩摘要、长期记忆检索一同进入后续模型请求；请将 `LUMI_DATA_DIR` 放在 Zeabur 持久化卷上，避免部署重启后丢失发信记录。
 
 ## API
 
