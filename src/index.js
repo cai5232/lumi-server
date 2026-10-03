@@ -67,6 +67,15 @@ function providerConfig(id = "zenmux", modelOverride = "") {
   return { ...config, model: modelOverride || config.model };
 }
 
+function mailMcpConfiguredFor(provider = "zenmux", model = "") {
+  return provider === "zenmux" &&
+    process.env.LUMI_NATIVE_ANTHROPIC === "true" &&
+    /anthropic|claude/i.test(model || process.env.LUMI_MODEL_NAME || "") &&
+    Boolean(process.env.LUMI_MAIL_MCP_URL && process.env.LUMI_MAIL_MCP_TOKEN &&
+      process.env.LUMI_MAIL_ADDRESS && process.env.LUMI_MAIL_PASSWORD) &&
+    process.env.LUMI_MAIL_MCP_ENABLED !== "false";
+}
+
 async function listProviderModels(config) {
   try {
     const baseURL = String(config.url).replace(/\/chat\/completions\/?$/i, "").replace(/\/$/, "");
@@ -1239,7 +1248,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       : normalizedBaseURL + "/chat/completions";
   const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
   const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
-  const mailMcpEnabled = nativeAnthropic && Boolean(mailMcpURL && mailMcpToken) && process.env.LUMI_MAIL_MCP_ENABLED !== "false";
+  const mailMcpEnabled = nativeAnthropic && mailMcpConfiguredFor(provider, model);
 
   const providerMessages = messages.map((message) => {
     const { images = [], ...cleanMessage } = message;
