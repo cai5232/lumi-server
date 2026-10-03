@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
 import { createServer } from "node:http";
+import { WorldBookStore, evaluateBooks, injectBooks } from "./world-book.js";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
 import { handleMailMcp, MAIL_OWNER_EMAIL } from "./mail-mcp.js";
@@ -11,6 +12,7 @@ import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTI
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const threadPath = join(dataDir, "threads.json");
 const emotionStatePath = join(dataDir, "emotion-state.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
@@ -24,7 +26,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1749,16 +1751,29 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
-  const cacheSystem = system;
+  let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
   // persisted display history can change hidden proactive markers, timestamps,
   // memory wrappers, or role coalescing and causes the next real message to miss.
   const previousUser = [...relevantMessages].reverse().find((message) => message.role === "user");
+  const worldBookSettings = await worldBookStore.read();
+  const selectedBookIds = Array.isArray(thread.worldBookIds) ? thread.worldBookIds : worldBookSettings.activeBookIds;
+  const activeBooks = worldBookSettings.books.filter(book => selectedBookIds.includes(book.id));
+  const actualHistory = (callMode ? callHistory : thread.messages || []).filter(m => ['user', 'assistant'].includes(m.role)).map(m => ({ role: m.role, content: m.content || '', attachments: m.imageAttachmentCount || 0 }));
+  if (!proactive) actualHistory.push({ role: 'user', content: input, attachments: images.length });
+  const activationKey = callMode ? 'callWorldBookActivation' : 'worldBookActivation';
+  const activation = evaluateBooks(activeBooks, [...history, { role: 'user', content: input }], actualHistory, thread[activationKey]);
+  thread[activationKey] = activation.state;
+  const worldBookSignature = createHash('sha256').update(JSON.stringify(activation.entries)).digest('hex');
+  const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
+  cacheSystem = injectedSystem[0].content;
   const previousUserContent = previousUser
     ? (previousUser.modelContent || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
   const exactCachedPrefix = Array.isArray(thread?.cacheKeepaliveMessages) &&
+    thread.worldBookSignature === worldBookSignature &&
+    !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
     thread.cacheKeepaliveMessages.at(-1)?.role === "user" &&
     (thread.cacheKeepaliveSnapshotKind === "proactive" ||
@@ -1781,6 +1796,8 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
         // invalidates the cache prefix even when all earlier chat turns are unchanged.
         { role: "user", content: userModelContent, images }
       ];
+  if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
+  thread.worldBookSignature = worldBookSignature;
   // Compare the actual cache boundary in this request with the preceding
   // keepalive. Only hashes and booleans are stored; prompts stay private.
   const previousKeepaliveAt = Number(thread.cacheKeepaliveAt || 0);
@@ -2274,6 +2291,30 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
+    if (url.pathname === '/v1/world-books') {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: 'unauthorized' });
+      if (req.method === 'GET') return send(res, 200, await worldBookStore.read());
+      if (req.method === 'PUT') {
+        try { return send(res, 200, await worldBookStore.save(await body(req))); }
+        catch (e) { return send(res, e.status || 400, { error: e.message }); }
+      }
+      return send(res, 405, { error: 'method_not_allowed' });
+    }
+    const bookSelectionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/world-books$/);
+    if (bookSelectionMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: 'unauthorized' });
+      const threads = await readThreads(), id = decodeURIComponent(bookSelectionMatch[1]);
+      if (!threads[id]) return send(res, 404, { error: 'thread_not_found' });
+      if (req.method === 'GET') return send(res, 200, { bookIds: threads[id].worldBookIds ?? null });
+      if (req.method === 'PUT') {
+        const input = await body(req), settings = await worldBookStore.read();
+        if (input.bookIds !== null && (!Array.isArray(input.bookIds) || input.bookIds.some(id => !settings.books.some(b => b.id === id && b.enabled)))) return send(res, 400, { error: 'invalid_book_ids' });
+        if (input.bookIds === null) delete threads[id].worldBookIds;
+        else threads[id].worldBookIds = [...new Set(input.bookIds)];
+        await saveThreads(threads); return send(res, 200, { bookIds: threads[id].worldBookIds ?? null });
+      }
+      return send(res, 405, { error: 'method_not_allowed' });
+    }
     if (url.pathname === "/v1/internal/cache-keepalive" && req.method === "POST") {
       const expected = String(process.env.LUMI_CACHE_KEEPALIVE_TOKEN || process.env.LUMI_PUSH_API_TOKEN || "");
       const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");

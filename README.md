@@ -95,3 +95,11 @@ Zeabur 环境变量：
 `<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
 
 每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会移除该标记并在客户端显示“-------沈屿记下了这一刻-------”。
+
+### 世界书
+
+在 iPhone 的「设置 → 世界书管理」添加世界书和条目，选择「全局选用」后点击「保存到后端」。支持 Kelivo JSON 导入/导出、关键词或正则匹配、大小写、常驻、扫描深度、优先级、五种插入位置、消息角色和持续/冷却/延迟规则。时间规则统计真实用户及助手消息，重复准备同一历史不会重复计数。
+
+`GET /v1/world-books` 和 `PUT /v1/world-books` 使用现有 `LUMI_PUSH_API_TOKEN` 的 Bearer 鉴权。保存时发送读取时的 `revision`，过期版本返回 409，避免覆盖其他设备修改。数据原子持久化在 `LUMI_DATA_DIR/world-books.json`。`GET/PUT /v1/chats/:id/world-books` 的 `bookIds: null` 继承全局选择，空数组表示本聊天不使用世界书。预览仅展示文本匹配；实际计时由服务器聊天记录决定。
+
+世界书行为移植自 Kelivo（AGPL-3.0），详见 `THIRD_PARTY_NOTICES.md` 和 `LICENSES/Kelivo-AGPL-3.0.txt`。对应源码：https://github.com/cai5232/lumi-server。

@@ -1,3 +1,17 @@
+Kelivo world books
+=================
+
+The world-book model, activation rules and injection behavior in
+`src/world-book.js` are ported from Chevey339/kelivo, revision
+86de75b75c66f2c9b9de4299069068bd18f53766:
+https://github.com/Chevey339/kelivo
+
+Upstream is licensed under GNU Affero General Public License version 3.
+The license is included in `LICENSES/Kelivo-AGPL-3.0.txt`. The combined backend
+including this adaptation is provided under AGPL-3.0. Its corresponding source
+is available at https://github.com/cai5232/lumi-server.
+Port and integration changes: 2026-10-03.
+
 Murmur-50Feet emotional drive model
 ===================================
 
