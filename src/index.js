@@ -298,7 +298,9 @@ async function generateAutonomousMessage(thread, kind) {
       { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${recent || "还没有聊天记录。"}` }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
-    ...(kind === "dream" ? { maxOutputTokens: 2048 } : { useMaximumModelOutput: true })
+    ...(kind === "dream"
+      ? { maxOutputTokens: 2048 }
+      : { maxOutputTokens: Number(process.env.LUMI_PROACTIVE_MAX_OUTPUT_TOKENS || 8192) })
   });
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
 }
@@ -328,7 +330,14 @@ async function generateSentinelWake(thread) {
     action,
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
     nextWakeMinutes,
-    emotionUpdate: generated.emotionUpdate
+    emotionUpdate: generated.emotionUpdate,
+    cacheSnapshot: {
+      messages: generated.cacheKeepaliveMessages,
+      assistantContent: generated.modelContent,
+      system: generated.cacheSystem,
+      requestStartedAt: generated.cacheRequestStartedAt,
+      continuity: generated.cacheContinuity
+    }
   };
 }
 
@@ -718,6 +727,19 @@ async function runBackgroundPulse() {
       activeChatThreads.add(thread.id);
       try {
         const wake = await generateSentinelWake(thread);
+        // The autonomous turn can include an email MCP action. Persist its exact
+        // request prefix and assistant output so the next visible chat continues
+        // from this turn instead of falling back to the previous chat snapshot.
+        if (wake.cacheSnapshot?.messages?.length && wake.cacheSnapshot.assistantContent) {
+          thread.cacheKeepaliveMessages = wake.cacheSnapshot.messages;
+          thread.cacheKeepaliveAssistantContent = wake.cacheSnapshot.assistantContent;
+          thread.cacheKeepaliveSnapshotKind = "proactive";
+          thread.cacheSystem = wake.cacheSnapshot.system || thread.cacheSystem;
+          thread.cacheRequestStartedAt = wake.cacheSnapshot.requestStartedAt || Date.now();
+          thread.cacheLastChatContinuity = wake.cacheSnapshot.continuity || null;
+          thread.cacheProvider = thread.cacheProvider || "zenmux";
+          thread.cacheModel = thread.cacheModel || providerConfig(thread.cacheProvider).model;
+        }
         let screenSeen = false;
         if (wake.action === "screen") {
           let screen = null;
@@ -1823,7 +1845,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
-    useMaximumModelOutput: proactive,
+    useMaximumModelOutput: false,
     messages: cacheRequestMessages,
     provider,
     model,
@@ -2132,7 +2154,11 @@ function galleryDecision(value) {
 }
 
 function diaryText(value, fallback = "", maximum = 1400) {
-  const normalized = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  // Keep intentional line breaks in diary bodies while normalizing tabs and
+  // excessive blank lines. The client renders the body as a multiline Text.
+  const normalized = typeof value === "string"
+    ? value.replace(/\r\n?/g, "\n").replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim()
+    : "";
   return (normalized || fallback).slice(0, maximum);
 }
 
