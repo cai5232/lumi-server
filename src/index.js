@@ -298,9 +298,7 @@ async function generateAutonomousMessage(thread, kind) {
       { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${recent || "还没有聊天记录。"}` }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
-    ...(kind === "dream"
-      ? { maxOutputTokens: 2048 }
-      : { maxOutputTokens: Number(process.env.LUMI_PROACTIVE_MAX_OUTPUT_TOKENS || 8192) })
+    ...(kind === "dream" ? { maxOutputTokens: 2048 } : { useMaximumModelOutput: true })
   });
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
 }
@@ -1845,7 +1843,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
-    useMaximumModelOutput: false,
+    useMaximumModelOutput: proactive,
     messages: cacheRequestMessages,
     provider,
     model,
