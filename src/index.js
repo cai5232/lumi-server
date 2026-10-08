@@ -1777,7 +1777,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodNotes = !callMode && !proactive ? await foodContext() : "";
   const foodDirective = foodNotes ? `\n\n<food_notebook_context>\n${foodNotes}\n</food_notebook_context>\n若用户明确要求记录、更新口味、查询饮食本、评价旧菜或帮忙决定吃什么，可以使用饮食本工具。记录前只使用用户明确提供的信息，不得猜店名、菜名、价格或评价。需要调用工具时，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，不要同时写面向用户的回复；等待系统返回执行结果后，再自然回复。工具名和参数定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters }))) }` : "";
-  const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -1870,7 +1870,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   });
   let foodToolUsed = false;
   for (let toolTurn = 0; toolTurn < 4; toolTurn += 1) {
-    const match = raw.match(/<food_tool\\b[^>]*>([\\s\\S]*?)<\\/food_tool>/i);
+    const match = raw.match(/<food_tool\b[^>]*>([\s\S]*?)<\/food_tool>/i);
     if (!match || callMode || proactive) break;
     let request;
     try { request = JSON.parse(match[1]); } catch { break; }
