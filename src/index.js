@@ -27,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-on-demand-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1775,8 +1775,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const foodNotes = !callMode && !proactive ? await foodContext() : "";
-  const foodDirective = foodNotes ? `\n\n<food_notebook_context>\n${foodNotes}\n</food_notebook_context>\n若用户明确要求记录、更新口味、查询饮食本、评价旧菜或帮忙决定吃什么，可以使用饮食本工具。记录前只使用用户明确提供的信息，不得猜店名、菜名、价格或评价。需要调用工具时，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，不要同时写面向用户的回复；等待系统返回执行结果后，再自然回复。工具名和参数定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters }))) }` : "";
+  const foodDirective = !callMode && !proactive
+    ? `\n\n<available_feature name="food_notebook">你可以按需使用饮食本工具，查询近期吃过什么、店铺和口味，记录用户明确说过的饮食，更新口味或旧菜评价，或推荐吃什么。不要默认读取饮食记录；只有当用户提出相关需求，或确实需要饮食记录才能回答时，才选择调用相应工具。无需饮食本信息时直接正常回复。若调用工具，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，等待系统执行后再自然回复；记录前不得猜店名、菜名、价格或评价。可用工具定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters })))}</available_feature>`
+    : "";
   const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
