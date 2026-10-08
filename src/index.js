@@ -1776,7 +1776,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode && !proactive
-    ? `\n\n<available_feature name="food_notebook">你可以按需使用饮食本工具，查询近期吃过什么、店铺和口味，记录用户明确说过的饮食，更新口味或旧菜评价，或推荐吃什么。不要默认读取饮食记录；只有当用户提出相关需求，或确实需要饮食记录才能回答时，才选择调用相应工具。无需饮食本信息时直接正常回复。若调用工具，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，等待系统执行后再自然回复；记录前不得猜店名、菜名、价格或评价。可用工具定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters })))}</available_feature>`
+    ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。需要时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，等待返回后再选择具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
     : "";
   const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
@@ -1870,6 +1870,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     }
   });
   let foodToolUsed = false;
+  let foodToolsDiscovered = false;
   for (let toolTurn = 0; toolTurn < 4; toolTurn += 1) {
     const match = raw.match(/<food_tool\b[^>]*>([\s\S]*?)<\/food_tool>/i);
     if (!match || callMode || proactive) break;
@@ -1878,8 +1879,22 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     if (!request || typeof request.name !== "string") break;
     foodToolUsed = true;
     let result;
-    try { result = await executeFoodTool(request.name, request.arguments || {}); }
-    catch (error) { result = `操作没有完成：${error.message}`; }
+    if (request.name === "discover_food_tools") {
+      const definitions = foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters }));
+      const context = await foodContext();
+      result = `已按需加载饮食本工具。可用工具定义：${JSON.stringify(definitions)}\n当前饮食本信息：\n${context}\n请按用户当前需求选择工具；如果无需操作，直接自然回复。`;
+      foodToolsDiscovered = true;
+    } else {
+      let discoveryContext = "";
+      if (!foodToolsDiscovered) {
+        const definitions = foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters }));
+        const context = await foodContext();
+        discoveryContext = `已按需加载饮食本工具。可用工具定义：${JSON.stringify(definitions)}\n当前饮食本信息：\n${context}\n`;
+        foodToolsDiscovered = true;
+      }
+      try { result = `${discoveryContext}${await executeFoodTool(request.name, request.arguments || {})}`; }
+      catch (error) { result = `${discoveryContext}操作没有完成：${error.message}`; }
+    }
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
     raw = await callModel({ messages: cacheRequestMessages, provider, model, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
