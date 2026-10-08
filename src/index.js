@@ -1752,7 +1752,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const sentinelStatus = !proactive && proactiveConfig.enabled
     ? `\n<sentinel_status>这是服务端当前真实的自主联系状态，回答用户关于主动联系/下次唤醒的问题时以此为准，不要要求用户手动添加 next_wakeup 标签，也不要编造。状态：${activity.mode === "sleeping" ? "睡眠中" : "哨兵待命"}；下一次系统唤醒时间：${wakeTime}（北京时间）；时间来源：${activity.nextWakeSource === "ai" ? "AI 已决定" : activity.nextWakeSource === "settings" ? "用户设置的首次静默时长" : "当前没有有效安排"}。若来源是用户设置，只能说系统已按用户设置安排首次触发，不能谎称是你亲自决定；若来源是 AI，才可说是自己安排。此状态和内部标签不可原样展示给用户。</sentinel_status>`
     : "";
-  const sentMailRecords = mailMcpConfiguredFor(provider, model || thread?.cacheModel || "")
+  // Sent-mail records are historical context. Include them only when this
+  // turn explicitly discusses email, rather than replaying them on every reply.
+  const userAskedAboutMail = !proactive && !callMode &&
+    /邮件|发信|已发|寄出|收件人|收件箱|邮箱|那封信|之前.{0,8}信|email|sent mail/i.test(String(input || ""));
+  const sentMailRecords = userAskedAboutMail && mailMcpConfiguredFor(provider, model || thread?.cacheModel || "")
     ? await searchSentMail({ threadId: thread.id, limit: 5 })
     : [];
   const sentMailMemory = sentMailRecords.length
