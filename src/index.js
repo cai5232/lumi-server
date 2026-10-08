@@ -9,6 +9,7 @@ import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreen
 import { handleMailMcp, MAIL_OWNER_EMAIL } from "./mail-mcp.js";
 import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
+import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
@@ -26,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1774,7 +1775,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const foodNotes = !callMode && !proactive ? await foodContext() : "";
+  const foodDirective = foodNotes ? `\n\n<food_notebook_context>\n${foodNotes}\n</food_notebook_context>\n若用户明确要求记录、更新口味、查询饮食本、评价旧菜或帮忙决定吃什么，可以使用饮食本工具。记录前只使用用户明确提供的信息，不得猜店名、菜名、价格或评价。需要调用工具时，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，不要同时写面向用户的回复；等待系统返回执行结果后，再自然回复。工具名和参数定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters }))) }` : "";
+  const userModelContent = `${systemContext}${emotionDirective}\\n\\n${dreamRecall}${dreamRecall ? "\\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -1801,6 +1804,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
     thread.cacheKeepaliveMessages.at(-1)?.role === "user" &&
     (thread.cacheKeepaliveSnapshotKind === "proactive" ||
+      thread.cacheKeepaliveSnapshotKind === "food_tool" ||
       thread.cacheKeepaliveMessages.at(-1)?.content === previousUserContent) &&
     thread.cacheSystem === cacheSystem &&
     (!model || model === thread.cacheModel) &&
@@ -1843,7 +1847,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : null;
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
-  const raw = await callModel({
+  let raw = await callModel({
     maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
@@ -1864,6 +1868,20 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       cacheContinuity.writeTokens = cachedWrite;
     }
   });
+  let foodToolUsed = false;
+  for (let toolTurn = 0; toolTurn < 4; toolTurn += 1) {
+    const match = raw.match(/<food_tool\\b[^>]*>([\\s\\S]*?)<\\/food_tool>/i);
+    if (!match || callMode || proactive) break;
+    let request;
+    try { request = JSON.parse(match[1]); } catch { break; }
+    if (!request || typeof request.name !== "string") break;
+    foodToolUsed = true;
+    let result;
+    try { result = await executeFoodTool(request.name, request.arguments || {}); }
+    catch (error) { result = `操作没有完成：${error.message}`; }
+    cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
+    raw = await callModel({ messages: cacheRequestMessages, provider, model, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+  }
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
@@ -1921,7 +1939,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
@@ -2318,6 +2336,32 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
+      res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
+    }
+    if (url.pathname.startsWith("/v1/food/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const path = url.pathname.slice("/v1/food".length);
+      const staticFiles = new Set(["/index.html", "/app.js", "/icon.svg", "/dishes.txt", "/NOTICE.md", "/UPSTREAM-LICENSE"]);
+      if (req.method === "GET" && staticFiles.has(path)) {
+        const name = path === "/index.html" ? "index.html" : path.slice(1);
+        try {
+          const asset = await readFile(join(process.cwd(), "public/food", name));
+          const type = name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".svg") ? "image/svg+xml" : name.endsWith(".html") ? "text/html; charset=utf-8" : "text/plain; charset=utf-8";
+          res.writeHead(200, { "content-type": type, "cache-control": "no-cache" }); res.end(asset);
+        } catch { return send(res, 404, { error: "not_found" }); }
+        return;
+      }
+      if (req.method === "GET" && path === "/food/tools") return send(res, 200, { tools: foodTools });
+      if (req.method === "GET" && path === "/food/context") return send(res, 200, { context: await foodContext() });
+      if (req.method === "GET" && path === "/api/food") return send(res, 200, await getFoodBook());
+      if (req.method === "POST") {
+        const input = await body(req);
+        if (path === "/food/ai") return send(res, 200, { text: await executeFoodTool(input.tool, input.input || {}) });
+        return send(res, 200, await mutateFood(path, input));
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
     if (url.pathname === '/v1/world-books') {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: 'unauthorized' });
@@ -3010,7 +3054,7 @@ const server = createServer(async (req, res) => {
       } else {
         threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
         threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
-        threads[id].cacheKeepaliveSnapshotKind = "chat";
+        threads[id].cacheKeepaliveSnapshotKind = generated.foodToolUsed ? "food_tool" : "chat";
       }
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
