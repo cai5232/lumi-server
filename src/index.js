@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
+import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
@@ -22,7 +23,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-food-notebook-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1628,7 +1629,9 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     ? `<internal_proactive_nudge>这是系统哨兵按用户设置的首次静默时长或你上次亲自写下的下次唤醒时间触发的自主联系，不是用户刚刚发来的真实消息。请像正常聊天一样，依据完整聊天历史、压缩摘要和长期记忆，自然地说你此刻真正想说的话；由你决定内容与长度，不设简短要求，不要固定播报“我醒了”。不要把上下文标签、记忆或调度信息复述给用户。输出正常聊天正文，并附一段 <thinking>第一人称、可供头像弹窗展示的心声，不是推理过程</thinking>。然后在正文末尾附加且仅附加一段内部决策 <sentinel_decision>{"nextWakeMinutes":整数,"action":"${activeSentinelActions.join("|")}"}</sentinel_decision>，nextWakeMinutes 由你决定且必须为 1 到 1440 的整数；action 只能从 ${activeSentinelActions.join("、")} 中选。内部决策标签不能显示给用户。</internal_proactive_nudge>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${proactiveDirective}${input}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const foodNotes = !callMode && !proactive ? await foodContext() : "";
+  const foodDirective = foodNotes ? `\n\n<food_notebook_context>\n${foodNotes}\n</food_notebook_context>\n若用户明确要求记录、更新口味、查询饮食本、评价旧菜或帮忙决定吃什么，可以使用饮食本工具。记录前只使用用户明确提供的信息，不得猜店名、菜名、价格或评价。需要调用工具时，仅输出一个 <food_tool>{"name":"工具名","arguments":{}}</food_tool>，不要同时写面向用户的回复；等待系统返回执行结果后，再自然回复。工具名和参数定义：${JSON.stringify(foodTools.map(item => ({ name: item.function.name, description: item.function.description, parameters: item.function.parameters })))}` : "";
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = `${system}\n\n你可以自行决定要不要使用颜文字，不必每条都用。若决定使用用户的颜文字库，只在回复末尾输出 <emoji_mood>一个可用心情标签</emoji_mood>；没有决定使用就不要输出此标签。系统随后只读取这个心情里的颜文字，标签不要展示给用户。你可以使用标签添加记忆，自行判断这需不需要记录下这一刻，不要太频繁也不要一点不记。需要记忆时仅在回复末尾添加 <memory>要记住的原文</memory>，不要向用户解释这个标签。当前用户消息可能包含 <internal_context_compaction>；仅当它存在时，按其中要求在正常回复后输出私有 <context_summary>，该标签及内容绝不能展示或解释给用户。当前用户消息若包含 <internal_call_request> 或 <internal_call_turn>，这是电话场景：只输出对方能听见或看见的自然说话内容，绝不输出 <thinking>、思考过程、动作说明或任何解释内部标签的文字。仅当本轮 <speech_enabled>true</speech_enabled> 时，你可以自主判断是否值得发一条语音，不要每条都配语音；决定使用时才在回复最后附加 <speech>单独要朗读的一句话</speech>。这句话必须和正文不同，不得复述或改写正文；不要使用颜文字、emoji、动作描写、位置提示、换行或任何标签。如果本轮标记为 false，禁止输出 speech 标签。普通文字回复始终照常显示，语音标签只供系统生成音频，绝不能把标签展示给用户。thinking 中不要讨论 speech_enabled、语音开关或是否发语音。`;
   // This stays in every request's stable system prefix. The presence of an
   // actual image remains request-specific, so an image turn can reuse the
@@ -1687,7 +1690,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
     : null;
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
-  const raw = await callModel({
+  let raw = await callModel({
     maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
@@ -1707,6 +1710,20 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
       cacheContinuity.writeTokens = cachedWrite;
     }
   });
+  let foodToolUsed = false;
+  for (let toolTurn = 0; toolTurn < 4; toolTurn += 1) {
+    const match = raw.match(/<food_tool\b[^>]*>([\s\S]*?)<\/food_tool>/i);
+    if (!match || callMode || proactive) break;
+    let request;
+    try { request = JSON.parse(match[1]); } catch { break; }
+    if (!request || typeof request.name !== "string") break;
+    foodToolUsed = true;
+    let result;
+    try { result = await executeFoodTool(request.name, request.arguments || {}); }
+    catch (error) { result = `操作没有完成：${error.message}`; }
+    cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
+    raw = await callModel({ messages: cacheRequestMessages, provider, model, maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : undefined, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+  }
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
@@ -1768,7 +1785,7 @@ async function generateReply({ input, images = [], emojiCatalog = {}, allowSpeec
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, foodToolUsed, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
 }
 
 async function checkCacheKeepalive() {
@@ -2155,6 +2172,32 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
+      res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
+    }
+    if (url.pathname.startsWith("/v1/food/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const path = url.pathname.slice("/v1/food".length);
+      const staticFiles = new Set(["/index.html", "/app.js", "/icon.svg", "/dishes.txt", "/NOTICE.md", "/UPSTREAM-LICENSE"]);
+      if (req.method === "GET" && staticFiles.has(path)) {
+        const name = path === "/index.html" ? "index.html" : path.slice(1);
+        try {
+          const asset = await readFile(join(process.cwd(), "public/food", name));
+          const type = name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".svg") ? "image/svg+xml" : name.endsWith(".html") ? "text/html; charset=utf-8" : "text/plain; charset=utf-8";
+          res.writeHead(200, { "content-type": type, "cache-control": "no-cache" }); res.end(asset);
+        } catch { return send(res, 404, { error: "not_found" }); }
+        return;
+      }
+      if (req.method === "GET" && path === "/food/tools") return send(res, 200, { tools: foodTools });
+      if (req.method === "GET" && path === "/food/context") return send(res, 200, { context: await foodContext() });
+      if (req.method === "GET" && path === "/api/food") return send(res, 200, await getFoodBook());
+      if (req.method === "POST") {
+        const input = await body(req);
+        if (path === "/food/ai") return send(res, 200, { text: await executeFoodTool(input.tool, input.input || {}) });
+        return send(res, 200, await mutateFood(path, input));
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
     if (url.pathname === "/v1/internal/cache-keepalive" && req.method === "POST") {
       const expected = String(process.env.LUMI_CACHE_KEEPALIVE_TOKEN || process.env.LUMI_PUSH_API_TOKEN || "");
       const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
@@ -2821,7 +2864,7 @@ const server = createServer(async (req, res) => {
       } else {
         threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
         threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
-        threads[id].cacheKeepaliveSnapshotKind = "chat";
+        threads[id].cacheKeepaliveSnapshotKind = generated.foodToolUsed ? "food_tool" : "chat";
       }
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
       keepaliveState.lastThreadId = id;
