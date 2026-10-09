@@ -1833,12 +1833,12 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const previousRequestAt = Number(thread.cacheRequestStartedAt || 0);
   const cacheContinuity = previousKeepaliveAt >= previousRequestAt && thread.cacheKeepalivePrefixHash
     ? (() => {
-        const model = process.env.LUMI_MODEL_NAME || "";
-        const actualHash = assistantCachePrefixHash(cacheRequestMessages, model);
+        const effectiveModel = model || providerConfig(provider).model;
+        const actualHash = assistantCachePrefixHash(cacheRequestMessages, effectiveModel);
         return {
           keepaliveAt: new Date(previousKeepaliveAt).toISOString(),
           sameSystemPrompt: cacheSystem === thread.cacheSystem,
-          sameModel: model === thread.cacheModel,
+          sameModel: effectiveModel === thread.cacheModel,
           sameAssistantPrefix: actualHash !== null && actualHash === thread.cacheKeepalivePrefixHash,
           assistantBreakpointPresent: actualHash !== null,
           keepalivePrefixHash: thread.cacheKeepalivePrefixHash.slice(0, 16),
@@ -1986,7 +1986,8 @@ async function checkCacheKeepalive() {
       Number(thread.cacheKeepaliveAt || 0),
       keepaliveState.lastThreadId === id ? Number(keepaliveState.lastRequestAt || 0) : 0
     );
-    const lastRealAt = Math.max(Date.parse(lastUser.createdAt), lastRequestAt);
+    // Keepalive probes are not user activity. An idle cap must not be extended by the probes themselves.
+    const lastRealAt = Date.parse(lastUser.createdAt);
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
