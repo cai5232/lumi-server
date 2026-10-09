@@ -1300,7 +1300,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
         } : {})
       }
-    : { model, messages: preparedMessages, temperature, ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
+    : { model, messages: preparedMessages, ...(!/claude[-_/]?sonnet[-_/]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
   const response = await fetch(apiURL, {
     method: "POST",
