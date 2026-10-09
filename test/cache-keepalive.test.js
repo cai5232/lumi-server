@@ -41,6 +41,58 @@ async function stopBackend(child) {
   await stopped;
 }
 
+test("keepalive idle cap is measured from user activity, not previous probes", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "lumi-idle-cap-"));
+  const provider = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain request */ }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(req.method === "GET" ? "[]" : JSON.stringify({
+      choices: [{ message: { content: "ack" } }],
+      usage: { cache_read_input_tokens: 2048 }
+    }));
+  });
+  const providerPort = await listen(provider);
+  const port = await freePort();
+  const env = {
+    LUMI_DATA_DIR: dataDir,
+    LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
+    LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`,
+    LUMI_MODEL_API_KEY: "test",
+    LUMI_MODEL_NAME: "anthropic/claude-sonnet-4.6",
+    LUMI_CACHE_KEEPALIVE_ENABLED: "true",
+    LUMI_CACHE_KEEPALIVE_TOKEN: "test",
+    LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS: "3600000"
+  };
+  let child;
+  try {
+    child = await startBackend(port, env);
+    const base = `http://127.0.0.1:${port}`;
+    const chat = await fetch(`${base}/v1/chats/default/messages`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ content: "缓存测试", systemPrompt: "稳定的系统提示词".repeat(500) })
+    }).then(r => r.json());
+    assert.ok(chat.assistantMessage);
+    await stopBackend(child);
+    child = undefined;
+    const path = join(dataDir, "threads.json");
+    const threads = JSON.parse(await readFile(path, "utf8"));
+    threads.default.messages.find(m => m.role === "user").createdAt = new Date(Date.now() - 2 * 3600_000).toISOString();
+    threads.default.cacheRequestStartedAt = Date.now() - 46 * 60_000;
+    threads.default.cacheKeepaliveAt = Date.now() - 46 * 60_000;
+    await writeFile(path, JSON.stringify(threads));
+    child = await startBackend(port, env);
+    const result = await fetch(`${base}/v1/internal/cache-keepalive`, {
+      method: "POST", headers: { authorization: "Bearer test" }
+    }).then(r => r.json());
+    assert.equal(result.attempted, false);
+    assert.equal(result.reason, "too_idle");
+  } finally {
+    await stopBackend(child);
+    await new Promise(resolve => provider.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("keepalive reads the old prefix and the next chat reads its assistant prefix", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "lumi-cache-test-"));
   const seen = [];
