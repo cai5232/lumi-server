@@ -1326,7 +1326,14 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
-        system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
+        system: customProvider
+          // A number of Anthropic-compatible gateways advertise the Messages
+          // API but reject Anthropic's array-of-content-blocks system format.
+          // Plain text is valid in the Anthropic API and is more portable.
+          ? preparedMessages.filter((message) => message.role === "system").map((message) => Array.isArray(message.content)
+            ? message.content.map((block) => typeof block === "string" ? block : String(block?.text || "")).join("\n")
+            : String(message.content || "")).filter(Boolean).join("\n\n")
+          : preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...(mailMcpEnabled ? {
