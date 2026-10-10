@@ -2102,8 +2102,7 @@ const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech
 const elevenLabsModels = ["eleven_v4", "eleven_v4_turbo", "eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"];
 async function synthesizeSpeech(text, settings) {
   if (!settings?.apiKey || !settings?.voiceID) return null;
-  const speechLimit = Math.max(240, Math.min(Number(settings.maxChars || 1800), 1800));
-  const speechText = spokenReply(text).slice(0, speechLimit);
+  const speechText = spokenReply(text);
   if (!speechText) return null;
   if (settings.provider === "elevenlabs") {
     if (!elevenLabsModels.includes(settings.model)) throw new Error("ElevenLabs 语音模型不受支持");
@@ -3153,9 +3152,17 @@ const server = createServer(async (req, res) => {
       const visibleContent = dial.content;
       const contentType = generated.htmlContent ? (visibleContent ? "mixed" : "html") : "text";
       let speech = null;
-      if (input.tts?.enabled && generated.speechText && !generated.htmlContent) {
-        try { speech = await synthesizeSpeech(generated.speechText, input.tts); }
-        catch (error) { console.warn(`speech synthesis skipped: ${(error.message || String(error)).slice(0, 200)}`); }
+      let speechError = null;
+      const claimsSpeechWasSent = /(?:语音|音频)(?:消息)?[^。！？\n]{0,16}(?:发了|发给你|发出|送达)|(?:发了|发给你|发出)[^。！？\n]{0,16}(?:语音|音频)/i.test(visibleContent);
+      const speechText = generated.speechText || (claimsSpeechWasSent ? visibleContent : "");
+      if (input.tts?.enabled && speechText && !generated.htmlContent) {
+        try { speech = await synthesizeSpeech(speechText, input.tts); }
+        catch (error) {
+          speechError = (error.message || String(error)).slice(0, 300);
+          console.warn(`speech synthesis failed: ${speechError}`);
+        }
+      } else if (claimsSpeechWasSent && !input.tts?.enabled) {
+        speechError = "语音功能未开启，无法生成音频";
       }
       const assistantMessage = {
         id: randomUUID(),
@@ -3208,7 +3215,7 @@ const server = createServer(async (req, res) => {
       // registered APNs destination so the user is notified when the reply is ready.
       if (invite) await sendIncomingCallPush(id, invite);
       else await sendProactivePush(id, visibleContent);
-      return { userMessage: storedUserMessage, assistantMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? generated.speechText : null };
+      return { userMessage: storedUserMessage, assistantMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
