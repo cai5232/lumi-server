@@ -2084,12 +2084,40 @@ async function checkCacheKeepalive() {
 }
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
+const elevenLabsModels = ["eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"];
 async function synthesizeSpeech(text, settings) {
-  if (!settings?.apiKey || !settings?.voiceID || !ttsModels.includes(settings.model)) return null;
-  const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
+  if (!settings?.apiKey || !settings?.voiceID) return null;
   const speechLimit = Math.max(240, Math.min(Number(settings.maxChars || 1800), 1800));
   const speechText = spokenReply(text).slice(0, speechLimit);
   if (!speechText) return null;
+  if (settings.provider === "elevenlabs") {
+    if (!elevenLabsModels.includes(settings.model)) throw new Error("ElevenLabs 语音模型不受支持");
+    const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(settings.voiceID)}?output_format=mp3_44100_128`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "xi-api-key": settings.apiKey, "content-type": "application/json", accept: "audio/mpeg" },
+      body: JSON.stringify({
+        text: speechText,
+        model_id: settings.model,
+        voice_settings: { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true }
+      }),
+      signal: AbortSignal.timeout(ttsTimeoutMs)
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      let message = detail;
+      try {
+        const parsed = JSON.parse(detail);
+        message = parsed?.detail?.message || parsed?.detail?.status || parsed?.message || detail;
+      } catch {}
+      throw new Error(message || `ElevenLabs TTS 返回 ${response.status}`);
+    }
+    const audio = Buffer.from(await response.arrayBuffer());
+    if (!audio.length) throw new Error("ElevenLabs 没有返回音频");
+    return { audioBase64: audio.toString("base64"), duration: Math.max(1, Math.round([...speechText].length / 4.5)) };
+  }
+  if (!ttsModels.includes(settings.model)) throw new Error("MiniMax 语音模型不受支持");
+  const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
   const response = await fetch(`${minimaxHost}/v1/t2a_v2`, {
     method: "POST",
     headers: { authorization: `Bearer ${settings.apiKey}`, "content-type": "application/json" },
