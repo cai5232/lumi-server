@@ -3082,7 +3082,14 @@ const server = createServer(async (req, res) => {
         if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
         return send(res, 200, await previous.result);
       }
-      const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
+      const requestedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
+      // A frontend preset is self-contained. Treat its presence as the
+      // authoritative route even if an older client sends a stale provider
+      // selector value alongside it; otherwise the request silently falls
+      // back to server-side ZenMux variables and fails before using the preset.
+      const selectedProvider = input.customProvider && typeof input.customProvider === "object"
+        ? "custom"
+        : requestedProvider;
       const selectedModel = typeof input.model === "string" ? input.model : "";
       let customProvider = null;
       if (selectedProvider === "custom") {
