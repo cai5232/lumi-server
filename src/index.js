@@ -27,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -3160,14 +3160,17 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       const claimsSpeechWasSent = /(?:语音|音频)(?:消息)?[^。！？\n]{0,16}(?:发了|发给你|发出|送达)|(?:发了|发给你|发出)[^。！？\n]{0,16}(?:语音|音频)/i.test(visibleContent);
-      const speechText = generated.speechText || (claimsSpeechWasSent ? visibleContent : "");
+      const explicitlyRequestedVoice = /(?:发|给我|来)(?:一条|一段|个)?(?:语音|音频)|(?:想听|要听|听一下|说给我听|念给我听|读给我听)(?:你|你用)?(?:说|讲|读|念|语音|声音)?/i.test(messageText);
+      // Explicit voice requests should create audio even if the model answers
+      // naturally without emitting the optional <speech> marker.
+      const speechText = generated.speechText || (claimsSpeechWasSent || explicitlyRequestedVoice ? visibleContent : "");
       if (input.tts?.enabled && speechText && !generated.htmlContent) {
         try { speech = await synthesizeSpeech(speechText, input.tts); }
         catch (error) {
           speechError = (error.message || String(error)).slice(0, 300);
           console.warn(`speech synthesis failed: ${speechError}`);
         }
-      } else if (claimsSpeechWasSent && !input.tts?.enabled) {
+      } else if ((claimsSpeechWasSent || explicitlyRequestedVoice) && !input.tts?.enabled) {
         speechError = "语音功能未开启，无法生成音频";
       }
       const assistantMessage = {
