@@ -55,6 +55,7 @@ let pushTokens = [];
 let voipTokens = [];
 const foregroundThreads = new Map();
 const nativeCallPushes = new Set();
+const callAlertFallbacks = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const recentMessageRequests = new Map();
@@ -1116,13 +1117,15 @@ async function sendProactivePush(threadId, message, metadata = null) {
 }
 
 async function sendIncomingCallPush(threadId, call) {
-  const foreground = (foregroundThreads.get(threadId) || 0) > Date.now();
+  // Ring retries can happen every two seconds. A PushKit delivery or alert
+  // fallback should happen at most once per invite, not once per retry.
+  if (nativeCallPushes.has(call.id)) return;
   const devices = voipTokens.filter((item) => item.threadId === threadId);
-  if (foreground || devices.length === 0) {
+  if (devices.length === 0) {
+    nativeCallPushes.add(call.id);
     await sendProactivePush(threadId, `📞 ${call.reason}`, { kind: "incoming_call", callId: call.id });
     return;
   }
-  if (nativeCallPushes.has(call.id)) return;
   nativeCallPushes.add(call.id);
   let delivered = false;
   for (const device of devices) {
@@ -1149,7 +1152,12 @@ async function sendIncomingCallPush(threadId, call) {
   }
   if (!delivered) {
     nativeCallPushes.delete(call.id);
-    await sendProactivePush(threadId, `📞 ${call.reason}`, { kind: "incoming_call", callId: call.id });
+    // Continue retrying PushKit while the call rings, but keep the ordinary
+    // notification fallback to a single alert for this call.
+    if (!callAlertFallbacks.has(call.id)) {
+      callAlertFallbacks.add(call.id);
+      await sendProactivePush(threadId, `📞 ${call.reason}`, { kind: "incoming_call", callId: call.id });
+    }
   }
 }
 
@@ -1903,7 +1911,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const cacheRequestStartedAt = Date.now();
   let measuredInputTokens = 0;
   let raw = await callModel({
-    maxOutputTokens: callMode ? Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS || 384) : proactive ? undefined : pendingCompaction
+    // Keep max_tokens above provider-injected Claude extended-thinking budgets.
+    maxOutputTokens: callMode ? Math.max(4096, Number(process.env.LUMI_CALL_MAX_OUTPUT_TOKENS) || 0) : proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
     useMaximumModelOutput: proactive,
