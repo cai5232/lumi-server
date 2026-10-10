@@ -3167,7 +3167,7 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       const claimsSpeechWasSent = /(?:语音|音频)(?:消息)?[^。！？\n]{0,16}(?:发了|发给你|发出|送达)|(?:发了|发给你|发出)[^。！？\n]{0,16}(?:语音|音频)/i.test(visibleContent);
-      const explicitlyRequestedVoice = /(?:发|给我|来)(?:一条|一段|个)?(?:语音|音频)|(?:想听|要听|听一下|说给我听|念给我听|读给我听)(?:你|你用)?(?:说|讲|读|念|语音|声音)?/i.test(messageText);
+      const explicitlyRequestedVoice = /(?:发|给我|来)(?:一条|一段|个)?(?:语音|音频)|(?:再)?试(?:试|一下|一段)?(?:语音|音频)|(?:想听|要听|听一下|说给我听|念给我听|读给我听)(?:你|你用)?(?:说|讲|读|念|语音|声音)?/i.test(messageText);
       // Explicit voice requests should create audio even if the model answers
       // naturally without emitting the optional <speech> marker.
       const speechText = generated.speechText || (claimsSpeechWasSent || explicitlyRequestedVoice ? visibleContent : "");
