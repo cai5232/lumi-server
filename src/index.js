@@ -1266,7 +1266,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         ? normalizedBaseURL.replace(/\/api\/v1$/i, "/api/anthropic/v1/messages")
         : /\/messages$/i.test(normalizedBaseURL)
           ? normalizedBaseURL
-          : normalizedBaseURL + "/messages"
+          : normalizedBaseURL + "/v1/messages"
     : /\/chat\/completions$/i.test(normalizedBaseURL)
       ? normalizedBaseURL
       : normalizedBaseURL + "/chat/completions";
