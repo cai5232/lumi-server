@@ -1315,7 +1315,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }).filter(Boolean);
     return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
-  const preparedMessages = customProvider?.apiFormat === "openai"
+  // Frontend presets can point at many OpenAI/Anthropic-compatible services;
+  // their support for Anthropic cache_control extensions varies. Keep custom
+  // requests portable and only apply Lumi's cache markers to server-managed
+  // Anthropic routes that we know support them.
+  const preparedMessages = customProvider
     ? providerMessages
     : cacheMessages(providerMessages, model, cacheCurrentUser);
   const requestBody = nativeAnthropic
@@ -1350,6 +1354,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   if (!response.ok) {
     const rawProviderError = data?.error?.message || data?.error || data?.message || `模型服务返回 ${response.status}`;
     const providerError = typeof rawProviderError === "string" ? rawProviderError : JSON.stringify(rawProviderError);
+    const upstreamRequestId = response.headers.get("request-id") || response.headers.get("x-request-id") || response.headers.get("anthropic-request-id") || "";
+    console.warn(`[model] upstream rejected request: status=${response.status} provider=${provider} format=${customProvider?.apiFormat || (nativeAnthropic ? "anthropic" : "openai")} model=${model} requestId=${upstreamRequestId || "unavailable"} error=${providerError.slice(0, 500)}`);
     // If ZenMux has no channel for a model, transparently retry once through
     // the configured backup relay so older clients cannot get stuck on a
     // stale ZenMux model selection.
