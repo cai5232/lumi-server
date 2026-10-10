@@ -1057,7 +1057,7 @@ function extractThinkingText(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
     .replace(/<\/(?:context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\s*>/gi, "")
     .trim();
 }
@@ -1297,6 +1297,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
+        ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...(mailMcpEnabled ? {
           mcp_servers: [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }],
           tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
@@ -1349,6 +1350,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       ?? data?.choices?.[0]?.text
       ?? data?.output_text
       ?? data?.content;
+  const nativeThinking = nativeAnthropic ? (data?.content || []).filter((block) => block.type === "thinking").map((block) => block.thinking || "").filter(Boolean).join("\n") : "";
   const content = Array.isArray(rawContent)
     ? rawContent
       .filter((block) => typeof block === "string" || !/^(thinking|reasoning|analysis)$/i.test(String(block?.type || block?.role || "")))
@@ -1359,7 +1361,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     const finishReason = data?.choices?.[0]?.finish_reason || data?.status || "unknown";
     throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
   }
-  return content.trim();
+  return nativeThinking ? `<thinking>${nativeThinking}</thinking>\n${content.trim()}` : content.trim();
 }
 
 async function zenMuxSubscriptionUsage() {
