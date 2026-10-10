@@ -27,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v1-elevenlabs-tts-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-elevenlabs-tts-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -83,7 +83,10 @@ function normalizeCustomProvider(input) {
   const host = parsed.hostname.toLowerCase();
   if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || host === "metadata.google.internal" || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) throw new Error("API 基址不能指向本机或内网地址");
   if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(chatPath) || chatPath.includes("..")) throw new Error("API 路径格式无效");
-  return { apiKey, url: baseURL.replace(/\/+$/, ""), apiFormat, chatPath };
+  // callModel consumes the same `key` property used by server-side provider
+  // configurations. Keep the public request field named `apiKey`, then
+  // normalize it here so frontend presets work without server env variables.
+  return { key: apiKey, url: baseURL.replace(/\/+$/, ""), apiFormat, chatPath };
 }
 
 function mailMcpConfiguredFor(provider = "zenmux", model = "") {
