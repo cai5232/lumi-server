@@ -27,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 68888), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -69,6 +69,21 @@ function providerConfig(id = "zenmux", modelOverride = "") {
   const config = providerConfigs().find((item) => item.id === id);
   if (!config) throw new Error(`${id === "backup" ? "备用中转" : "ZenMux"}线路尚未配置`);
   return { ...config, model: modelOverride || config.model };
+}
+
+function normalizeCustomProvider(input) {
+  if (!input || typeof input !== "object") return null;
+  const apiKey = String(input.apiKey || "").trim();
+  const baseURL = String(input.baseURL || "").trim();
+  const apiFormat = input.apiFormat === "anthropic" ? "anthropic" : input.apiFormat === "openai" ? "openai" : "";
+  const chatPath = String(input.chatPath || (apiFormat === "anthropic" ? "/messages" : "/chat/completions")).trim();
+  let parsed;
+  try { parsed = new URL(baseURL); } catch { throw new Error("API 基址无效"); }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || !apiKey || !apiFormat) throw new Error("自定义 API 需要 HTTPS 基址、API Key 和有效协议");
+  const host = parsed.hostname.toLowerCase();
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || host === "metadata.google.internal" || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) throw new Error("API 基址不能指向本机或内网地址");
+  if (!/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(chatPath) || chatPath.includes("..")) throw new Error("API 路径格式无效");
+  return { apiKey, url: baseURL.replace(/\/+$/, ""), apiFormat, chatPath };
 }
 
 function mailMcpConfiguredFor(provider = "zenmux", model = "") {
@@ -1241,8 +1256,9 @@ function cacheUsage(usage = {}) {
   return { read, created };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "" }) {
-  let selected = providerConfig(provider, requestedModel);
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null }) {
+  let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
+  selected = { ...selected, model: requestedModel || selected.model };
   if (!selected.model && provider !== "zenmux") {
     const discovered = await listProviderModels(selected);
     if (discovered[0]) selected = { ...selected, model: discovered[0] };
@@ -1256,11 +1272,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const isClaude = /anthropic|claude/i.test(model);
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
-  const nativeAnthropic = provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true";
+  const nativeAnthropic = customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
   const apiURL = nativeAnthropic
-    ? directAnthropicAPI
+    ? customProvider
+      ? normalizedBaseURL + (customProvider.chatPath || "/messages")
+      : directAnthropicAPI
       ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
       : /\/api\/v1$/i.test(normalizedBaseURL)
         ? normalizedBaseURL.replace(/\/api\/v1$/i, "/api/anthropic/v1/messages")
@@ -1269,7 +1287,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           : new URL(normalizedBaseURL).hostname.toLowerCase() === "api.treegpt.cc"
             ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
             : normalizedBaseURL + "/messages"
-    : /\/chat\/completions$/i.test(normalizedBaseURL)
+    : customProvider
+      ? normalizedBaseURL + (customProvider.chatPath || "/chat/completions")
+      : /\/chat\/completions$/i.test(normalizedBaseURL)
       ? normalizedBaseURL
       : normalizedBaseURL + "/chat/completions";
   const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
@@ -1290,14 +1310,16 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }).filter(Boolean);
     return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
-  const preparedMessages = cacheMessages(providerMessages, model, cacheCurrentUser);
+  const preparedMessages = customProvider?.apiFormat === "openai"
+    ? providerMessages
+    : cacheMessages(providerMessages, model, cacheCurrentUser);
   const requestBody = nativeAnthropic
     ? {
-        model: process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model),
+        model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
         system: preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
+        ...(!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...(mailMcpEnabled ? {
           mcp_servers: [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }],
           tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
@@ -1309,7 +1331,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(directAnthropicAPI && nativeAnthropic ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
+      ...(nativeAnthropic && (directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
       ...(nativeAnthropic ? {
         "anthropic-version": "2023-06-01",
         ...(mailMcpEnabled ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
@@ -1658,7 +1680,7 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "" }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
   provider = provider || thread?.cacheProvider || "zenmux";
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
@@ -1860,6 +1882,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     messages: cacheRequestMessages,
     provider,
     model,
+    customProvider,
     mailThreadId: thread.id,
     onUsage: (usage) => {
       const { read: cachedRead, created: cachedWrite } = cacheUsage(usage);
@@ -1900,7 +1923,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       catch (error) { result = `${discoveryContext}操作没有完成：${error.message}`; }
     }
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
-    raw = await callModel({ messages: cacheRequestMessages, provider, model, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+    raw = await callModel({ messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
@@ -3016,6 +3039,14 @@ const server = createServer(async (req, res) => {
         if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
         return send(res, 200, await previous.result);
       }
+      const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
+      const selectedModel = typeof input.model === "string" ? input.model : "";
+      let customProvider = null;
+      if (selectedProvider === "custom") {
+        try { customProvider = normalizeCustomProvider(input.customProvider); }
+        catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
+        if (!customProvider || !selectedModel) return send(res, 400, { error: "custom_provider_or_model_required" });
+      }
       const result = (async () => {
       const messageText = String(input.content || "").trim();
       markUserActivity(threads[id], messageText);
@@ -3023,22 +3054,26 @@ const server = createServer(async (req, res) => {
       const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
-      const selectedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
-      const selectedModel = typeof input.model === "string" ? input.model : "";
-      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel });
+      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheRequestedSystemPrompt = typeof input.systemPrompt === "string" ? input.systemPrompt : "";
-      const selectedConfig = providerConfig(selectedProvider, selectedModel);
-      threads[id].cacheModel = selectedModel || selectedConfig.model;
-      threads[id].cacheProvider = selectedProvider;
+      const selectedConfig = selectedProvider === "custom" ? null : providerConfig(selectedProvider, selectedModel);
+      threads[id].cacheModel = selectedModel || selectedConfig?.model || process.env.LUMI_MODEL_NAME || "";
+      threads[id].cacheProvider = selectedProvider === "custom" ? "zenmux" : selectedProvider;
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.compactionApplied ? 0 : generated.measuredInputTokens;
       // A successful compaction removes old messages from the active context.
       // Never retain the pre-compaction cache snapshot, or keepalive would
       // resurrect the full history and undo the 68,888-token boundary.
       if (generated.compactionApplied) {
+        threads[id].cacheKeepaliveMessages = null;
+        threads[id].cacheKeepaliveAssistantContent = "";
+        threads[id].cacheKeepaliveSnapshotKind = "";
+        threads[id].cacheKeepalivePrefixHash = "";
+        threads[id].cacheKeepaliveAt = 0;
+      } else if (selectedProvider === "custom") {
         threads[id].cacheKeepaliveMessages = null;
         threads[id].cacheKeepaliveAssistantContent = "";
         threads[id].cacheKeepaliveSnapshotKind = "";
