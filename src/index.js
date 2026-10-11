@@ -1343,7 +1343,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             : String(message.content || "")).filter(Boolean).join("\n\n")
           : preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
+        ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...(mailMcpEnabled ? {
           mcp_servers: [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }],
           tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
@@ -1393,7 +1393,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   cacheStats.cacheWriteTokens += cache.created;
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
   const rawContent = nativeAnthropic
-    ? data?.content?.filter((block) => block.type === "text").map((block) => block.text).join("")
+    ? (Array.isArray(data?.content) ? data.content.filter((block) => block?.type === "text").map((block) => block.text || "").join("") : typeof data?.content === "string" ? data.content : data?.output_text || data?.choices?.[0]?.message?.content || "")
     : data?.choices?.[0]?.message?.content
       ?? data?.choices?.[0]?.text
       ?? data?.output_text
@@ -1406,7 +1406,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       .join("")
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim()) {
-    const finishReason = data?.choices?.[0]?.finish_reason || data?.status || "unknown";
+    const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
+    const blockTypes = Array.isArray(data?.content) ? data.content.map((block) => String(block?.type || "unknown")).join(",") : typeof data?.content;
+    console.warn(`[model] empty text response provider=${provider} model=${model} stop=${finishReason} contentTypes=${blockTypes} thinkingPresent=${Boolean(nativeThinking)}`);
     throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
   }
   return nativeThinking ? `<thinking>${nativeThinking}</thinking>\n${content.trim()}` : content.trim();
