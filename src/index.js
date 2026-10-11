@@ -2268,7 +2268,7 @@ async function body(req) {
 
 async function proxyLettersMap(req, res, upstreamPath) {
   if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
-  const origin = String(process.env.LETTERS_MAP_BASE_URL || "https://lumi-hidden-letters.zeabur.app").replace(/\\/+$/, "");
+  const origin = String(process.env.LETTERS_MAP_BASE_URL || "https://lumi-hidden-letters.zeabur.app").replace(/\/+$/, "");
   const password = String(process.env.LETTERS_MAP_PASSWORD || "");
   if (!password) return send(res, 503, { error: "letters_map_not_configured" });
   try {
@@ -2516,7 +2516,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/letters-map" && req.method === "GET") return proxyLettersMap(req, res, "/api/travel-map");
     if (url.pathname === "/v1/letters-map/marks" && req.method === "POST") return proxyLettersMap(req, res, "/api/travel-map/marks");
     if (url.pathname === "/v1/letters-map/location" && req.method === "POST") return proxyLettersMap(req, res, "/api/location");
-    const lettersOpen = url.pathname.match(/^\\/v1\\/letters-map\\/letters\\/([A-Za-z0-9_-]+)\\/open$/);
+    const lettersOpen = url.pathname.match(/^\/v1\/letters-map\/letters\/([A-Za-z0-9_-]+)\/open$/);
     if (lettersOpen && req.method === "POST") return proxyLettersMap(req, res, `/api/travel-map/letters/${encodeURIComponent(lettersOpen[1])}/open`);
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
