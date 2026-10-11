@@ -25,6 +25,8 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_API_KEY`：可选，记忆库 API Key
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/memories`
+- `LETTERS_MAP_BASE_URL`：藏宝地图服务地址，默认 `https://lumi-hidden-letters.zeabur.app`
+- `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
@@ -81,6 +83,7 @@ Zeabur 环境变量：
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
+- `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
 - `GET /v1/chats/:id/emotion/state|arc|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
 
 ### 情绪驱动力
