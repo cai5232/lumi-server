@@ -1702,8 +1702,11 @@ async function writeMemory(content, threadId) {
 function compactionPlan(thread, pendingInput = "") {
   const messages = contextMessages(thread);
   const pendingTokens = pendingInput ? estimateTokens(pendingInput) + 8 : 0;
-  if (messageTokens(messages) + pendingTokens < compactAtTokens &&
-      Number(thread.lastMeasuredInputTokens || 0) < compactAtTokens) return null;
+  // Compaction must follow the size of the active, persisted conversation.
+  // Upstream usage also includes the large system prompt, cached tokens, and
+  // gateway-specific accounting; using it as a trigger can compact a short
+  // history repeatedly and destroy an otherwise reusable prompt prefix.
+  if (messageTokens(messages) + pendingTokens < compactAtTokens) return null;
 
   // Preserve whole user/assistant turns in the recent cache-friendly tail.
   let tail = [];
