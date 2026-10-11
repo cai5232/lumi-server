@@ -1852,10 +1852,19 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // requires alternating roles; coalesce only adjacent same-role blocks while
   // keeping their exact text and therefore a deterministic cache prefix.
   const history = [];
+  // OpenAI-compatible chat completions accepts consecutive messages of the
+  // same role. Never coalesce them: a later turn can otherwise rewrite a
+  // previously cached message and invalidate the entire following prefix.
+  // Keep coalescing for Anthropic, which requires alternating roles.
+  const preserveOpenAIMessageBoundaries = provider === "custom"
+    && customProvider?.apiFormat === "openai";
   for (const message of rawHistory) {
     const previous = history.at(-1);
-    if (previous?.role === message.role) previous.content = `${previous.content}\n${message.content}`;
-    else history.push({ ...message });
+    if (!preserveOpenAIMessageBoundaries && previous?.role === message.role) {
+      previous.content = `${previous.content}\n${message.content}`;
+    } else {
+      history.push({ ...message });
+    }
   }
   const emojiMoods = Object.entries(emojiCatalog || {}).filter(([mood, values]) => typeof mood === "string" && mood.trim() && Array.isArray(values) && values.some((value) => typeof value === "string" && value.trim())).map(([mood]) => mood).slice(0, 40);
   const activity = ensureActivity(thread);
