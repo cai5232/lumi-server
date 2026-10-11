@@ -1365,11 +1365,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     if (message.role !== "user" || !Array.isArray(images) || !images.length) return cleanMessage;
     const imageBlocks = images.map((image) => {
       const match = String(image).match(/^data:(image\/(?:png|jpeg|webp|gif));base64,([\s\S]+)$/i);
-      if (!match) return null;
+      if (!match) throw new Error("图片格式无效，无法发送给模型（需要 PNG/JPEG/WebP/GIF 的 Base64 图片）");
       return nativeAnthropic
         ? { type: "image", source: { type: "base64", media_type: match[1].toLowerCase(), data: match[2] } }
         : { type: "image_url", image_url: { url: image } };
-    }).filter(Boolean);
+    });
+    if (imageBlocks.length !== images.length) throw new Error("图片未能完整转换为模型输入");
     return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
   // Explicit Anthropic-format custom routes support native cache_control.
