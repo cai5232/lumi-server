@@ -1499,7 +1499,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
       if (!entry) { results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
-      if (/(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message|email|mail)/i.test(entry.tool.name)) {
+      if (/(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
