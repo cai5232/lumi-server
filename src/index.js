@@ -2598,6 +2598,37 @@ const server = createServer(async (req, res) => {
       }
       return send(res, 405, { error: "method_not_allowed" });
     }
+    const lettersMapPath = url.pathname.match(/^\/v1\/letters-map(?:\/(.*))?$/);
+    if (lettersMapPath) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const mapPassword = String(process.env.LETTERS_MAP_PASSWORD || "").trim();
+      if (!mapPassword) return send(res, 503, { error: "letters_map_not_configured" });
+      const suffix = lettersMapPath[1] || "";
+      let upstreamPath = "";
+      if (!suffix && req.method === "GET") upstreamPath = "/api/travel-map";
+      else if (suffix === "marks" && req.method === "POST") upstreamPath = "/api/travel-map/marks";
+      else if (suffix === "location" && req.method === "POST") upstreamPath = "/api/location";
+      else {
+        const openLetter = suffix.match(/^letters\/([^/]+)\/open$/);
+        if (openLetter && req.method === "POST") upstreamPath = "/api/travel-map/letters/" + encodeURIComponent(decodeURIComponent(openLetter[1])) + "/open";
+      }
+      if (!upstreamPath) return send(res, 404, { error: "not_found" });
+      const mapBaseURL = (process.env.LETTERS_MAP_BASE_URL || "https://lumi-hidden-letters.zeabur.app").replace(/\/$/, "");
+      try {
+        const upstream = await fetch(mapBaseURL + upstreamPath, {
+          method: req.method,
+          headers: { authorization: "Bearer " + mapPassword, ...(req.method === "POST" ? { "content-type": "application/json" } : {}) },
+          ...(req.method === "POST" ? { body: JSON.stringify(await body(req)) } : {}),
+          signal: AbortSignal.timeout(20_000),
+          redirect: "error"
+        });
+        const payload = await upstream.json().catch(() => ({ error: "letters_map_invalid_response" }));
+        return send(res, upstream.status, payload);
+      } catch (error) {
+        console.warn("[letters-map] upstream request failed: " + String(error.message || error).slice(0, 200));
+        return send(res, 502, { error: "letters_map_unavailable" });
+      }
+    }
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
     if (url.pathname === "/v1/mcp/servers") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
