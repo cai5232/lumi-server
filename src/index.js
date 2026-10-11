@@ -1323,25 +1323,21 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }).filter(Boolean);
     return { ...cleanMessage, content: [{ type: "text", text: String(message.content || "请识别这张图片。") }, ...imageBlocks] };
   });
-  // Frontend presets can point at many OpenAI/Anthropic-compatible services;
-  // their support for Anthropic cache_control extensions varies. Keep custom
-  // requests portable and only apply Lumi's cache markers to server-managed
-  // Anthropic routes that we know support them.
-  const preparedMessages = customProvider
+  // Explicit Anthropic-format custom routes support native cache_control.
+  // Do not add Anthropic markers to OpenAI-compatible custom routes.
+  const preparedMessages = customProvider && !nativeAnthropic
     ? providerMessages
     : cacheMessages(providerMessages, model, cacheCurrentUser);
   const requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
-        system: customProvider
-          // A number of Anthropic-compatible gateways advertise the Messages
-          // API but reject Anthropic's array-of-content-blocks system format.
-          // Plain text is valid in the Anthropic API and is more portable.
-          ? preparedMessages.filter((message) => message.role === "system").map((message) => Array.isArray(message.content)
-            ? message.content.map((block) => typeof block === "string" ? block : String(block?.text || "")).join("\n")
-            : String(message.content || "")).filter(Boolean).join("\n\n")
-          : preparedMessages.filter((message) => message.role === "system").flatMap((message) => Array.isArray(message.content) ? message.content : [{ type: "text", text: String(message.content || "") }]),
+        // Keep cache_control on system blocks for native Anthropic custom
+        // providers. Flattening to a string silently discards that marker.
+        system: preparedMessages.filter((message) => message.role === "system")
+          .flatMap((message) => Array.isArray(message.content)
+            ? message.content
+            : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...(mailMcpEnabled ? {
