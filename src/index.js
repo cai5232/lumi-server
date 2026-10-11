@@ -1356,7 +1356,7 @@ function cacheDiagnosticCapture(body, nativeAnthropic, provider, model) {
   return record;
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null, mcpThreadId = "", mcpRound = 0 }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false }) {
   let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
   selected = { ...selected, model: requestedModel || selected.model };
   if (!selected.model && provider !== "zenmux") {
@@ -1445,7 +1445,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             ? message.content
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...((process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
+        ...(!disableThinkingRetry && (process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
           mcp_servers: [
             ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
@@ -1547,6 +1547,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       .map((block) => typeof block === "string" ? block : block?.text || block?.content || "")
       .join("")
     : typeof rawContent === "string" ? rawContent : "";
+  if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
+    console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
+    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true });
+  }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
     const blockTypes = Array.isArray(data?.content) ? data.content.map((block) => String(block?.type || "unknown")).join(",") : typeof data?.content;
