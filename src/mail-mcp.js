@@ -90,6 +90,8 @@ const tools = [
   }
 ];
 
+export const mailMcpTools = tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+
 function config() {
   const address = process.env.LUMI_MAIL_ADDRESS || "";
   const password = process.env.LUMI_MAIL_PASSWORD || "";
