@@ -104,21 +104,21 @@ function mailMcpConfiguredFor(provider = "zenmux", model = "", customProvider = 
 }
 
 async function connectPendingMcpServers(settings) {
-  let changed = false;
-  for (const server of settings.servers) {
-    if (!server.enabled || server.connectedAt) continue;
+  const pending = settings.servers.filter((server) => server.enabled && !server.connectedAt);
+  const results = await Promise.all(pending.map(async (server) => {
     try {
       const connection = await connectMcpServer(server);
       server.tools = connection.tools;
       server.connectedAt = new Date().toISOString();
       server.error = "";
       await connection.session?.close?.();
-      changed = true;
+      return true;
     } catch (error) {
       console.warn(`[mcp] ${server.name} 连接失败: ${String(error.message || error).slice(0, 300)}`);
+      return false;
     }
-  }
-  return changed ? mcpClientStore.save(settings) : settings;
+  }));
+  return results.some(Boolean) ? mcpClientStore.save(settings) : settings;
 }
 
 async function mcpSettingsResponse() {
@@ -1419,7 +1419,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : cacheMessages(providerMessages, model, cacheCurrentUser);
   const mcpSettings = mcpThreadId ? await connectPendingMcpServers(await mcpClientStore.read()) : { servers: [] };
   const mcpServers = mcpSettings.servers.filter(server => server.enabled);
-  const nativeRemoteMcpServers = nativeAnthropic ? mcpServers.map(server => {
+  // Keep Anthropic's remote MCP connector for server-configured providers.
+  // Custom Anthropic relays instead receive ordinary Anthropic tool schemas;
+  // Lumi executes those tools locally so the relay need not proxy MCP beta.
+  const nativeRemoteMcpServers = nativeAnthropic && !customProvider ? mcpServers.map(server => {
     const authorization = Object.entries(server.headers || {}).find(([key]) => key.toLowerCase() === "authorization")?.[1] || "";
     const token = authorization.replace(/^Bearer\s+/i, "").trim();
     return { type: "url", url: server.url, name: server.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64), ...(token ? { authorization_token: token } : {}) };
@@ -1434,6 +1437,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `${server.name}: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
     }
   }
+  const anthropicLocalTools = customProvider?.apiFormat === "anthropic" && mcpRound < 4
+    ? mcpTools.map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
+    : [];
   const requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
@@ -1446,12 +1452,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(!disableThinkingRetry && (process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
-        ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
-          mcp_servers: [
-            ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
-            ...nativeRemoteMcpServers
-          ],
+        ...((mailMcpEnabled || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
+          ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
+            mcp_servers: [
+              ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
+              ...nativeRemoteMcpServers
+            ]
+          } : {}),
           tools: [
+            ...anthropicLocalTools,
             ...(mailMcpEnabled ? [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }] : []),
             ...nativeRemoteMcpServers.map(server => ({ type: "mcp_toolset", mcp_server_name: server.name, default_config: { enabled: true } }))
           ]
@@ -1497,6 +1506,30 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
     return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, customProvider, mcpThreadId, mcpRound: mcpRound + 1 });
+  }
+  const nativeToolUses = customProvider?.apiFormat === "anthropic" && Array.isArray(data?.content)
+    ? data.content.filter((block) => block?.type === "tool_use")
+    : [];
+  if (nativeToolUses.length && mcpRound < 4) {
+    const results = [];
+    for (const use of nativeToolUses.slice(0, 8)) {
+      const entry = mcpToolMap.get(use.name);
+      if (!entry) {
+        results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
+        continue;
+      }
+      if (/(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+        results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
+        continue;
+      }
+      try {
+        const result = await callMcpTool(entry.server, entry.tool.name, use.input || {});
+        results.push({ type: "tool_result", tool_use_id: use.id, content: JSON.stringify(result).slice(0, 30000) });
+      } catch (error) {
+        results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: JSON.stringify({ error: String(error.message || error).slice(0, 1000) }) });
+      }
+    }
+    return callModel({ messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, customProvider, mcpThreadId, mcpRound: mcpRound + 1 });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
