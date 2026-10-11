@@ -1494,7 +1494,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     throw new Error(providerError);
   }
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
-  if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || nativeMcpBlocks)) {
+  const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
+  if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
     return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, customProvider, mcpThreadId, mcpRound: mcpRound + 1 });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
