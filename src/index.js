@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
 import { createServer } from "node:http";
 import { WorldBookStore, evaluateBooks, injectBooks } from "./world-book.js";
@@ -1269,6 +1269,55 @@ function cacheUsage(usage = {}) {
   return { read, created };
 }
 
+// Opt-in, process-local cache diagnostics. Never log prompts or API credentials.
+const cacheDiagnosticKey = randomBytes(32);
+const cacheDiagnosticRecords = [];
+function cacheDiagnosticFingerprint(value) {
+  return createHmac("sha256", cacheDiagnosticKey).update(JSON.stringify(value)).digest("hex").slice(0, 16);
+}
+function cacheDiagnosticCapture(body, nativeAnthropic, provider, model) {
+  if (process.env.LUMI_CACHE_DIAGNOSTICS !== "true") return null;
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const system = nativeAnthropic ? body.system : messages.filter((m) => m.role === "system");
+  const conversation = messages.filter((m) => m.role !== "system");
+  const prefixes = [];
+  // Capture hashes for every completed prefix, so adjacent requests can be
+  // compared even though the latest user message necessarily changes.
+  const base = nativeAnthropic ? [system] : messages.filter((m) => m.role === "system");
+  for (let i = 0; i < conversation.length; i++) {
+    prefixes.push(cacheDiagnosticFingerprint([...base, ...conversation.slice(0, i + 1)]));
+  }
+  const record = {
+    at: new Date().toISOString(), provider, model,
+    format: nativeAnthropic ? "anthropic" : "openai",
+    systemHash: cacheDiagnosticFingerprint(system),
+    settingsHash: cacheDiagnosticFingerprint({
+      thinking: body.thinking, temperature: body.temperature,
+      max_tokens: body.max_tokens, tools: body.tools?.map((t) => t.type),
+      model: body.model
+    }),
+    messageCount: conversation.length,
+    prefixHashes: prefixes,
+    roles: conversation.map((m) => m.role),
+    cacheMarkers: JSON.stringify(body).match(/"cache_control"/g)?.length || 0
+  };
+  cacheDiagnosticRecords.push(record);
+  if (cacheDiagnosticRecords.length > 30) cacheDiagnosticRecords.shift();
+  const previous = cacheDiagnosticRecords.at(-2);
+  const commonPrefix = previous && previous.model === model && previous.format === record.format
+    ? prefixes.findLastIndex((hash, i) => previous.prefixHashes[i] === hash) + 1 : 0;
+  console.info("[cache-diagnostic] " + JSON.stringify({
+    at: record.at, provider, model, format: record.format,
+    systemHash: record.systemHash, settingsHash: record.settingsHash,
+    messageCount: record.messageCount, cacheMarkers: record.cacheMarkers,
+    lastPrefixHash: prefixes.at(-1) || null,
+    previousSystemSame: previous ? previous.systemHash === record.systemHash : null,
+    previousSettingsSame: previous ? previous.settingsHash === record.settingsHash : null,
+    sharedLeadingMessages: commonPrefix
+  }));
+  return record;
+}
+
 async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null }) {
   let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
   selected = { ...selected, model: requestedModel || selected.model };
@@ -1347,6 +1396,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       }
     : { model, messages: preparedMessages, ...(!/claude[-_/]?sonnet[-_/]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
+  const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const response = await fetch(apiURL, {
     method: "POST",
     headers: {
@@ -1385,6 +1435,14 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   if (onUsage) onUsage(usage);
   cacheStats.lastUsage = usage;
   const cache = cacheUsage(usage);
+  if (cacheDiagnostic) {
+    console.info("[cache-diagnostic-usage] " + JSON.stringify({
+      at: cacheDiagnostic.at, model, format: cacheDiagnostic.format,
+      cacheRead: cache.read, cacheWrite: cache.created,
+      inputTokens: Number(usage.input_tokens ?? usage.prompt_tokens ?? 0),
+      outputTokens: Number(usage.output_tokens ?? usage.completion_tokens ?? 0)
+    }));
+  }
   cacheStats.cacheReadTokens += cache.read;
   cacheStats.cacheWriteTokens += cache.created;
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
