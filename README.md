@@ -83,6 +83,21 @@ Zeabur 环境变量：
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `GET /v1/chats/:id/emotion/state|arc|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
 
+### Promise Alarm 约定提醒
+
+`/promise-alarm` 集成了完整的 Promise Alarm 应用：Lumi 普通聊天会把当轮对话交给提醒服务识别，已有约定会进入后续模型上下文；到点后生成的消息会写入对应 Lumi 聊天，并尝试通过 APNs 提醒设备。独立演示聊天和原有的 capture/context/cancel/fired API 也保留在同一页面下。网页入口：`https://你的服务域名/promise-alarm`。
+
+部署需要 Python 3.9+（只使用标准库）。Node 服务会自动启动内部 Python 服务，监听回环地址，不需要额外暴露端口。服务会把约定数据库保存在 `LUMI_DATA_DIR/promise-alarm/promises.db`。
+
+默认复用 `LUMI_MODEL_API_URL`、`LUMI_MODEL_API_KEY`、`LUMI_MODEL_NAME` 和 `LUMI_SYSTEM_PROMPT`。当前模型接口需兼容 OpenAI Chat Completions。可用以下变量覆盖提醒服务的配置：
+
+- `LUMI_PROMISE_ALARM_ENABLED=false`：关闭提醒服务（默认开启）。
+- `LUMI_PROMISE_ALARM_PORT`：内部端口，默认 `18768`。
+- `PROMISE_API_BASE`、`PROMISE_API_KEY`、`PROMISE_MODEL`、`PROMISE_PERSONA`：覆盖复用的模型配置。
+- `PROMISE_UTC_OFFSET_HOURS`：提醒使用的 UTC 时差，默认北京时间 `8`。
+
+Promise Alarm 上游代码及网页完整保存在 `promise-alarm/`，其原有 PolyForm Noncommercial 许可和 Required Notice 继续适用于该目录；详见 `promise-alarm/LICENSE` 和 `THIRD_PARTY_NOTICES.md`。
+
 ### 情绪驱动力
 
 所有聊天共用一份持久化的情绪状态，保存十类连续驱动力（想念、心软、心疼、好奇、促狭、躁动、后悔、欲望、低落、吃醋）。每 10 分钟向各自基线衰减；离线满 6 个 tick 后想念开始增长；最强驱动力达到 0.65 时每 20 分钟生成一条私密独白，达到 0.50 时按 Murmur 节奏经 Lumi APNs 推送。北京时间 16:00–00:00 静默时段会积攒想念推送，睡眠期间不发送情绪推送。普通聊天、哨兵主动消息、通话、梦境/睡眠阶段和图像整理请求都会收到这份共享驱动力上下文；动态情绪只放在每次请求的 user suffix，不拼进稳定缓存系统提示词。

@@ -10,6 +10,7 @@ import { handleMailMcp, MAIL_OWNER_EMAIL } from "./mail-mcp.js";
 import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
+import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm } from "./promise-alarm.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
@@ -27,7 +28,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-promise-alarm-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 100000), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1909,7 +1910,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const foodDirective = !callMode && !proactive
     ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。需要时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，等待返回后再选择具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
     : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
+  const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
+    ? `\n\n<promise_alarm_instructions>如果你明确答应在具体时间提醒、叫醒或回来找她，系统会替你记下并到点回来兑现。只有明确答应且时间具体时才算；不要声称已经设置成功，除非当前对话明确显示约定已记录。若她说取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
+    : "";
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${alarmDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -2488,6 +2493,26 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/promise-alarm" || url.pathname.startsWith("/promise-alarm/")) {
+      const pathname = url.pathname.slice("/promise-alarm".length) || "/";
+      return proxyPromiseAlarm(req, res, pathname, url.search);
+    }
+    if (req.method === "POST" && url.pathname === "/v1/internal/promise-alarm/fire") {
+      if (!promiseAlarmAuthorized(req.headers.authorization)) return send(res, 401, { error: "unauthorized" });
+      const input = await body(req);
+      const id = String(input.session_id || "default").slice(0, 80);
+      const text = String(input.text || "").trim().slice(0, 4000);
+      const promise = input.promise && typeof input.promise === "object" ? input.promise : {};
+      if (!text || !Number.isInteger(Number(promise.id))) return send(res, 400, { error: "invalid_promise_alarm_payload" });
+      const threads = await readThreads();
+      const thread = threads[id] || (threads[id] = { id, title: "新聊天", messages: [] });
+      thread.messages = Array.isArray(thread.messages) ? thread.messages : [];
+      if (thread.messages.some((message) => message.promiseAlarmId === Number(promise.id))) return send(res, 200, { ok: true, duplicate: true });
+      thread.messages.push({ id: randomUUID(), role: "assistant", content: text, contentType: "promise_alarm", promiseAlarmId: Number(promise.id), createdAt: new Date().toISOString() });
+      await persistChatThread(id, thread);
+      await sendProactivePush(id, text);
+      return send(res, 200, { ok: true });
+    }
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
     }
@@ -3279,6 +3304,7 @@ const server = createServer(async (req, res) => {
         createdAt: new Date(Date.now() + index + 1).toISOString()
       }));
       threads[id].messages.push(storedUserMessage, assistantMessage, ...galleryMessages);
+      capturePromiseAlarm(id, messageText, visibleContent);
       // Keep the model's diary decision inside the same durable record as its
       // chat history. diaries.json remains a backwards-compatible mirror only.
       const diaryItem = generated.diaryEntry
@@ -3337,6 +3363,7 @@ await loadCacheStats();
 await loadProactiveSettings();
 await loadPushTokens();
 await loadEmotionState();
+startPromiseAlarm();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 setInterval(() => { void checkCacheKeepalive(); }, 60_000);
 setInterval(() => { runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, backgroundPulseIntervalMs);
