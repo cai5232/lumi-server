@@ -26,7 +26,9 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/memories`
 - `LETTERS_MAP_BASE_URL`：藏宝地图服务地址，默认 `https://lumi-hidden-letters.zeabur.app`
-- `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端
+- `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端；配置后会把该服务的 MCP 自动加入 Lumi
+
+藏宝地图 MCP 地址为 `${LETTERS_MAP_BASE_URL}/mcp`，传输方式是 Streamable HTTP，授权头由后端使用 `LETTERS_MAP_PASSWORD` 自动生成。Lumi 会连接并读取原仓库提供的五个工具；聊天模型按对话需要调用。无需把地图页面或地图数据搬进 Lumi。
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 

@@ -103,8 +103,26 @@ function mailMcpConfiguredFor(provider = "zenmux", model = "", customProvider = 
     process.env.LUMI_MAIL_MCP_ENABLED !== "false";
 }
 
+async function connectPendingMcpServers(settings) {
+  let changed = false;
+  for (const server of settings.servers) {
+    if (!server.enabled || server.connectedAt) continue;
+    try {
+      const connection = await connectMcpServer(server);
+      server.tools = connection.tools;
+      server.connectedAt = new Date().toISOString();
+      server.error = "";
+      await connection.session?.close?.();
+      changed = true;
+    } catch (error) {
+      console.warn(`[mcp] ${server.name} 连接失败: ${String(error.message || error).slice(0, 300)}`);
+    }
+  }
+  return changed ? mcpClientStore.save(settings) : settings;
+}
+
 async function mcpSettingsResponse() {
-  const settings = await mcpClientStore.read();
+  const settings = await connectPendingMcpServers(await mcpClientStore.read());
   return {
     ...settings,
     servers: [...settings.servers, {
@@ -1399,7 +1417,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const preparedMessages = customProvider && !nativeAnthropic
     ? providerMessages
     : cacheMessages(providerMessages, model, cacheCurrentUser);
-  const mcpServers = mcpThreadId ? (await mcpClientStore.read()).servers.filter(server => server.enabled) : [];
+  const mcpSettings = mcpThreadId ? await connectPendingMcpServers(await mcpClientStore.read()) : { servers: [] };
+  const mcpServers = mcpSettings.servers.filter(server => server.enabled);
+  const nativeRemoteMcpServers = nativeAnthropic ? mcpServers.map(server => {
+    const authorization = Object.entries(server.headers || {}).find(([key]) => key.toLowerCase() === "authorization")?.[1] || "";
+    const token = authorization.replace(/^Bearer\s+/i, "").trim();
+    return { type: "url", url: server.url, name: server.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64), ...(token ? { authorization_token: token } : {}) };
+  }) : [];
   const mcpToolMap = new Map();
   const mcpTools = [];
   for (const [serverIndex, server] of mcpServers.entries()) {
@@ -1422,9 +1446,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
-        ...(mailMcpEnabled ? {
-          mcp_servers: [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }],
-          tools: [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }]
+        ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
+          mcp_servers: [
+            ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
+            ...nativeRemoteMcpServers
+          ],
+          tools: [
+            ...(mailMcpEnabled ? [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }] : []),
+            ...nativeRemoteMcpServers.map(server => ({ type: "mcp_toolset", mcp_server_name: server.name, default_config: { enabled: true } }))
+          ]
         } : {})
       }
     : { model, messages: preparedMessages, ...(mcpTools.length && mcpRound < 4 ? { tools: mcpTools, tool_choice: "auto" } : {}), ...(!/claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
@@ -1437,7 +1467,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       ...(nativeAnthropic && (directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
       ...(nativeAnthropic ? {
         "anthropic-version": "2023-06-01",
-        ...(mailMcpEnabled ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
+        ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
       } : {})
     },
     body: JSON.stringify(requestBody)

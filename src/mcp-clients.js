@@ -32,7 +32,25 @@ export function normalizeMcpServers(input) {
 
 export class McpClientStore {
   constructor(path) { this.path = path; this.queue = Promise.resolve(); }
-  async read() { try { const value = JSON.parse(await readFile(this.path, 'utf8')); return { ...value, servers: Array.isArray(value.servers) ? value.servers : [], revision: Number(value.revision || 0), mailEnabled: value.mailEnabled !== false }; } catch (error) { if (error.code === 'ENOENT') return { servers: [], revision: 0, mailEnabled: true }; throw error; } }
+  async read() {
+    let settings;
+    try {
+      const value = JSON.parse(await readFile(this.path, 'utf8'));
+      settings = { ...value, servers: Array.isArray(value.servers) ? value.servers : [], revision: Number(value.revision || 0), mailEnabled: value.mailEnabled !== false };
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      settings = { servers: [], revision: 0, mailEnabled: true };
+    }
+    const mapPassword = process.env.LETTERS_MAP_PASSWORD;
+    if (mapPassword && !settings.servers.some(server => server.id === 'letters-map')) {
+      const baseURL = (process.env.LETTERS_MAP_BASE_URL || 'https://lumi-hidden-letters.zeabur.app').replace(/\/$/, '');
+      settings.servers.push(normalizeMcpServers([{
+        id: 'letters-map', name: '藏宝地图', enabled: true, url: `${baseURL}/mcp`,
+        headers: { Authorization: `Bearer ${mapPassword}` }, tools: [], connectedAt: null
+      }])[0]);
+    }
+    return settings;
+  }
   async save(input) {
     const action = this.queue.then(async () => {
       const current = await this.read();
