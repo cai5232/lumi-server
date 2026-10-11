@@ -27,7 +27,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-letters-map-proxy-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 100000), Math.floor(contextLimit * 0.85));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -2266,6 +2266,31 @@ async function body(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
+async function proxyLettersMap(req, res, upstreamPath) {
+  if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+  const origin = String(process.env.LETTERS_MAP_BASE_URL || "https://lumi-hidden-letters.zeabur.app").replace(/\\/+$/, "");
+  const password = String(process.env.LETTERS_MAP_PASSWORD || "");
+  if (!password) return send(res, 503, { error: "letters_map_not_configured" });
+  try {
+    const headers = { authorization: `Bearer ${password}` };
+    let payload;
+    if (req.method !== "GET") {
+      payload = await body(req);
+      headers["content-type"] = "application/json";
+    }
+    const upstream = await fetch(`${origin}${upstreamPath}`, {
+      method: req.method,
+      headers,
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) })
+    });
+    const contentType = upstream.headers.get("content-type") || "application/json; charset=utf-8";
+    res.writeHead(upstream.status, { "content-type": contentType, "cache-control": "no-store", "access-control-allow-origin": "*" });
+    res.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch (error) {
+    return send(res, 502, { error: `letters_map_unavailable: ${String(error.message || error).slice(0, 300)}` });
+  }
+}
+
 const galleryImagePattern = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i;
 const galleryExtensions = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
 
@@ -2488,6 +2513,11 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/letters-map" && req.method === "GET") return proxyLettersMap(req, res, "/api/travel-map");
+    if (url.pathname === "/v1/letters-map/marks" && req.method === "POST") return proxyLettersMap(req, res, "/api/travel-map/marks");
+    if (url.pathname === "/v1/letters-map/location" && req.method === "POST") return proxyLettersMap(req, res, "/api/location");
+    const lettersOpen = url.pathname.match(/^\\/v1\\/letters-map\\/letters\\/([A-Za-z0-9_-]+)\\/open$/);
+    if (lettersOpen && req.method === "POST") return proxyLettersMap(req, res, `/api/travel-map/letters/${encodeURIComponent(lettersOpen[1])}/open`);
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
     }
