@@ -1445,7 +1445,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             ? message.content
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(process.env.LUMI_NATIVE_THINKING_ENABLED !== "false" && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
+        ...((process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
         ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
           mcp_servers: [
             ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
