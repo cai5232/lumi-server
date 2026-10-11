@@ -29,6 +29,7 @@ Zeabur 环境变量：
 - `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端；配置后会把该服务的 MCP 自动加入 Lumi
 
 藏宝地图 MCP 地址为 `${LETTERS_MAP_BASE_URL}/mcp`，传输方式是 Streamable HTTP，授权头由后端使用 `LETTERS_MAP_PASSWORD` 自动生成。Lumi 会连接并读取原仓库提供的五个工具；聊天模型按对话需要调用。无需把地图页面或地图数据搬进 Lumi。
+- `LUMI_WATCH_ANALYSIS_API_URL`、`LUMI_WATCH_ANALYSIS_API_KEY`、`LUMI_WATCH_ANALYSIS_MODEL`：可选的共看视频分析默认模型；iOS 页面填写的配置会按请求单独转发，不要求在这里配置
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
@@ -84,6 +85,7 @@ Zeabur 环境变量：
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
+- `GET /v1/watch/analysis-config`、`POST /v1/watch/analyze`：Bearer 鉴权；将当前视频帧转发给单独配置的 OpenAI 兼容视觉模型，不上传或保存完整视频
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
 - `GET /v1/chats/:id/emotion/state|arc|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`

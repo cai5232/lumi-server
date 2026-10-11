@@ -29,7 +29,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -2359,6 +2359,72 @@ async function body(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
+async function analyzeWatchFrame(input) {
+  const config = input.analysisConfig && typeof input.analysisConfig === "object" ? input.analysisConfig : {};
+  const baseURL = String(config.baseURL || process.env.LUMI_WATCH_ANALYSIS_API_URL || "").trim().replace(/\/+$/, "");
+  const apiKey = String(config.apiKey || process.env.LUMI_WATCH_ANALYSIS_API_KEY || "").trim();
+  const model = String(config.model || process.env.LUMI_WATCH_ANALYSIS_MODEL || "").trim();
+  if (!baseURL || !apiKey || !model) {
+    const error = new Error("独立视频分析模型尚未配置");
+    error.status = 503;
+    throw error;
+  }
+
+  let endpoint;
+  try {
+    endpoint = new URL(/\/chat\/completions$/i.test(baseURL) ? baseURL : `${baseURL}/chat/completions`);
+  } catch {
+    const error = new Error("视频分析模型地址无效");
+    error.status = 503;
+    throw error;
+  }
+  const host = endpoint.hostname.toLowerCase();
+  const localHost = host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") ||
+    host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:") ||
+    /^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) || host === "0.0.0.0";
+  if (endpoint.protocol !== "https:" || localHost || endpoint.username || endpoint.password) {
+    const error = new Error("视频分析模型地址必须使用 HTTPS");
+    error.status = 503;
+    throw error;
+  }
+
+  const match = String(input.image || "").match(/^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/i);
+  if (!match || match[1].length > 8 * 1024 * 1024) {
+    const error = new Error("画面图片无效或过大");
+    error.status = 400;
+    throw error;
+  }
+  const title = String(input.title || "本地视频").slice(0, 180);
+  const playheadMS = Math.max(0, Math.min(Number(input.playheadMS) || 0, 7 * 24 * 60 * 60 * 1000));
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(150_000),
+    body: JSON.stringify({
+      model,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: `你是独立的视频画面分析器。只描述这张画面中可见的人物、动作、物品、环境和可谨慎判断的剧情线索；不猜测画面之外的情节，不替聊天模型回答用户。作品：${title}。视频位置：${Math.floor(playheadMS / 60000)}分${Math.floor((playheadMS % 60000) / 1000)}秒。请用简洁中文给出可供后续聊天引用的客观观察。` },
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${match[1]}` } }
+        ]
+      }]
+    })
+  });
+  const raw = await response.text();
+  let data = {};
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
+  if (!response.ok) {
+    const message = data?.error?.message || data?.error || data?.message || `分析服务返回 ${response.status}`;
+    throw new Error(String(message).replaceAll(apiKey, "[已隐藏]").slice(0, 500));
+  }
+  const content = data?.choices?.[0]?.message?.content;
+  const summary = (Array.isArray(content) ? content.map((part) => part?.text || "").join("\n") : String(content || "")).trim();
+  if (!summary) throw new Error("视频分析模型没有返回画面观察");
+  return { summary: summary.slice(0, 5000), model };
+}
+
 const galleryImagePattern = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i;
 const galleryExtensions = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif" };
 
@@ -2853,6 +2919,31 @@ const server = createServer(async (req, res) => {
       await saveThreads(threads);
       await saveProactiveSettings();
       return send(res, 200, proactiveSettings);
+    }
+    if (url.pathname === "/v1/watch/analysis-config") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
+      const configured = Boolean(
+        process.env.LUMI_WATCH_ANALYSIS_API_URL &&
+        process.env.LUMI_WATCH_ANALYSIS_API_KEY &&
+        process.env.LUMI_WATCH_ANALYSIS_MODEL
+      );
+      return send(res, 200, { configured, model: configured ? process.env.LUMI_WATCH_ANALYSIS_MODEL : null });
+    }
+    if (url.pathname === "/v1/watch/analyze") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      const contentLength = Number(req.headers["content-length"] || 0);
+      if (contentLength > 10 * 1024 * 1024) return send(res, 413, { error: "frame_payload_too_large" });
+      try {
+        const result = await analyzeWatchFrame(await body(req));
+        return send(res, 200, result);
+      } catch (error) {
+        if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+          return send(res, 504, { error: "视频分析模型响应超时。请确认中转站支持图片输入，并检查当前模型是否为视觉模型。" });
+        }
+        return send(res, error.status || 502, { error: error.message || "视频画面分析失败" });
+      }
     }
     if (req.method === "GET" && url.pathname === "/health") {
       const activeThread = (await readThreads()).default;
