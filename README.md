@@ -82,6 +82,12 @@ Zeabur 环境变量：
 
 ## API
 
+- `GET /v1/music/netease/status|qr|qr/check?key=...`: account status and QR login
+- `GET /v1/music/netease/search?q=...` and `GET /v1/music/netease/song-url?id=...`: song search and stream resolution
+- `GET /v1/music/room/state?room=main` / `PUT /v1/music/room/state`: shared playback state
+- `POST /v1/music/netease/logout`: disconnect the NetEase account
+
+Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase session is stored in `LUMI_DATA_DIR/ncm-cookie.txt` with owner-only file permissions; room state is stored in `music-room-state.json`. Keep `LUMI_DATA_DIR` on a persistent volume.
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
