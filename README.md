@@ -33,6 +33,14 @@ Zeabur 环境变量：
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
+## 共享手帐日历
+
+共享日历由当前 Lumi 后端提供 API 和 Streamable HTTP MCP，不需要再单独部署一个日历服务。事件、便签、页面 PNG 和变更记录保存在 `LUMI_DATA_DIR/calendar.json` 与 `LUMI_DATA_DIR/calendar-pages/`；Zeabur 应把 `LUMI_DATA_DIR` 指向已挂载的持久卷（当前服务挂载点为 `/data`）。日历 API 复用 `LUMI_PUSH_API_TOKEN` 鉴权，也可单独设置 `LUMI_CALENDAR_MCP_TOKEN`；iOS 页面入口是首页日历，MCP 地址为 `https://lumi-tokyo-api.zeabur.app/v1/calendar/mcp`。
+
+MCP 暴露 `calendar` 工具，支持查看日期范围、查看某日手帐和页面图片、创建/修改/删除安排、添加便签及点赞。普通对话会获得当天日历上下文，也会从用户明确提及的安排中提取候选日程；提取器会跳过低置信度和重复项。服务端变更会沿用已注册的 APNs 设备通知。
+
+可选变量：`LUMI_CALENDAR_FILE`（自定义 JSON 文件路径）、`LUMI_CALENDAR_TIMEZONE`（默认 `Asia/Shanghai`）、`LUMI_CALENDAR_MCP_URL`（自定义 MCP URL）、`LUMI_CALENDAR_EXTRACTOR_PROVIDER`、`LUMI_CALENDAR_EXTRACTOR_MODEL`、`LUMI_CALENDAR_EXTRACTOR_MIN_CHARS`、`LUMI_CALENDAR_EXTRACTOR_MIN_CONFIDENCE`。
+
 ## 自主唤醒时看屏幕
 
 在 Lumi 设置中开启“保活”和“查看屏幕”并完成下面的邮件自动化后，AI 可在自主唤醒时选择看屏幕。每次选择查看时，后端会给 iPhone 发一封带有随机主题暗号的邮件，手机收到后自动运行快捷指令、截取当前屏幕并上传；AI 再用新截图生成回复。没有配置或没有及时收到截图时，后端会沿用现有的看屏请求通知。
