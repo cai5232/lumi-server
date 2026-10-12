@@ -13,6 +13,7 @@ import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { McpClientStore, callMcpTool, connectMcpServer, normalizeMcpServers } from "./mcp-clients.js";
+import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, extractCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
 
 const port = Number(process.env.PORT || 8787);
@@ -1042,11 +1043,25 @@ function apnsConfigured() {
 
 function pushRequestAuthorized(req) {
   const expected = String(process.env.LUMI_PUSH_API_TOKEN || "");
-  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "") || String(req.headers["x-calendar-token"] || "");
   if (!expected || !supplied) return false;
   const expectedBytes = Buffer.from(expected);
   const suppliedBytes = Buffer.from(supplied);
   return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+async function sendCalendarChangePush(toolName, item) {
+  if (!apnsConfigured() || !item || typeof item !== "object") return;
+  const day = String(item.starts_at || item.anchor_date || item.date || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return;
+  const labels = { calendar_create: "新增了安排", calendar_update: "更新了安排", calendar_delete: "移除了一项安排", calendar_comment: "写了一张便签" };
+  const detail = String(item.title || item.body || item.comment || "日历内容").trim().slice(0, 80);
+  const message = `沈屿${labels[toolName] || "更新了日历"}：「${detail}」`;
+  const devices = pushTokens.filter(device => device.threadId === "default");
+  await Promise.allSettled(devices.map(async device => {
+    const result = await sendAPNs(device, message, { kind: "calendar_update", calendar_day: day });
+    if (result.status < 200 || result.status >= 300) console.warn(`[calendar-push] APNs rejected: status=${result.status}`);
+  }));
 }
 
 function apnsBearerToken() {
@@ -1435,6 +1450,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     const token = authorization.replace(/^Bearer\s+/i, "").trim();
     return { type: "url", url: server.url, name: server.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64), ...(token ? { authorization_token: token } : {}) };
   }) : [];
+  if (nativeAnthropic && mcpThreadId && !proactive) {
+    const calendarToken = String(process.env.LUMI_CALENDAR_MCP_TOKEN || process.env.LUMI_PUSH_API_TOKEN || "").trim();
+    if (calendarToken) nativeRemoteMcpServers.push({
+      type: "url",
+      url: String(process.env.LUMI_CALENDAR_MCP_URL || `${process.env.LUMI_PUBLIC_BASE_URL || "https://lumi-tokyo-api.zeabur.app"}/v1/calendar/mcp`).replace(/\/$/, ""),
+      name: "lumi_calendar",
+      authorization_token: calendarToken
+    });
+  }
   const mcpToolMap = new Map();
   const mcpTools = [];
   for (const [serverIndex, server] of mcpServers.entries()) {
@@ -1450,6 +1474,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       const name = `lumi_email_${tool.name}`;
       mcpToolMap.set(name, { tool, execute: (args) => executeMailTool(tool.name, args, mailThreadId), allowWrite: true });
       mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
+    }
+  }
+  if (mcpThreadId && !proactive) {
+    for (const [toolIndex, tool] of calendarTools.entries()) {
+      const name = `lumi_calendar_${toolIndex}_${tool.name}`.slice(0, 64);
+      mcpToolMap.set(name, { tool, internalCalendar: true, allowWrite: true });
+      mcpTools.push({ type: "function", function: { name, description: `共享日历：${tool.description}`, parameters: tool.inputSchema } });
     }
   }
   const anthropicLocalTools = customProvider?.apiFormat === "anthropic" && mcpRound < 4
@@ -1533,14 +1564,19 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
         continue;
       }
-      if (!entry.allowWrite && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
       try {
-        const result = entry.execute
+        const result = entry.internalCalendar
+          ? await calendarTool(entry.tool.name, use.input || {})
+          : entry.execute
           ? await entry.execute(use.input || {})
           : await callMcpTool(entry.server, entry.tool.name, use.input || {});
+        if (entry.internalCalendar && ["calendar_create", "calendar_update", "calendar_delete", "calendar_comment"].includes(entry.tool.name)) {
+          void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
+        }
         results.push({ type: "tool_result", tool_use_id: use.id, content: JSON.stringify(result).slice(0, 30000) });
       } catch (error) {
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: JSON.stringify({ error: String(error.message || error).slice(0, 1000) }) });
@@ -1554,13 +1590,16 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
       if (!entry) { results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
-      if (/(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      if (!entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
       try {
         const args = JSON.parse(call.function.arguments || "{}");
-        const result = await callMcpTool(entry.server, entry.tool.name, args);
+        const result = entry.internalCalendar ? await calendarTool(entry.tool.name, args) : await callMcpTool(entry.server, entry.tool.name, args);
+        if (entry.internalCalendar && ["calendar_create", "calendar_update", "calendar_delete", "calendar_comment"].includes(entry.tool.name)) {
+          void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
+        }
         results.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result).slice(0, 30000) });
       } catch (error) {
         results.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ error: String(error.message || error).slice(0, 1000) }) });
@@ -2389,7 +2428,7 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS", "access-control-allow-headers": "content-type,authorization,idempotency-key" });
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS", "access-control-allow-headers": "content-type,authorization,x-calendar-token,idempotency-key" });
   res.end(JSON.stringify(body));
 }
 
@@ -2407,6 +2446,17 @@ async function body(req) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
   return raw ? JSON.parse(raw) : {};
+}
+
+async function binaryBody(req, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error("calendar_page_too_large"), { statusCode: 413 });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, size);
 }
 
 async function analyzeWatchFrame(input) {
@@ -2717,6 +2767,18 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (url.pathname === "/v1/calendar/ping" && req.method === "GET") return send(res, 200, { ok: true });
+      const isCalendarPageUpload = req.method === "POST" && /^\/v1\/calendar\/pages\/\d{4}-\d{2}-\d{2}\/render$/.test(url.pathname);
+      const input = isCalendarPageUpload ? await binaryBody(req, 12_000_000) : req.method === "POST" || req.method === "PATCH" ? await body(req) : {};
+      if (url.pathname === "/v1/calendar/mcp" && input.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
+      const handled = await calendarRoute(req, (payload, status = 200) => send(res, status, payload), url.pathname, input,
+        (bytes, contentType = "image/png", status = 200) => sendBinary(res, status, bytes, contentType),
+        (text, messageId) => extractCalendarMessage(text, messageId, callModel),
+        (actionName, result) => sendCalendarChangePush(actionName, result));
+      if (handled === null) return send(res, 404, { error: "not_found" });
+      return handled;
+    }
     if (url.pathname.startsWith("/v1/music/")) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       return musicService(req, res, url);
@@ -3541,7 +3603,10 @@ const server = createServer(async (req, res) => {
       const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
-      generated = await generateReply({ input: `${userMessage.content}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
+      const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
+      generated = await generateReply({ input: `${userMessage.content}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = generated.userModelContent;
       threads[id].cacheSystem = generated.cacheSystem;
@@ -3634,6 +3699,11 @@ const server = createServer(async (req, res) => {
       finishUserConversation(threads[id], messageText);
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
+      if (messageText && !images.length && !galleryImageIDs.length) {
+        void extractCalendarMessage(messageText, userMessage.id, callModel).then(result => {
+          if (result.applied?.length || result.skipped?.length) console.info(`[calendar-extract] message=${userMessage.id} applied=${result.applied?.length || 0} skipped=${result.skipped?.length || 0}`);
+        }).catch(error => console.warn(`[calendar-extract] message=${userMessage.id} failed: ${String(error.message || error).slice(0, 240)}`));
+      }
       await saveEmotionState();
       if (diaryItem) {
         // A legacy mirror failure must never eat a completed chat response.
@@ -3665,7 +3735,7 @@ const server = createServer(async (req, res) => {
         chatRequestsInFlight -= 1;
       }
     }
-  } catch (error) { return send(res, 500, { error: error.message }); }
+  } catch (error) { return send(res, error.statusCode || 500, { error: error.message }); }
 });
 
 server.on("upgrade", (req, socket, head) => {
