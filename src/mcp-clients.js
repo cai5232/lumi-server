@@ -17,10 +17,11 @@ export function modelToolsForServer(server) {
     : tools;
 }
 
-export function validateMcpURL(value) {
+export function validateMcpURL(value, { allowZeaburInternal = false } = {}) {
   let url;
   try { url = new URL(String(value || '').trim()); } catch { throw new Error('MCP URL 无效'); }
-  if (url.protocol !== 'https:' || url.username || url.password || privateHost(url.hostname.toLowerCase())) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
+  const trustedInternal = allowZeaburInternal && url.protocol === 'http:' && url.hostname.toLowerCase().endsWith('.zeabur.internal');
+  if ((url.protocol !== 'https:' && !trustedInternal) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
   return url.toString();
 }
 
@@ -38,7 +39,8 @@ export function normalizeMcpServers(input) {
       if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,80}$/.test(key) || /^(host|content-length|connection|transfer-encoding)$/i.test(key)) throw new Error('MCP 请求头名称无效');
       headers[key] = String(value).slice(0, 4000);
     }
-    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
+    const configuredEngawaURL = id === ENGAWA_SERVER_ID && String(item.url || '').trim() === String(process.env.ENGAWA_MCP_URL || '').trim();
+    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
   });
 }
 
@@ -64,7 +66,7 @@ export class McpClientStore {
     const engawaURL = String(process.env.ENGAWA_MCP_URL || '').trim();
     const engawaServer = settings.servers.find(server => server.id === ENGAWA_SERVER_ID);
     if (engawaURL && engawaServer) {
-      const url = validateMcpURL(engawaURL);
+      const url = validateMcpURL(engawaURL, { allowZeaburInternal: true });
       if (engawaServer.url !== url) {
         engawaServer.url = url;
         engawaServer.tools = [];
