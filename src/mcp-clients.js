@@ -49,6 +49,14 @@ export class McpClientStore {
         headers: { Authorization: `Bearer ${mapPassword}` }, tools: [], connectedAt: null
       }])[0]);
     }
+    const neteaseMcpURL = process.env.LUMI_NETEASE_MCP_URL;
+    const neteaseMcpToken = process.env.LUMI_NETEASE_MCP_TOKEN;
+    if (neteaseMcpURL && neteaseMcpToken && !settings.servers.some(server => server.id === 'netease-music')) {
+      settings.servers.push(normalizeMcpServers([{
+        id: 'netease-music', name: '网易云音乐', enabled: true, url: neteaseMcpURL,
+        headers: { Authorization: `Bearer ${neteaseMcpToken}` }, tools: [], connectedAt: null
+      }])[0]);
+    }
     return settings;
   }
   async save(input) {
