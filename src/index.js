@@ -1377,7 +1377,7 @@ function cacheDiagnosticCapture(body, nativeAnthropic, provider, model) {
   return record;
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false }) {
   let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
   selected = { ...selected, model: requestedModel || selected.model };
   if (!selected.model && provider !== "zenmux") {
@@ -2173,6 +2173,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     customProvider,
     mailThreadId: thread.id,
     mcpThreadId: thread.id,
+    proactive,
     onUsage: (usage) => {
       const { read: cachedRead, created: cachedWrite } = cacheUsage(usage);
       const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0);
