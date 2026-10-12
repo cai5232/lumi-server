@@ -410,6 +410,11 @@ async function callTool(name, args = {}, threadId = "default") {
   throw new Error("未知工具：" + String(name));
 }
 
+// Run the built-in mail MCP tool locally for custom Anthropic-compatible routes.
+export async function executeMailTool(name, args = {}, threadId = "default") {
+  return callTool(name, args, normalizeMailThreadId(threadId));
+}
+
 function authorized(req) {
   const expected = String(process.env.LUMI_MAIL_MCP_TOKEN || "");
   const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
