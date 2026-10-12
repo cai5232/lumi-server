@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import ncm from "NeteaseCloudMusicApi";
 
@@ -21,9 +22,11 @@ function normalizeSong(song) {
 export function createMusicService(dataDir) {
   const statePath = join(dataDir, "music-room-state.json");
   const cookiePath = join(dataDir, "ncm-cookie.txt");
+  const messagesPath = join(dataDir, "music-room-messages.json");
   let cookie = "";
   let cookieReady = readFile(cookiePath, "utf8").then((value) => { cookie = value; }).catch(() => {});
   let stateWriteQueue = Promise.resolve();
+  let messageWriteQueue = Promise.resolve();
 
   async function readState(room) {
     try {
@@ -51,6 +54,29 @@ export function createMusicService(dataDir) {
       await rename(tempPath, statePath);
     });
     stateWriteQueue = operation.catch(() => {});
+    return operation;
+  }
+
+
+  async function readMessages(room) {
+    try {
+      const rooms = JSON.parse(await readFile(messagesPath, "utf8"));
+      return Array.isArray(rooms[room]) ? rooms[room].slice(-100) : [];
+    } catch { return []; }
+  }
+
+  async function appendMessage(room, message) {
+    const operation = messageWriteQueue.then(async () => {
+      let rooms = {};
+      try { rooms = JSON.parse(await readFile(messagesPath, "utf8")); } catch {}
+      rooms[room] = [...(Array.isArray(rooms[room]) ? rooms[room] : []), message].slice(-500);
+      await mkdir(dataDir, { recursive: true });
+      const tempPath = messagesPath + ".tmp";
+      await writeFile(tempPath, JSON.stringify(rooms), { mode: 0o600 });
+      await chmod(tempPath, 0o600);
+      await rename(tempPath, messagesPath);
+    });
+    messageWriteQueue = operation.catch(() => {});
     return operation;
   }
 
@@ -97,6 +123,25 @@ export function createMusicService(dataDir) {
         };
         await writeState(room, state);
         return sendJSON(res, 200, { state });
+      }
+      if (route === "room/messages" && req.method === "GET") {
+        const room = String(url.searchParams.get("room") || "main").slice(0, 64);
+        return sendJSON(res, 200, { messages: await readMessages(room) });
+      }
+      if (route === "room/messages" && req.method === "POST") {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        const input = raw ? JSON.parse(raw) : {};
+        const text = String(input.text || "").trim().slice(0, 2000);
+        if (!text) return sendJSON(res, 400, { error: "message_required" });
+        const room = String(input.room || "main").slice(0, 64);
+        const message = {
+          id: randomUUID(), actorID: String(input.actorID || "").slice(0, 80),
+          sender: String(input.sender || "").slice(0, 80) || "朋友", text,
+          createdAt: Date.now()
+        };
+        await appendMessage(room, message);
+        return sendJSON(res, 200, { message });
       }
       if (route === "netease/status" && req.method === "GET") {
         const account = await profile();
