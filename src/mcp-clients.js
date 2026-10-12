@@ -3,7 +3,19 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 const MAX_SERVERS = 30;
+export const ENGAWA_SERVER_ID = 'engawa-porch';
+export const ENGAWA_READ_ONLY_TOOLS = Object.freeze([
+  'web_read', 'rss_read', 'shelf', 'shelf_suggest', 'sky_tonight', 'apod',
+  'daily_art', 'arxiv_new', 'daily_poem', 'on_this_day', 'hobby_corner'
+]);
 const privateHost = host => host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal') || host === 'metadata.google.internal' || /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || host === '::1' || /^(fc|fd|fe80:)/i.test(host);
+
+export function modelToolsForServer(server) {
+  const tools = Array.isArray(server?.tools) ? server.tools : [];
+  return server?.id === ENGAWA_SERVER_ID
+    ? tools.filter(tool => ENGAWA_READ_ONLY_TOOLS.includes(tool?.name))
+    : tools;
+}
 
 export function validateMcpURL(value) {
   let url;
@@ -47,6 +59,22 @@ export class McpClientStore {
       settings.servers.push(normalizeMcpServers([{
         id: 'letters-map', name: '藏宝地图', enabled: true, url: `${baseURL}/mcp`,
         headers: { Authorization: `Bearer ${mapPassword}` }, tools: [], connectedAt: null
+      }])[0]);
+    }
+    const engawaURL = String(process.env.ENGAWA_MCP_URL || '').trim();
+    const engawaServer = settings.servers.find(server => server.id === ENGAWA_SERVER_ID);
+    if (engawaURL && engawaServer) {
+      const url = validateMcpURL(engawaURL);
+      if (engawaServer.url !== url) {
+        engawaServer.url = url;
+        engawaServer.tools = [];
+        engawaServer.connectedAt = null;
+        engawaServer.error = '';
+      }
+    } else if (engawaURL) {
+      settings.servers.push(normalizeMcpServers([{
+        id: ENGAWA_SERVER_ID, name: '檐廊 Engawa', enabled: true,
+        url: engawaURL, headers: {}, tools: [], connectedAt: null
       }])[0]);
     }
     return settings;

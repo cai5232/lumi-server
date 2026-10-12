@@ -31,6 +31,12 @@ Zeabur 环境变量：
 藏宝地图 MCP 地址为 `${LETTERS_MAP_BASE_URL}/mcp`，传输方式是 Streamable HTTP，授权头由后端使用 `LETTERS_MAP_PASSWORD` 自动生成。Lumi 会连接并读取原仓库提供的五个工具；聊天模型按对话需要调用。无需把地图页面或地图数据搬进 Lumi。
 - `LUMI_WATCH_ANALYSIS_API_URL`、`LUMI_WATCH_ANALYSIS_API_KEY`、`LUMI_WATCH_ANALYSIS_MODEL`：可选的共看视频分析默认模型；iOS 页面填写的配置会按请求单独转发，不要求在这里配置
 
+## 檐廊 Engawa MCP
+
+把独立部署的 Engawa MCP 地址填入 `ENGAWA_MCP_URL`，例如 `https://engawa.example.zeabur.app/mcp`。Lumi 后端会自动把“檐廊 Engawa”加入 iOS 的“设置 → MCP 工具”，可以在那里启用或关闭；不需要在手机里保存服务凭证。
+
+聊天和自主唤醒只会向模型开放 `web_read`、`rss_read`、`shelf`、`shelf_suggest`、`sky_tonight`、`apod`、`daily_art`、`arxiv_new`、`daily_poem`、`on_this_day` 和 `hobby_corner`。书架与兴趣的增删工具仍可在 MCP 设置中手动调用。Engawa 的 HTTP 服务不带内置认证；部署前请确认 Zeabur 服务访问策略，避免把可写的 MCP 端点交给不受信任的调用方。Lumi 到 Engawa 的请求只使用公开 HTTPS 地址。
+
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
 ## 共享手帐日历
@@ -84,7 +90,7 @@ MCP 暴露 `calendar` 工具，支持查看日期范围、查看某日手帐和�
 
 此接法要求 Claude API 能从公网 HTTPS 访问 Lumi 的 `/mcp` 地址。也可以把此地址和请求头 `Authorization: Bearer <LUMI_MAIL_MCP_TOKEN>` 配到 Claude Desktop、Claude Code 等 MCP 客户端。MCP 的 `mail_send` 会立即发信。“发给我”默认发至 `yanvn2026@outlook.com`。用户明确要求发信时，Lumi 会直接发送，不会二次确认；自主唤醒只能执行聊天历史中明确的具体发信请求，不会只因自行判断就发起邮件。邮件正文不增加模型 token 上限；服务器仍有 100000 字符上限，网易 SMTP 也有服务端大小限制。
 
-自主唤醒继续走当前聊天的模型和上下文：它沿用当前线程选定的模型、聊天历史、压缩摘要、检索记忆和情绪状态。唤醒请求会明确列出当时可用的能力及用法：窥屏仅在用户启用该动作且截图邮件/快捷指令配置完整时出现；邮箱工具仅在 Claude MCP Connector 和 163 邮箱配置完整时出现。模型可用 `mail_inbox`、`mail_search`、`mail_read` 获取邮件内容，用 `mail_send` 立即发信；自主唤醒只执行聊天历史中明确的具体发信请求，无需二次确认。
+自主唤醒继续走当前聊天的模型和上下文：它沿用当前线程选定的模型、聊天历史、压缩摘要、检索记忆和情绪状态。唤醒请求会明确列出当时可用的能力及用法：窥屏仅在用户启用该动作且截图邮件/快捷指令配置完整时出现；邮箱工具仅在 Claude MCP Connector 和 163 邮箱配置完整时出现；Engawa 只提供公共内容读取工具。模型可用 `mail_inbox`、`mail_search`、`mail_read` 获取邮件内容，用 `mail_send` 立即发信。普通聊天按用户请求发送；自主唤醒可以自行决定给 `yanvn2026@outlook.com` 写信，但服务端会拒绝其他收件人和任何抄送。
 
 `mail_send` 成功后，后端按聊天线程把收件人、主题、完整正文、发信时间和 SMTP 消息 ID 写入 `LUMI_DATA_DIR/sent-mail.jsonl`。下一轮普通聊天和自主唤醒会自动看到最近五封已发送邮件的摘要；模型还可用 `mail_sent_search` 检索更早的发信记录，并用 `mail_sent_read` 读取完整正文。这个记录与聊天历史、压缩摘要、长期记忆检索一同进入后续模型请求；请将 `LUMI_DATA_DIR` 放在 Zeabur 持久化卷上，避免部署重启后丢失发信记录。
 
