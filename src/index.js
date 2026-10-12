@@ -2744,9 +2744,14 @@ async function galleryMemory(threadID, itemIDs) {
 }
 
 function proxyDuetto(req, res) {
+  const headers = { ...req.headers, host: `127.0.0.1:${duettoPort}` };
+  if (req.url?.split("?")[0] === "/api/auth/session") {
+    if (!pushRequestAuthorized(req)) return send(res, 401, { ok: false, error: "unauthorized" });
+    headers["x-lumi-native-auth"] = "1";
+  }
   const upstream = httpRequest({
     hostname: "127.0.0.1", port: duettoPort, method: req.method, path: req.url,
-    headers: { ...req.headers, host: `127.0.0.1:${duettoPort}` }
+    headers
   }, (response) => {
     res.writeHead(response.statusCode || 502, response.headers);
     response.pipe(res);

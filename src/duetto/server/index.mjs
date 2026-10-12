@@ -52,15 +52,26 @@ function makeToken(secret){ return crypto.createHmac('sha256', String(secret)).u
 function reqToken(req){ const h = String(req.headers['authorization'] || ''); if (h.startsWith('Bearer ')) return h.slice(7); try { return String((req.query && req.query.token) || ''); } catch(e){ return ''; } }
 function tokenOk(t, secret){ try { const a=Buffer.from(String(t)); const b=Buffer.from(makeToken(secret)); return a.length===b.length && crypto.timingSafeEqual(a,b); } catch(e){ return false; } }
 app.use('/api', (req, res, next) => {
-  if (req.path === '/auth/status' || req.path === '/auth/setup' || req.path === '/auth/login' || req.path === '/health') return next();
+  if (req.path === '/auth/status' || req.path === '/auth/setup' || req.path === '/auth/login' || req.path === '/auth/session' || req.path === '/health') return next();
   const a = readAuth();
   if (!a) return res.status(401).json({ ok: false, error: 'not configured — set a PIN first' }); // 未配置：关门，只放行 auth 端点
   if (tokenOk(reqToken(req), a.secret)) return next();
   res.status(401).json({ ok: false, error: 'unauthorized' });
 });
 const _loginHits = {};
-app.get('/api/auth/status', (_q, r) => r.json({ ok: true, configured: !!readAuth() }));
-app.post('/api/auth/setup', (q, r) => { if (readAuth()) return r.status(409).json({ ok: false, error: 'already configured' }); const pin = String((q.body || {}).pin || ''); if (pin.length < 4) return r.status(400).json({ ok: false, error: 'PIN 至少 4 位' }); const salt = crypto.randomBytes(16).toString('hex'); const secret = crypto.randomBytes(32).toString('hex'); writeAuth({ salt, hash: hashPin(pin, salt), secret, created: Date.now() }); r.json({ ok: true, token: makeToken(secret) }); });
+app.get('/api/auth/status', (_q, r) => { const a = readAuth(); r.json({ ok: true, configured: !!a && a.pinConfigured !== false }); });
+app.post('/api/auth/session', (q, r) => {
+  if (q.get('x-lumi-native-auth') !== '1') return r.status(401).json({ ok: false, error: 'unauthorized' });
+  let a = readAuth();
+  if (!a) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const secret = crypto.randomBytes(32).toString('hex');
+    a = { salt, hash: hashPin(crypto.randomBytes(32).toString('hex'), salt), secret, created: Date.now(), pinConfigured: false };
+    writeAuth(a);
+  }
+  r.json({ ok: true, token: makeToken(a.secret) });
+});
+app.post('/api/auth/setup', (q, r) => { const existing = readAuth(); if (existing && existing.pinConfigured !== false) return r.status(409).json({ ok: false, error: 'already configured' }); const pin = String((q.body || {}).pin || ''); if (pin.length < 4) return r.status(400).json({ ok: false, error: 'PIN 至少 4 位' }); const salt = crypto.randomBytes(16).toString('hex'); const secret = existing?.secret || crypto.randomBytes(32).toString('hex'); writeAuth({ ...(existing || {}), salt, hash: hashPin(pin, salt), secret, created: existing?.created || Date.now(), pinConfigured: true }); r.json({ ok: true, token: makeToken(secret) }); });
 app.post('/api/auth/login', async (q, r) => { const a = readAuth(); if (!a) return r.status(400).json({ ok: false, error: 'not configured' }); const ip = String(req_ip(q)); const now = Date.now(); const rec = _loginHits[ip] || { n: 0, until: 0 }; if (rec.until > now) return r.status(429).json({ ok: false, error: '尝试太频繁，稍后再试' }); const pin = String((q.body || {}).pin || ''); let h; try { h = await new Promise((res, rej) => crypto.scrypt(String(pin), a.salt, 32, (e, k) => e ? rej(e) : res(k.toString('hex')))); } catch(e){ return r.status(500).json({ ok:false }); } const ok = h.length === a.hash.length && crypto.timingSafeEqual(Buffer.from(h), Buffer.from(a.hash)); if (!ok) { rec.n++; if (rec.n >= 5) { rec.until = now + Math.min(15*60000, 1000 * Math.pow(2, rec.n - 5)); } _loginHits[ip] = rec; return r.status(401).json({ ok: false, error: 'PIN 不对' }); } delete _loginHits[ip]; r.json({ ok: true, token: makeToken(a.secret) }); });
 function req_ip(q){ try { return (String(q.headers['x-forwarded-for']||'').split(',')[0].trim()) || (q.socket && q.socket.remoteAddress) || 'ip'; } catch(e){ return 'ip'; } }
 app.get('/api/health',(_q,r)=>r.json({ok:true,mode:'self-host',version:'1.0.0'}));
