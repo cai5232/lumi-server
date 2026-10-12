@@ -2508,6 +2508,14 @@ async function synthesizeSpeech(text, settings) {
 }
 
 function send(res, status, body) {
+  // A request may fail after streaming/proxying has already sent headers.
+  // Never attempt a second response: ERR_HTTP_HEADERS_SENT would otherwise
+  // escape the HTTP catch handler and terminate the Node process.
+  if (res.destroyed || res.writableEnded) return;
+  if (res.headersSent) {
+    res.end();
+    return;
+  }
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS", "access-control-allow-headers": "content-type,authorization,x-calendar-token,idempotency-key" });
   res.end(JSON.stringify(body));
 }
