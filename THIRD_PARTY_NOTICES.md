@@ -39,3 +39,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+Promise Alarm
+=============
+
+The complete Promise Alarm application is included in `promise-alarm/` from
+https://github.com/cai5232/promise-alarm. Its upstream license file carries
+the required notice `Copyright Monagwd (https://github.com/Monagwd)` and the
+PolyForm Noncommercial License 1.0.0. The license text is preserved at
+`promise-alarm/LICENSE` and applies to that directory. Lumi integration and
+deployment wiring are in `src/promise-alarm.js` and `src/index.js`.
