@@ -3741,7 +3741,7 @@ const server = createServer(async (req, res) => {
         chatRequestsInFlight -= 1;
       }
     }
-  } catch (error) { return send(res, error.statusCode || 500, { error: error.message }); }
+  } catch (error) { console.error(`[http] ${req.method} ${req.url}:`, error?.stack || error); return send(res, error.statusCode || 500, { error: error.message }); }
 });
 
 server.on("upgrade", (req, socket, head) => {
