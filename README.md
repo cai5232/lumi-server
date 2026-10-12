@@ -90,6 +90,20 @@ MCP 暴露 `calendar` 工具，支持查看日期范围、查看某日手帐和�
 
 ## API
 
+### Duetto listen-together app
+
+The complete Duetto listen-together experience is bundled under `src/duetto` and served through Lumi. Open `/together-listen` or `/pkg/index.html`; Lumi proxies its `/api/*`, `/pkg/*`, and `/ws` real-time socket to a loopback-only sidecar. It includes NetEase playlists/recommendations/FM/lyrics/translations/artist pages/comments/likes and playlist editing; queued playback modes and prefetch; room sync/chat; lyric quoting and questions; listening archive and AI song analysis/memories/DJ; model settings, prompt preview, five palettes and custom appearance.
+
+The sidecar uses Node's built-in SQLite and requires Node 22.5+. Its PIN, NetEase session and archive are isolated under `LUMI_DATA_DIR/duetto`. Upstream source and MIT license are included in `src/duetto`; operator guide: `src/duetto/GUIDE.md`.
+
+
+- `GET /v1/music/netease/status|qr|qr/check?key=...`: account status and QR login
+- `GET /v1/music/netease/search?q=...` and `GET /v1/music/netease/song-url?id=...`: song search and stream resolution
+- `GET /v1/music/room/state?room=main` / `PUT /v1/music/room/state`: shared playback state
+- `GET /v1/music/room/messages?room=main` / `POST /v1/music/room/messages`: shared room chat, capped at 500 persisted messages
+- `POST /v1/music/netease/logout`: disconnect the NetEase account
+
+Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase session is stored in `LUMI_DATA_DIR/ncm-cookie.txt` with owner-only file permissions; room state and chat are stored in `music-room-state.json` and `music-room-messages.json`. Keep `LUMI_DATA_DIR` on a persistent volume.
 - `GET /health`
 - `GET /v1/chats/:id`
 - `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`

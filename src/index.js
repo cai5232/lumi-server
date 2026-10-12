@@ -2,7 +2,9 @@ import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/pro
 import { join } from "node:path";
 import { createHash, createHmac, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { connect as connectSocket } from "node:net";
+import { duettoReady, duettoServer } from "./duetto/server/index.mjs";
 import { WorldBookStore, evaluateBooks, injectBooks } from "./world-book.js";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
@@ -12,9 +14,13 @@ import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTI
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { McpClientStore, callMcpTool, connectMcpServer, normalizeMcpServers } from "./mcp-clients.js";
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, extractCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
+import { createMusicService } from "./music.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+await duettoReady;
+const duettoPort = duettoServer.address().port;
+const musicService = createMusicService(dataDir);
 const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const mcpClientStore = new McpClientStore(join(dataDir, "mcp-clients.json"));
 const threadPath = join(dataDir, "threads.json");
@@ -2737,7 +2743,27 @@ async function galleryMemory(threadID, itemIDs) {
   return `\n\n<gallery_memories source="user_selected">\n${available.map((item) => `- 《${item.title}》\n  客观描述：${item.visualDescription}\n  当时的感受：${item.firstImpression}`).join("\n")}\n</gallery_memories>\n这些是用户从共同相册带来的记忆。基于文字自然回应，不要假装再次看见原图。`;
 }
 
+function proxyDuetto(req, res) {
+  const upstream = httpRequest({
+    hostname: "127.0.0.1", port: duettoPort, method: req.method, path: req.url,
+    headers: { ...req.headers, host: `127.0.0.1:${duettoPort}` }
+  }, (response) => {
+    res.writeHead(response.statusCode || 502, response.headers);
+    response.pipe(res);
+  });
+  upstream.on("error", () => {
+    if (!res.headersSent) send(res, 502, { error: "together_listen_unavailable" });
+    else res.destroy();
+  });
+  req.pipe(upstream);
+}
+
 const server = createServer(async (req, res) => {
+  if (req.url?.startsWith("/api/") || req.url?.startsWith("/pkg/")) return proxyDuetto(req, res);
+  if (req.method === "GET" && req.url?.split("?")[0] === "/together-listen") {
+    res.writeHead(302, { location: "/pkg/index.html" });
+    return res.end();
+  }
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
@@ -2753,6 +2779,10 @@ const server = createServer(async (req, res) => {
         (actionName, result) => sendCalendarChangePush(actionName, result));
       if (handled === null) return send(res, 404, { error: "not_found" });
       return handled;
+    }
+    if (url.pathname.startsWith("/v1/music/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      return musicService(req, res, url);
     }
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
@@ -3707,6 +3737,27 @@ const server = createServer(async (req, res) => {
       }
     }
   } catch (error) { return send(res, error.statusCode || 500, { error: error.message }); }
+});
+
+server.on("upgrade", (req, socket, head) => {
+  let url;
+  try { url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`); }
+  catch { socket.destroy(); return; }
+  if (url.pathname !== "/ws") { socket.destroy(); return; }
+  const upstream = connectSocket(duettoPort, "127.0.0.1");
+  upstream.once("connect", () => {
+    const headers = [];
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      if (req.rawHeaders[i].toLowerCase() !== "host") headers.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+    }
+    headers.push(`Host: 127.0.0.1:${duettoPort}`);
+    upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\\r\\n${headers.join("\\r\\n")}\\r\\n\\r\\n`);
+    if (head.length) upstream.write(head);
+    socket.pipe(upstream).pipe(socket);
+  });
+  upstream.on("error", () => socket.destroy());
+  socket.on("error", () => upstream.destroy());
+  socket.on("close", () => upstream.destroy());
 });
 
 await loadCacheStats();

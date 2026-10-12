@@ -2,7 +2,18 @@
   "name": "lumi-server",
   "private": true,
   "type": "module",
-  "dependencies": { "nodemailer": "^9.1.1" },
-  "scripts": { "dev": "node --watch src/index.js", "start": "node src/index.js", "test": "node --test" },
-  "engines": { "node": ">=20" }
+  "dependencies": {
+    "nodemailer": "^9.1.1",
+    "NeteaseCloudMusicApi": "^4.32.0",
+    "express": "^5.2.1",
+    "ws": "^8.21.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
 }
