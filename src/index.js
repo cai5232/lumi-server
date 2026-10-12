@@ -59,7 +59,7 @@ let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
-const proactiveSettings = { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
 let pushTokens = [];
 let voipTokens = [];
 const foregroundThreads = new Map();
@@ -239,6 +239,25 @@ function isFarewell(text) {
   return /(晚安|睡了|先睡|去睡|明天见|先休息|good\s*night)/i.test(String(text || ""));
 }
 
+function localDateAndHour(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: process.env.LUMI_USER_TIME_ZONE || "Asia/Shanghai",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hourCycle: "h23"
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return { date: `${values.year}-${values.month}-${values.day}`, hour: Number(values.hour) };
+}
+
+function canPlaceProactiveCall(thread) {
+  const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+  const activity = ensureActivity(thread);
+  const local = localDateAndHour();
+  if (proactive.dnd || (proactive.lastPhoneCallDate && proactive.lastPhoneCallDate === local.date)) return false;
+  if (local.hour < 12 || local.hour >= 23) return false;
+  if (activity.mode === "sleeping" || activity.sleepPendingAt) return false;
+  return true;
+}
+
 function markUserActivity(thread, content) {
   const activity = ensureActivity(thread);
   const proactive = ensureProactive(thread);
@@ -373,7 +392,7 @@ async function generateAutonomousMessage(thread, kind) {
 async function generateSentinelWake(thread) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
-  const allowedActions = ["message", "phone", "screen"].filter((action) => actionSettings[action] === true);
+  const allowedActions = ["message", "phone", "screen"].filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
   if (!allowedActions.length) throw new Error("sentinel has no enabled wake actions");
   const generated = await generateReply({
     input: "",
@@ -791,6 +810,16 @@ async function runBackgroundPulse() {
       if (activeChatThreads.has(thread.id)) continue;
       activeChatThreads.add(thread.id);
       try {
+        const phoneBlocked = !canPlaceProactiveCall(thread);
+        const enabledActions = proactive.actions || {};
+        if (phoneBlocked && enabledActions.phone && !enabledActions.message && !enabledActions.screen) {
+          const interval = Math.max(10, Number(proactive.intervalMin) || 60);
+          activity.nextWakeAt = new Date(now + interval * 60_000).toISOString();
+          activity.nextWakeSource = "settings";
+          proactive.nextDueAt = activity.nextWakeAt;
+          changed = true;
+          continue;
+        }
         const wake = await generateSentinelWake(thread);
         // The autonomous turn can include an email MCP action. Persist its exact
         // request prefix and assistant output so the next visible chat continues
@@ -840,6 +869,8 @@ async function runBackgroundPulse() {
           pushMetadata = { kind: "screen_peek_missing" };
         } else if (wake.action === "phone") {
           const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
+          proactiveSettings.lastPhoneCallDate = localDateAndHour().date;
+          await saveProactiveSettings();
           pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, call: invite, startCallRing: () => startIncomingCallRing(thread.id, invite) });
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
@@ -1001,6 +1032,8 @@ async function loadProactiveSettings() {
   try { Object.assign(proactiveSettings, JSON.parse(await readFile(proactiveSettingsPath, "utf8"))); }
   catch (error) { if (error?.code !== "ENOENT") console.warn(`proactive settings unavailable: ${error.message}`); }
   if (!proactiveSettings.actions || typeof proactiveSettings.actions !== "object") proactiveSettings.actions = { message: true, phone: true, screen: false };
+  proactiveSettings.dnd = Boolean(proactiveSettings.dnd);
+  if (typeof proactiveSettings.lastPhoneCallDate !== "string") proactiveSettings.lastPhoneCallDate = null;
 }
 
 async function saveProactiveSettings() {
@@ -1189,10 +1222,10 @@ async function sendIncomingCallPush(threadId, call) {
   let delivered = false;
   for (const device of devices) {
     try {
-      let result = await sendAPNs(device, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason }, true);
+      let result = await sendAPNs(device, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason, expiresAt: call.expiresAt }, true);
       if (result.status === 400 && /BadDeviceToken|DeviceTokenNotForTopic/i.test(result.body)) {
         const alternate = device.environment === "sandbox" ? "production" : "sandbox";
-        const retry = await sendAPNs({ ...device, environment: alternate }, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason }, true);
+        const retry = await sendAPNs({ ...device, environment: alternate }, "", { kind: "incoming_call", callId: call.id, callerName: "沈屿", reason: call.reason, expiresAt: call.expiresAt }, true);
         if (retry.status >= 200 && retry.status < 300) {
           device.environment = alternate;
           await saveVoIPTokens();
@@ -1245,7 +1278,7 @@ async function createIncomingCallInvite(thread, reason) {
     state: "pending",
     reason: String(reason || "想听听你的声音").slice(0, 120),
     createdAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 60_000).toISOString(),
+    expiresAt: new Date(now.getTime() + 30_000).toISOString(),
     turns: []
   };
   thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
@@ -2406,8 +2439,8 @@ async function synthesizeSpeech(text, settings) {
         text: speechText,
         model_id: settings.model,
         voice_settings: ["eleven_v4", "eleven_v4_turbo"].includes(settings.model)
-          ? { stability: 0.5, similarity_boost: 0.75 }
-          : { stability: 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: true }
+          ? { stability: settings.softVoice ? 0.72 : 0.5, similarity_boost: 0.75 }
+          : { stability: settings.softVoice ? 0.72 : 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: !settings.softVoice }
       }),
       signal: AbortSignal.timeout(ttsTimeoutMs)
     });
@@ -2433,7 +2466,7 @@ async function synthesizeSpeech(text, settings) {
       model: settings.model,
       text: speechText,
       stream: false,
-      voice_setting: { voice_id: settings.voiceID, speed: 1, vol: 1, pitch: 0 },
+      voice_setting: { voice_id: settings.voiceID, speed: settings.softVoice ? 0.86 : 1, vol: settings.softVoice ? 0.68 : 1, pitch: 0 },
       audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
     }),
     signal: AbortSignal.timeout(ttsTimeoutMs)
@@ -2942,7 +2975,8 @@ const server = createServer(async (req, res) => {
           !timingSafeEqual(Buffer.from(expected), Buffer.from(supplied))) return send(res, 401, { error: "unauthorized" });
       return send(res, 200, await checkCacheKeepalive());
     }
-    if (["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) && !pushRequestAuthorized(req)) {
+    const callRoute = /^\/v1\/chats\/[^/]+\/calls(?:\/[^/]+(?:\/(?:answer|messages|end))?)?$/.test(url.pathname);
+    if ((["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
     const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|regret|memory|activate))?$/);
@@ -3051,6 +3085,7 @@ const server = createServer(async (req, res) => {
       const max = Number(input.intervalMax ?? min);
       if (!Number.isFinite(min) || !Number.isFinite(max) || min < 10 || max < min || max > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
       proactiveSettings.enabled = input.enabled;
+      proactiveSettings.dnd = input.dnd === true;
       proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
       proactiveSettings.message = typeof input.message === "string" ? input.message.slice(0, 1000) : "";
       if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
@@ -3215,6 +3250,7 @@ const server = createServer(async (req, res) => {
         proactiveSettings.intervalMin = Math.max(1, Number(input.intervalMin) || 60);
         proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, Number(input.intervalMax) || proactiveSettings.intervalMin);
         if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
+        if (typeof input.dnd === "boolean") proactiveSettings.dnd = input.dnd;
         if (!proactiveSettings.enabled) proactiveSettings.nextDueAt = null;
         await saveProactiveSettings();
         return send(res, 200, proactiveSettings);
@@ -3396,7 +3432,7 @@ const server = createServer(async (req, res) => {
       let generated;
       try {
         generated = await generateReply({
-          input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。不要提及内部标签。</internal_call_accepted>`,
+          input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。${input.softVoice ? "请用温柔、轻声、稍慢的语气。" : ""}不要提及内部标签。</internal_call_accepted>`,
           systemPrompt: input.systemPrompt,
           thread,
           callMode: true,
@@ -3422,7 +3458,7 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && openingText) {
-        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, maxChars: 900 }); }
+        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, softVoice: Boolean(input.softVoice), maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
       await saveThreads(threads);
@@ -3471,8 +3507,14 @@ const server = createServer(async (req, res) => {
       const thread = threads[decodeURIComponent(rawThreadID)];
       const call = thread?.calls?.find((item) => item.id === callID && item.state === "active");
       if (!call) return send(res, 404, { error: "call_not_found" });
+      const voiceContext = String(input.voiceContext || "").slice(0, 320);
+      const goodnight = isFarewell(spoken);
+      markUserActivity(thread, spoken);
+      const softVoice = Boolean(input.softVoice || goodnight || /声音比平时轻|语速比平时慢|音量偏低/.test(voiceContext));
+      const voiceHint = voiceContext ? `\n\n语音情绪和语气线索（仅作弱提示，以用户说的内容为准）：${voiceContext}` : "";
+      const bedtimeHint = goodnight || softVoice ? "\n用户在准备睡觉或开启轻声模式。请自然地轻声回应，句子简短、语气柔和，不要突然提高情绪；若用户说晚安，就温柔收尾并结束本轮通话。" : "";
       const generated = await generateReply({
-        input: `<internal_call_turn>这是正在进行的语音通话。通话前文已经按对话历史提供。言言刚刚说（可能来自语音识别）：${spoken}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；如果有多句，请每句单独换行，方便电话里逐条显示和播放。不要解释内部标签。</internal_call_turn>`,
+        input: `<internal_call_turn>这是正在进行的语音通话。通话前文已经按对话历史提供。言言刚刚说（可能来自语音识别）：${spoken}${voiceHint}${bedtimeHint}\n\n先在理解时自动纠正常见同音字或错别字，保持原意；把纠正后的用户原句放在最后的 <call_user_text>...</call_user_text> 中，这个标签不会展示给用户。然后自然回复。可以分成多段短句；如果有多句，请每句单独换行，方便电话里逐条显示和播放。不要解释内部标签。</internal_call_turn>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
         speechProvider: input.tts?.provider,
         speechModel: input.tts?.model,
@@ -3489,14 +3531,14 @@ const server = createServer(async (req, res) => {
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && assistantSpeechText) {
-        try { speech = await synthesizeSpeech(assistantSpeechText, { ...input.tts, maxChars: 900 }); }
+        try { speech = await synthesizeSpeech(assistantSpeechText, { ...input.tts, softVoice, maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call speech skipped: ${speechError}`); }
       } else if (generated.content) {
         speechError = "客户端没有提供 MiniMax TTS 配置";
       }
       await saveThreads(threads);
       await saveEmotionState();
-      return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? assistantSpeechText : null, speechError });
+      return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? assistantSpeechText : null, speechError, hangupAfterPlayback: goodnight });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -3534,7 +3576,7 @@ const server = createServer(async (req, res) => {
       const callId = randomUUID();
       // One model call: the decision and opening line reuse the ordinary chat-cache prefix.
       const generated = await generateReply({
-        input: `<internal_call_request initiator="user">言言正在拨给你。请自行决定接听或拒绝。无论结果都在最后输出 <call_decision>accept 或 reject</call_decision>。接听时，先自然说出进入通话后的第一句话；如果有多句，请每句单独换行，方便电话里逐条显示和播放。拒绝时，只说能显示在聊天里的拒绝理由。不要解释这个内部标签。</internal_call_request>`,
+        input: `<internal_call_request initiator="user">言言正在拨给你。请自行决定接听或拒绝。无论结果都在最后输出 <call_decision>accept 或 reject</call_decision>。接听时，先自然说出进入通话后的第一句话；如果有多句，请每句单独换行，方便电话里逐条显示和播放。${input.softVoice ? "请用温柔轻声语气。" : ""}拒绝时，只说能显示在聊天里的拒绝理由。不要解释这个内部标签。</internal_call_request>`,
         allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
         speechProvider: input.tts?.provider,
         speechModel: input.tts?.model,
@@ -3555,7 +3597,7 @@ const server = createServer(async (req, res) => {
       let speechError = null;
       const openingSpeechText = generated.speechText || generated.content;
       if (input.tts?.enabled && openingSpeechText) {
-        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, maxChars: 900 }); }
+        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, softVoice: Boolean(input.softVoice), maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); console.warn(`call opening speech skipped: ${speechError}`); }
       } else if (generated.content) {
         speechError = "客户端没有提供 MiniMax TTS 配置";

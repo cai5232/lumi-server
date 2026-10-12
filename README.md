@@ -138,3 +138,10 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 `GET /v1/world-books` 和 `PUT /v1/world-books` 使用现有 `LUMI_PUSH_API_TOKEN` 的 Bearer 鉴权。保存时发送读取时的 `revision`，过期版本返回 409，避免覆盖其他设备修改。数据原子持久化在 `LUMI_DATA_DIR/world-books.json`。`GET/PUT /v1/chats/:id/world-books` 的 `bookIds: null` 继承全局选择，空数组表示本聊天不使用世界书。预览仅展示文本匹配；实际计时由服务器聊天记录决定。
 
 世界书行为移植自 Kelivo（AGPL-3.0），详见 `THIRD_PARTY_NOTICES.md` 和 `LICENSES/Kelivo-AGPL-3.0.txt`。对应源码：https://github.com/cai5232/lumi-server。
+
+
+## Proactive native calls
+
+Assistant-initiated calls use the registered iOS PushKit token and expire after 30 seconds. The sentinel can place at most one proactive call per local calendar day, only between 12:00 and 23:00 in `LUMI_USER_TIME_ZONE` (defaults to `Asia/Shanghai`), and never while Do Not Disturb is enabled or a sleep transition is pending. `PUT /v1/settings/proactive` accepts `dnd: true|false`; the setting is persisted with the proactive configuration. Call-control and pending-call routes require the existing `LUMI_PUSH_API_TOKEN` Bearer authorization.
+
+During calls, iOS may send a short `voiceContext` cue based on the speaker's own baseline. The server treats it as a weak hint and keeps spoken words authoritative. `softVoice: true` lowers playback volume and adjusts supported TTS settings. Saying goodnight triggers a gentle response and schedules hangup 18 seconds after playback, unless the user speaks again.
