@@ -4,6 +4,12 @@ import { normalizeMailThreadId, readSentMail, recordSentMail, searchSentMail } f
 
 export const MAIL_OWNER_EMAIL = "yanvn2026@outlook.com";
 
+export function autonomousMailAllowed(args = {}) {
+  const to = String(args.to || MAIL_OWNER_EMAIL).trim().toLowerCase();
+  const cc = String(args.cc || "").trim();
+  return to === MAIL_OWNER_EMAIL && !cc;
+}
+
 const VERSION = "1.1.0";
 const tools = [
   {
@@ -366,7 +372,10 @@ async function listFolders() {
   });
 }
 
-async function sendMail(args, threadId) {
+async function sendMail(args, threadId, autonomous = false) {
+  if (autonomous && !autonomousMailAllowed(args)) {
+    throw new Error(`自主唤醒发信仅允许发送给 ${MAIL_OWNER_EMAIL}，且不能抄送`);
+  }
   const cfg = config();
   const to = safeText(args.to || MAIL_OWNER_EMAIL, "收件人", 1000);
   const subject = safeText(args.subject, "主题", 500);
@@ -398,21 +407,21 @@ async function sendMail(args, threadId) {
   } finally { transport.close(); }
 }
 
-async function callTool(name, args = {}, threadId = "default") {
+async function callTool(name, args = {}, threadId = "default", autonomous = false) {
   if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error("工具参数必须是对象");
   if (name === "mail_inbox") return inbox(args);
   if (name === "mail_read") return readMail(args);
   if (name === "mail_search") return searchMail(args);
   if (name === "mail_folders") return listFolders();
-  if (name === "mail_send") return sendMail(args, threadId);
+  if (name === "mail_send") return sendMail(args, threadId, autonomous);
   if (name === "mail_sent_search") return searchSentMail({ threadId, query: args.query, limit: args.limit });
   if (name === "mail_sent_read") return readSentMail({ threadId, id: args.id });
   throw new Error("未知工具：" + String(name));
 }
 
 // Run the built-in mail MCP tool locally for custom Anthropic-compatible routes.
-export async function executeMailTool(name, args = {}, threadId = "default") {
-  return callTool(name, args, normalizeMailThreadId(threadId));
+export async function executeMailTool(name, args = {}, threadId = "default", autonomous = false) {
+  return callTool(name, args, normalizeMailThreadId(threadId), autonomous);
 }
 
 function authorized(req) {
@@ -443,7 +452,9 @@ async function readRequest(req) {
 export async function handleMailMcp(req, res) {
   if (req.method !== "POST") return respond(res, 405, { error: "method_not_allowed" }, { allow: "POST" });
   if (!authorized(req)) return respond(res, process.env.LUMI_MAIL_MCP_TOKEN ? 401 : 503, { error: process.env.LUMI_MAIL_MCP_TOKEN ? "unauthorized" : "mail_mcp_not_configured" });
-  const threadId = normalizeMailThreadId(new URL(req.url || "/mcp", "http://localhost").searchParams.get("threadId"));
+  const requestURL = new URL(req.url || "/mcp", "http://localhost");
+  const threadId = normalizeMailThreadId(requestURL.searchParams.get("threadId"));
+  const autonomous = requestURL.searchParams.get("autonomous") === "1";
   let message;
   try { message = await readRequest(req); }
   catch { return respond(res, 400, { error: "invalid_json" }); }
@@ -464,10 +475,21 @@ export async function handleMailMcp(req, res) {
     } else if (message.method === "ping") {
       result = {};
     } else if (message.method === "tools/list") {
-      result = { tools };
+      const availableTools = autonomous ? tools.map((tool) => tool.name === "mail_send"
+        ? {
+            ...tool,
+            description: `自主唤醒时仅可发送给${MAIL_OWNER_EMAIL}，不能抄送。`,
+            inputSchema: {
+              ...tool.inputSchema,
+              properties: Object.fromEntries(Object.entries(tool.inputSchema.properties || {}).filter(([key]) => !["to", "cc"].includes(key))),
+              required: ["subject", "body"]
+            }
+          }
+        : tool) : tools;
+      result = { tools: availableTools };
     } else if (message.method === "tools/call") {
       const params = message.params || {};
-      const output = await callTool(params.name, params.arguments || {}, threadId);
+      const output = await callTool(params.name, params.arguments || {}, threadId, autonomous);
       result = { content: [{ type: "text", text: JSON.stringify(output, null, 2) }], isError: false };
     } else {
       return respond(res, 200, { jsonrpc: "2.0", id: id ?? null, error: { code: -32601, message: "Method not found" } });
