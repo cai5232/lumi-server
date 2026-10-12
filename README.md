@@ -82,6 +82,13 @@ Zeabur 环境变量：
 
 ## API
 
+### Duetto listen-together app
+
+The complete Duetto listen-together experience is bundled under `src/duetto` and served through Lumi. Open `/together-listen` or `/pkg/index.html`; Lumi proxies its `/api/*`, `/pkg/*`, and `/ws` real-time socket to a loopback-only sidecar. It includes NetEase playlists/recommendations/FM/lyrics/translations/artist pages/comments/likes and playlist editing; queued playback modes and prefetch; room sync/chat; lyric quoting and questions; listening archive and AI song analysis/memories/DJ; model settings, prompt preview, five palettes and custom appearance.
+
+The sidecar uses Node's built-in SQLite and requires Node 22.5+. Its PIN, NetEase session and archive are isolated under `LUMI_DATA_DIR/duetto`. Upstream source and MIT license are included in `src/duetto`; operator guide: `src/duetto/GUIDE.md`.
+
+
 - `GET /v1/music/netease/status|qr|qr/check?key=...`: account status and QR login
 - `GET /v1/music/netease/search?q=...` and `GET /v1/music/netease/song-url?id=...`: song search and stream resolution
 - `GET /v1/music/room/state?room=main` / `PUT /v1/music/room/state`: shared playback state
