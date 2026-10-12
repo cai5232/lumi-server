@@ -2767,6 +2767,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname.startsWith("/v1/calendar/")) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (url.pathname === "/v1/calendar/ping" && req.method === "GET") return send(res, 200, { ok: true });
       const isCalendarPageUpload = req.method === "POST" && /^\/v1\/calendar\/pages\/\d{4}-\d{2}-\d{2}\/render$/.test(url.pathname);
