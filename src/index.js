@@ -11,9 +11,11 @@ import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { McpClientStore, callMcpTool, connectMcpServer, normalizeMcpServers } from "./mcp-clients.js";
+import { createMusicService } from "./music.js";
 
 const port = Number(process.env.PORT || 8787);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const musicService = createMusicService(dataDir);
 const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const mcpClientStore = new McpClientStore(join(dataDir, "mcp-clients.json"));
 const threadPath = join(dataDir, "threads.json");
@@ -2691,6 +2693,10 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname.startsWith("/v1/music/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      return musicService(req, res, url);
+    }
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
     }
