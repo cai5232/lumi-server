@@ -15,6 +15,20 @@ test("Murmur drives decay toward baselines and attachment grows after six offlin
   assert.equal(state.offlineTicks, 6);
 });
 
+test("emotion history records each ten-minute mood snapshot and changed drives", () => {
+  const now = 1_000_000;
+  const state = createEmotionState(now);
+  state.drives.tenderness = 0.9;
+  assert.equal(tickEmotion(state, now + 3 * EMOTION_TICK_MS), 3);
+  assert.equal(state.history.length, 3);
+  assert.equal(state.history[0].time, new Date(now + EMOTION_TICK_MS).toISOString());
+  assert.ok(state.history[0].drives.tenderness > state.history[1].drives.tenderness);
+  assert.equal(state.history[0].top.drive, "tenderness");
+  assert.equal(applyEmotionDelta(state, { drive: "jealousy", delta: 0.15 }, now + 3 * EMOTION_TICK_MS + 1), true);
+  assert.equal(state.history.length, 4);
+  assert.equal(state.history.at(-1).top.drive, "tenderness");
+});
+
 test("online activity resets attachment to baseline and clears offline duration", () => {
   const state = createEmotionState(1000);
   state.drives.attachment = 0.9;
