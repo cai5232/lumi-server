@@ -23,7 +23,12 @@
   function boot(){
     var lumiToken = String(window.__LUMI_PUSH_API_TOKEN || '');
     window.__LUMI_PUSH_API_TOKEN = '';
-    if (!lumiToken) { notice('请从 Lumi App 内打开“一起听”。'); return; }
+    if (!lumiToken) {
+      notice(window.__LUMI_NATIVE_APP
+        ? 'Lumi 服务授权尚未配置，请先在 Lumi 聊天设置中配置服务器口令。'
+        : '请从 Lumi App 内打开“一起听”。');
+      return;
+    }
     var api = window.__LS_API || '/api';
     _f(api + '/auth/session', { method: 'POST', headers: { 'Authorization': 'Bearer ' + lumiToken } })
       .then(function(r){ return r.json().catch(function(){ return {}; }); })
