@@ -10,7 +10,7 @@ import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
 import { executeMailTool, handleMailMcp, MAIL_OWNER_EMAIL, mailMcpTools } from "./mail-mcp.js";
 import { searchSentMail } from "./mail-memory.js";
-import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
+import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, recordEmotionSnapshot, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, connectMcpServer, modelToolsForServer, normalizeMcpServers } from "./mcp-clients.js";
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, extractCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
@@ -36,7 +36,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -959,7 +959,12 @@ async function loadEmotionState() {
     sharedEmotionState = ensureEmotion(holder);
   } catch (error) {
     if (error?.code !== "ENOENT") console.warn(`emotion state unavailable: ${error.message}`);
+    if (error?.code !== "ENOENT") return;
   }
+  const now = Date.now();
+  const ticks = tickEmotion(sharedEmotionState, now, (at) => inEmotionQuietHours(new Date(at)));
+  const seeded = recordEmotionSnapshot(sharedEmotionState, now, { force: true });
+  if (ticks || seeded) await saveEmotionState();
 }
 
 async function saveEmotionState() {
@@ -2979,7 +2984,7 @@ const server = createServer(async (req, res) => {
     if ((["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
-    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|regret|memory|activate))?$/);
+    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate))?$/);
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const threadID = decodeURIComponent(emotionMatch[1]);
@@ -2999,6 +3004,18 @@ const server = createServer(async (req, res) => {
           const count = Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)));
           const entries = emotion.arc.filter((entry) => !type || entry.type === type).slice(-count);
           return send(res, 200, entries);
+        }
+        if (operation === "history") {
+          const now = Date.now();
+          const ticks = tickEmotion(emotion, now, (at) => inEmotionQuietHours(new Date(at)));
+          const seeded = recordEmotionSnapshot(emotion, now);
+          if (ticks || seeded) await saveEmotionState();
+          const requestedHours = Number(url.searchParams.get("hours") || 24);
+          const hours = Math.max(1, Math.min(168, Number.isFinite(requestedHours) ? requestedHours : 24));
+          const requestedCount = Number(url.searchParams.get("n") || 500);
+          const count = Math.max(1, Math.min(2_000, Number.isFinite(requestedCount) ? requestedCount : 500));
+          const cutoff = now - hours * 60 * 60_000;
+          return send(res, 200, emotion.history.filter((entry) => Date.parse(entry.time) >= cutoff).slice(-count));
         }
         if (operation === "regret") return send(res, 200, emotion.regrets.slice(-Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)))));
         if (operation === "memory") return send(res, 200, { long: emotion.memory.long, short: emotion.memory.short });

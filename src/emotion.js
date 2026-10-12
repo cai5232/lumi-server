@@ -14,6 +14,7 @@ export const EMOTION_DRIVES = {
 };
 
 export const EMOTION_TICK_MS = 10 * 60_000;
+export const EMOTION_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const EMOTION_REFLECTION_MS = 20 * 60_000;
 export const EMOTION_REFLECTION_THRESHOLD = 0.65;
 export const EMOTION_PUSH_THRESHOLD = 0.50;
@@ -32,6 +33,7 @@ export function createEmotionState(now = Date.now()) {
     pendingAttachmentPushes: 0,
     offlineTicks: 0,
     arc: [],
+    history: [],
     regrets: [],
     memory: { short: "", long: "" },
     lastOnlineAt: now
@@ -51,6 +53,9 @@ export function ensureEmotion(thread, now = Date.now()) {
   state.pendingAttachmentPushes = Math.max(0, Math.min(5, Number(state.pendingAttachmentPushes) || 0));
   state.offlineTicks = Math.max(0, Number(state.offlineTicks) || 0);
   state.arc = Array.isArray(state.arc) ? state.arc : [];
+  state.history = Array.isArray(state.history)
+    ? state.history.filter((entry) => entry && typeof entry.time === "string" && entry.drives && typeof entry.drives === "object").slice(-2_000)
+    : [];
   state.regrets = Array.isArray(state.regrets) ? state.regrets : [];
   state.memory = state.memory && typeof state.memory === "object" ? state.memory : { short: "", long: "" };
   state.memory.short = String(state.memory.short || "").slice(0, 2000);
@@ -67,6 +72,27 @@ export function topEmotions(state, limit = 3) {
 
 export function topEmotion(state) {
   return topEmotions(state, 1)[0] || { drive: "attachment", value: 0.4, label: "想念" };
+}
+
+export function recordEmotionSnapshot(state, now = Date.now(), { force = false } = {}) {
+  state.history = Array.isArray(state.history) ? state.history : [];
+  const drives = Object.fromEntries(Object.keys(EMOTION_DRIVES).map((drive) => [drive, Number(clamp(state.drives[drive]).toFixed(3))]));
+  const latest = state.history.at(-1);
+  const latestAt = Date.parse(latest?.time || "");
+  const unchanged = latest && Object.keys(drives).every((drive) => Number(latest.drives[drive]) === drives[drive]);
+  if (unchanged && (!force || !Number.isFinite(latestAt) || now - latestAt < EMOTION_TICK_MS)) return null;
+  if (!force && Number.isFinite(latestAt) && now - latestAt < EMOTION_TICK_MS) return null;
+  const top = topEmotion({ drives });
+  const entry = {
+    id: randomUUID(),
+    time: new Date(now).toISOString(),
+    drives,
+    top: { drive: top.drive, value: Number(top.value.toFixed(3)), label: top.label }
+  };
+  state.history.push(entry);
+  const cutoff = now - EMOTION_HISTORY_RETENTION_MS;
+  state.history = state.history.filter((item) => Date.parse(item.time) >= cutoff).slice(-2_000);
+  return entry;
 }
 
 export function tickEmotion(state, now = Date.now(), quietAt = () => false) {
@@ -87,6 +113,7 @@ export function tickEmotion(state, now = Date.now(), quietAt = () => false) {
       const config = EMOTION_DRIVES.attachment;
       state.drives.attachment = clamp(state.drives.attachment - (state.drives.attachment - config.baseline) * config.decay * 10);
     }
+    recordEmotionSnapshot(state, tickAt, { force: true });
   }
   state.lastTickAt += ticks * EMOTION_TICK_MS;
   return ticks;
@@ -97,6 +124,7 @@ export function markEmotionOnline(state, now = Date.now()) {
   // that accumulated while the user was away.
   state.offlineTicks = 0;
   state.lastOnlineAt = now;
+  recordEmotionSnapshot(state, now, { force: true });
 }
 
 export function applyEmotionDelta(state, update, now = Date.now()) {
@@ -117,6 +145,7 @@ export function applyEmotionDelta(state, update, now = Date.now()) {
       state.regrets = state.regrets.slice(-200);
     }
   }
+  if (changed) recordEmotionSnapshot(state, now, { force: true });
   return changed;
 }
 export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.now(), value } = {}) {
@@ -129,6 +158,7 @@ export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.
   };
   state.arc.push(entry);
   state.arc = state.arc.slice(-500);
+  recordEmotionSnapshot(state, now, { force: true });
   return entry;
 }
 

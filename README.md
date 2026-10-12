@@ -116,13 +116,13 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 - `GET /v1/watch/analysis-config`、`POST /v1/watch/analyze`：Bearer 鉴权；将当前视频帧转发给单独配置的 OpenAI 兼容视觉模型，不上传或保存完整视频
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
-- `GET /v1/chats/:id/emotion/state|arc|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
+- `GET /v1/chats/:id/emotion/state|arc|history|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
 
 ### 情绪驱动力
 
 所有聊天共用一份持久化的情绪状态，保存十类连续驱动力（想念、心软、心疼、好奇、促狭、躁动、后悔、欲望、低落、吃醋）。每 10 分钟向各自基线衰减；离线满 6 个 tick 后想念开始增长；最强驱动力达到 0.65 时每 20 分钟生成一条私密独白，达到 0.50 时按 Murmur 节奏经 Lumi APNs 推送。北京时间 16:00–00:00 静默时段会积攒想念推送，睡眠期间不发送情绪推送。普通聊天、哨兵主动消息、通话、梦境/睡眠阶段和图像整理请求都会收到这份共享驱动力上下文；动态情绪只放在每次请求的 user suffix，不拼进稳定缓存系统提示词。
 
-`emotion/state` 返回当前驱动力；`emotion/arc?type=murmur&n=20` 读取独白，`emotion/regret?n=20` 读取检讨，`emotion/memory` 读取长期/短期情绪记忆。`POST emotion/activate` 支持 `{"type":"activate"}`、`{"type":"boost","drive":"attachment","delta":0.1}`、`{"type":"write_arc","drive":"attachment","text":"..."}` 和 `{"type":"tick"}`。`POST emotion/memory` 支持 `{"content":"..."}` 写短期记忆（最多 500 字）或 `{"scope":"long","content":"..."}` 写长期记忆。
+`emotion/state` 返回当前驱动力；`emotion/history?hours=24&n=500` 返回驱动力变化快照，背景 tick 每 10 分钟记录一次，聊天中的实际变化会立即记录，保留最近 7 天；`emotion/arc?type=murmur&n=20` 读取独白，`emotion/regret?n=20` 读取检讨，`emotion/memory` 读取长期/短期情绪记忆。`POST emotion/activate` 支持 `{"type":"activate"}`、`{"type":"boost","drive":"attachment","delta":0.1}`、`{"type":"write_arc","drive":"attachment","text":"..."}` 和 `{"type":"tick"}`。`POST emotion/memory` 支持 `{"content":"..."}` 写短期记忆（最多 500 字）或 `{"scope":"long","content":"..."}` 写长期记忆。
 
 此实现参考 [Murmur-50Feet](https://github.com/Nixie0/Murmur-50Feet)，保留其 MIT 许可，见 `THIRD_PARTY_NOTICES.md`。
 
