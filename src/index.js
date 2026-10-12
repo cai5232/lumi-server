@@ -1484,7 +1484,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Keep Anthropic's remote MCP connector for server-configured providers.
   // Custom Anthropic relays instead receive ordinary Anthropic tool schemas;
   // Lumi executes those tools locally so the relay need not proxy MCP beta.
-  const nativeRemoteMcpServers = nativeAnthropic && !customProvider ? mcpServers.map(server => {
+  const nativeRemoteMcpServers = nativeAnthropic && !customProvider ? mcpServers.filter(server => server.id !== ENGAWA_SERVER_ID).map(server => {
     const authorization = Object.entries(server.headers || {}).find(([key]) => key.toLowerCase() === "authorization")?.[1] || "";
     const token = authorization.replace(/^Bearer\s+/i, "").trim();
     return { id: server.id, type: "url", url: server.url, name: server.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64), ...(token ? { authorization_token: token } : {}) };
@@ -1525,8 +1525,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `共享日历：${tool.description}`, parameters: tool.inputSchema } });
     }
   }
-  const anthropicLocalTools = customProvider?.apiFormat === "anthropic" && mcpRound < 4
-    ? mcpTools.map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
+  const anthropicLocalTools = nativeAnthropic && mcpRound < 4
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID)
+      .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const requestBody = nativeAnthropic
     ? {
@@ -1597,7 +1598,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
     return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive });
   }
-  const nativeToolUses = customProvider?.apiFormat === "anthropic" && Array.isArray(data?.content)
+  const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
     : [];
   if (nativeToolUses.length && mcpRound < 4) {
