@@ -6,7 +6,7 @@ import { createServer } from "node:http";
 import { WorldBookStore, evaluateBooks, injectBooks } from "./world-book.js";
 import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
-import { handleMailMcp, MAIL_OWNER_EMAIL, mailMcpTools } from "./mail-mcp.js";
+import { executeMailTool, handleMailMcp, MAIL_OWNER_EMAIL, mailMcpTools } from "./mail-mcp.js";
 import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
@@ -29,7 +29,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1";
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1396,7 +1396,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
   const mailSettings = await mcpClientStore.read();
   const mailMcpEnabled = nativeAnthropic && Boolean(mailThreadId) && mailMcpConfiguredFor(provider, model, customProvider, mailSettings.mailEnabled !== false);
-  const mailMcpEndpoint = mailMcpEnabled ? new URL(mailMcpURL) : null;
+  const nativeMailMcp = mailMcpEnabled && !customProvider;
+  const localMailMcpEnabled = mailMcpEnabled && Boolean(customProvider);
+  const mailMcpEndpoint = nativeMailMcp ? new URL(mailMcpURL) : null;
   if (mailMcpEndpoint) mailMcpEndpoint.searchParams.set("threadId", mailThreadId);
 
   const providerMessages = messages.map((message) => {
@@ -1437,6 +1439,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `${server.name}: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
     }
   }
+  if (localMailMcpEnabled) {
+    for (const tool of mailMcpTools) {
+      const name = `lumi_email_${tool.name}`;
+      mcpToolMap.set(name, { tool, execute: (args) => executeMailTool(tool.name, args, mailThreadId), allowWrite: true });
+      mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
+    }
+  }
   const anthropicLocalTools = customProvider?.apiFormat === "anthropic" && mcpRound < 4
     ? mcpTools.map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
@@ -1452,16 +1461,16 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(!disableThinkingRetry && (process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
-        ...((mailMcpEnabled || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
-          ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? {
+        ...((nativeMailMcp || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
+          ...((nativeMailMcp || nativeRemoteMcpServers.length) ? {
             mcp_servers: [
-              ...(mailMcpEnabled ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
+              ...(nativeMailMcp ? [{ type: "url", url: mailMcpEndpoint.toString(), name: "lumi_mail", authorization_token: mailMcpToken }] : []),
               ...nativeRemoteMcpServers
             ]
           } : {}),
           tools: [
             ...anthropicLocalTools,
-            ...(mailMcpEnabled ? [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }] : []),
+            ...(nativeMailMcp ? [{ type: "mcp_toolset", mcp_server_name: "lumi_mail", default_config: { enabled: true } }] : []),
             ...nativeRemoteMcpServers.map(server => ({ type: "mcp_toolset", mcp_server_name: server.name, default_config: { enabled: true } }))
           ]
         } : {})
@@ -1476,7 +1485,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       ...(nativeAnthropic && (directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
       ...(nativeAnthropic ? {
         "anthropic-version": "2023-06-01",
-        ...((mailMcpEnabled || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
+        ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
       } : {})
     },
     body: JSON.stringify(requestBody)
@@ -1518,12 +1527,14 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
         continue;
       }
-      if (/(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      if (!entry.allowWrite && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
       try {
-        const result = await callMcpTool(entry.server, entry.tool.name, use.input || {});
+        const result = entry.execute
+          ? await entry.execute(use.input || {})
+          : await callMcpTool(entry.server, entry.tool.name, use.input || {});
         results.push({ type: "tool_result", tool_use_id: use.id, content: JSON.stringify(result).slice(0, 30000) });
       } catch (error) {
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: JSON.stringify({ error: String(error.message || error).slice(0, 1000) }) });
