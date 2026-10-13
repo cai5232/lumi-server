@@ -1378,7 +1378,13 @@ function contextMessages(thread) {
   const boundaryId = thread.compactedThroughMessageId;
   if (!boundaryId) return messages;
   const boundaryIndex = messages.findIndex((message) => message.id === boundaryId);
-  return boundaryIndex >= 0 ? messages.slice(boundaryIndex + 1) : messages;
+  // A missing boundary must not silently resurrect the entire pre-compaction history.
+  // Keep the most recent turns while preserving the stored transcript untouched.
+  if (boundaryIndex < 0) {
+    console.warn(`[compaction] boundary missing for thread=${thread.id || "default"}; using bounded recent history`);
+    return messages.slice(-Math.max(2, Number(process.env.LUMI_COMPACT_FALLBACK_MESSAGES || 16)));
+  }
+  return messages.slice(boundaryIndex + 1);
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
 function cacheUsage(usage = {}) {
@@ -1963,7 +1969,7 @@ function compactionPlan(thread, pendingInput = "") {
     if (messages[index].role === "assistant" && index > 0 && messages[index - 1].role === "user") start = index - 1;
     const turn = messages.slice(start, index + 1);
     const cost = messageTokens(turn);
-    if (tail.length && tailCount + cost > tailTokens) break;
+    if (tail.length && tailCount + cost > Math.min(tailTokens, Math.floor(compactAtTokens * 0.5))) break;
     tail.unshift(...turn);
     tailCount += cost;
     index = start - 1;
