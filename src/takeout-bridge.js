@@ -73,7 +73,7 @@ function sanitizeTakeoutInput(input = {}) {
   value.dish = String(value.dish || "").trim().slice(0, 80);
   value.qty = Math.max(1, Math.min(10, Math.floor(Number(value.qty) || 1)));
   const requestedMax = Number(value.max);
-  value.max = Number.isFinite(requestedMax) ? Math.max(0.01, Math.min(10000, requestedMax)) : 25;
+  value.max = Number.isFinite(requestedMax) ? Math.max(0.01, requestedMax) : Number.MAX_SAFE_INTEGER;
   value.dry = value.dry !== false;
   if (Array.isArray(value["规格"])) value["规格"] = value["规格"].slice(0, 8).map((item) => String(item).slice(0, 30));
   else delete value["规格"];
