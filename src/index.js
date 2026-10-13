@@ -12,6 +12,7 @@ import { executeMailTool, handleMailMcp, MAIL_OWNER_EMAIL, mailMcpTools } from "
 import { searchSentMail } from "./mail-memory.js";
 import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, recordEmotionSnapshot, tickEmotion, topEmotion } from "./emotion.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
+import { claimTakeoutJob, finishTakeoutJob } from "./takeout-bridge.js";
 import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, connectMcpServer, modelToolsForServer, normalizeMcpServers } from "./mcp-clients.js";
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, extractCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
@@ -2381,7 +2382,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode && !proactive
-    ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。需要时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，等待返回后再选择具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
+    ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。用户明确要点外卖时，调用 food_takeout_order，使用本机助手核实实际店铺、商品、地址和金额，不要编造；25元以内按用户已设定授权处理，超过25元先用 food_takeout_card 给出真实预览，并要求用户回复卡片上的准确金额后再继续。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。若要求登录、验证码、地址不明或金额无法核实就停止，不尝试绕过。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
@@ -2511,7 +2512,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
         discoveryContext = `已按需加载饮食本工具。可用工具定义：${JSON.stringify(definitions)}\n当前饮食本信息：\n${context}\n`;
         foodToolsDiscovered = true;
       }
-      try { result = `${discoveryContext}${await executeFoodTool(request.name, request.arguments || {})}`; }
+      try { result = `${discoveryContext}${await executeFoodTool(request.name, request.arguments || {}, { threadID: thread.id, userInput: input })}`; }
       catch (error) { result = `${discoveryContext}操作没有完成：${error.message}`; }
     }
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
@@ -3169,6 +3170,19 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === "/v1/food" || url.pathname === "/v1/food/") {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
+    }
+    if (url.pathname.startsWith("/v1/takeout/bridge")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (url.pathname === "/v1/takeout/bridge/next" && req.method === "GET") {
+        return send(res, 200, { job: claimTakeoutJob() });
+      }
+      const resultPath = url.pathname.match(/^\/v1\/takeout\/bridge\/([^/]+)\/result$/);
+      if (resultPath && req.method === "POST") {
+        const input = await body(req);
+        const accepted = finishTakeoutJob(decodeURIComponent(resultPath[1]), input.result);
+        return send(res, accepted ? 200 : 404, { ok: accepted });
+      }
+      return send(res, 404, { error: "not_found" });
     }
     if (url.pathname.startsWith("/v1/food/")) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
