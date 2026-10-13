@@ -3294,6 +3294,19 @@ const server = createServer(async (req, res) => {
       const threads = await readThreads();
       if (!threads[threadID]) return send(res, 404, { error: "thread_not_found" });
       const thread = threads[threadID];
+
+      const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\\/+$/, "");
+      if (murmurServiceUrl) {
+        try {
+          const target = `${murmurServiceUrl}/internal/v1/chats/${encodeURIComponent(threadID)}/emotion/${operation}${url.search}`;
+          const headers = { authorization: `Bearer ${process.env.MURMUR_INTERNAL_TOKEN || ""}` };
+          let payload;
+          if (req.method !== "GET") { payload = await body(req); headers["content-type"] = "application/json"; }
+          const upstream = await fetch(target, { method: req.method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}) });
+          const responseText = await upstream.text();
+          return send(res, upstream.status, (() => { try { return JSON.parse(responseText); } catch { return { error: "murmur_invalid_response" }; } })());
+        } catch (error) { console.warn(`Murmur service request failed: ${error.message}`); return send(res, 502, { error: "murmur_unavailable" }); }
+      }
       const emotion = sharedEmotionState;
       if (req.method === "GET") {
         if (operation === "state") {
