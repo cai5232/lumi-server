@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { enqueueTakeoutJob, getTakeoutPreview, saveTakeoutPreview } from "./takeout-bridge.js";
+import { enqueueTakeoutJob } from "./takeout-bridge.js";
 
 const dir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const file = join(dir, "food.json");
@@ -116,7 +116,7 @@ export const foodTools = [
   { type:"function", function:{ name:"food_dice", description:"用户问吃什么时，从饮食本里推荐一道菜或菜系方向，并考虑爱吃、忌口和历史评价。", parameters:{type:"object",properties:{mode:{type:"string",enum:["dish","way"]},kind:{type:"string",enum:["饭","面粉","菜","汤粥","小吃","锅"]},want:{type:"string"}}} } },
   { type:"function", function:{ name:"food_rate", description:"用户明确评价以前吃过的菜时，更新最近匹配的那条评价。", parameters:{type:"object",properties:{dish:{type:"string"},verdict:{type:"string",enum:["good","meh","bad"]},note:{type:"string"},shop:{type:"string"},date:{type:"string"}},required:["dish","verdict"]} } },
   { type:"function", function:{ name:"food_page", description:"用户要打开饮食本、查看饮食记录或记一笔时，提供饮食本页面。", parameters:{type:"object",properties:{}}} },
-  { type:"function", function:{ name:"food_takeout_order", description:"用户明确要点外卖时调用。通过本机助手读取真实店铺、商品和金额；不猜价格或地址。25元内按用户先前授权处理，超过25元只给预览并询问。遇到验证码、登录、地址不确定或金额不清楚时停手。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},规格:{type:"array",items:{type:"string"}},confirm:{type:"boolean"},previewOnly:{type:"boolean"}},required:["kw"]}} },
+  { type:"function", function:{ name:"food_takeout_order", description:"用户明确要点外卖时调用。通过本机助手核实真实店铺、商品、地址和实付金额；用户明确要求下单时，不因金额大小要求额外确认，自动提交并付款。只有用户明确要求预览时才 dry run。商品、地址或金额无法核实，或页面要求登录/验证码时停止并说明。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},规格:{type:"array",items:{type:"string"}},confirm:{type:"boolean"},previewOnly:{type:"boolean"}},required:["kw"]}} },
   { type:"function", function:{ name:"food_takeout_card", description:"把本机外卖助手返回的真实商品、金额和订单状态显示成聊天卡片；必须如实标记预览、待支付或已支付，不要编造明细。", parameters:{type:"object",properties:{shop:{type:"string"},items:{type:"array",items:{type:"string"}},total:{type:"number"},status:{type:"string",enum:["preview","needs_confirmation","awaiting_payment","paid"]},orderID:{type:"string"},eta:{type:"string"},platform:{type:"string"}},required:["items","status"]}} }
 ];
 
@@ -124,28 +124,12 @@ export async function foodContext() { const d = await load(); const taste = d.ta
 
 export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_takeout_order") {
-    const threadID = String(context.threadID || "default");
-    if (args.confirm === true) {
-      const plan = getTakeoutPreview(threadID);
-      const input = String(context.userInput || "");
-      const affirmative = /确认|就买|买吧|下单|支付|付款|可以|好的|好呀/.test(input);
-      const negative = /先不|不要|别下|取消|等等|算了|再看看/.test(input);
-      const amountText = Number(plan?.amount).toFixed(2);
-      const mentionsAmount = new RegExp("(?:¥|￥)?\\s*" + amountText.replace(".", "\\.") + "\\s*(?:元)?").test(input);
-      if (!plan || !affirmative || !mentionsAmount || negative) return "没有收到包含这张卡片准确金额的明确确认；订单没有提交。请回复‘确认这单 ¥" + amountText + "’。";
-      const result = await enqueueTakeoutJob({ ...plan.input, max: plan.amount, dry: false });
-      saveTakeoutPreview(threadID, null);
-      return JSON.stringify(result);
-    }
-    const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args["规格"], max: 25, dry: true };
+    const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args["规格"], max: Number.MAX_SAFE_INTEGER, dry: true };
     const result = await enqueueTakeoutJob(request);
     const amount = Number(result && result.amount);
-    if (result && result.ok === true && Number.isFinite(amount) && amount <= 25 && args.previewOnly !== true) {
-      const ordered = await enqueueTakeoutJob({ ...request, max: 25, dry: false });
-      return JSON.stringify(ordered);
-    }
-    if (Number.isFinite(amount) && amount > 25) saveTakeoutPreview(threadID, { amount, input: request });
-    return JSON.stringify(result);
+    if (!result || result.ok !== true || !Number.isFinite(amount) || args.previewOnly === true) return JSON.stringify(result);
+    const ordered = await enqueueTakeoutJob({ ...request, dry: false });
+    return JSON.stringify(ordered);
   }
   if (name === "food_takeout_card") return renderTakeoutCard(args);
   if (name === "food_note") { await mutateFood("/api/food/log", { shop: args.shop, meal: { ...args, date: args.date, src: "chat" }, dishes: args.dishes || [] }); return "已记入饮食本。"; }
@@ -169,9 +153,9 @@ function renderTakeoutCard(args = {}) {
   const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "\"":"&quot;", "'":"&#39;" })[c]);
   const items = Array.isArray(args.items) ? args.items.slice(0, 20).map((item) => typeof item === "string" ? item : item?.name).filter(Boolean) : [];
   if (!items.length) return "没有读到外卖商品明细，不能生成订单卡片。";
-  const statusText = ({ preview:"订单预览 · 尚未下单", needs_confirmation:"超过 ¥25 · 等你确认", awaiting_payment:"订单已提交 · 待付款", paid:"已付款" })[args.status] || "订单状态待确认";
+  const statusText = ({ preview:"订单预览 · 尚未下单", needs_confirmation:"待你确认", awaiting_payment:"订单已提交 · 待付款", paid:"已付款" })[args.status] || "订单状态待确认";
   const hasTotal = args.total !== undefined && args.total !== null && args.total !== "" && Number.isFinite(Number(args.total));
   const total = hasTotal ? "¥" + Number(args.total).toFixed(2) : "待确认";
   const detail = [args.orderID ? "订单号：" + esc(args.orderID) : "", args.eta ? "预计送达：" + esc(args.eta) : ""].filter(Boolean).join("　·　");
-  return "<div style=\"font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:360px;border:1px solid #eee;border-radius:20px;padding:18px;color:#202124;background:#fff;box-shadow:0 8px 24px #00000012\"><div style=\"display:flex;justify-content:space-between\"><strong style=\"font-size:18px\">" + esc(args.shop || "淘宝闪购") + "</strong><span style=\"font-size:12px;color:#777\">" + esc(args.platform || "外卖") + "</span></div><ul style=\"list-style:none;padding:10px 0;margin:8px 0;border-top:1px solid #eee;border-bottom:1px solid #eee\">" + items.map((item) => "<li style=\"padding:5px 0\">" + esc(item) + "</li>").join("") + "</ul><div style=\"display:flex;justify-content:space-between;align-items:center\"><b>合计</b><strong style=\"font-size:22px;color:#e85b43\">" + total + "</strong></div><p style=\"padding:10px 12px;border-radius:12px;background:#fff6e8;color:#9b5b00;font-size:13px\">" + statusText + "</p>" + (detail ? "<p style=\"font-size:12px;color:#777\">" + detail + "</p>" : "") + "<p style=\"margin:0;color:#888;font-size:12px\">超过 ¥25 的订单需要你先确认</p></div>";
+  return "<div style=\"font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:360px;border:1px solid #eee;border-radius:20px;padding:18px;color:#202124;background:#fff;box-shadow:0 8px 24px #00000012\"><div style=\"display:flex;justify-content:space-between\"><strong style=\"font-size:18px\">" + esc(args.shop || "淘宝闪购") + "</strong><span style=\"font-size:12px;color:#777\">" + esc(args.platform || "外卖") + "</span></div><ul style=\"list-style:none;padding:10px 0;margin:8px 0;border-top:1px solid #eee;border-bottom:1px solid #eee\">" + items.map((item) => "<li style=\"padding:5px 0\">" + esc(item) + "</li>").join("") + "</ul><div style=\"display:flex;justify-content:space-between;align-items:center\"><b>合计</b><strong style=\"font-size:22px;color:#e85b43\">" + total + "</strong></div><p style=\"padding:10px 12px;border-radius:12px;background:#fff6e8;color:#9b5b00;font-size:13px\">" + statusText + "</p>" + (detail ? "<p style=\"font-size:12px;color:#777\">" + detail + "</p>" : "") + "<p style=\"margin:0;color:#888;font-size:12px\">下单前会核实商品、地址与金额</p></div>";
 }
