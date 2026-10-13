@@ -2038,6 +2038,19 @@ function withoutSpeechPlanning(content) {
   });
 }
 
+function callProviderRoute(input, thread) {
+  // A selected custom preset must never silently route to Zenmux.
+  const provider = input?.customProvider && typeof input.customProvider === "object"
+    ? "custom" : (typeof input?.provider === "string" && input.provider ? input.provider : thread?.cacheProvider || "zenmux");
+  const model = typeof input?.model === "string" && input.model ? input.model : thread?.cacheModel || "";
+  if (provider === "custom") {
+    const customProvider = normalizeCustomProvider(input?.customProvider);
+    if (!customProvider || !model) throw new Error("call_custom_provider_or_model_required");
+    return { provider, model, customProvider };
+  }
+  return { provider, model };
+}
+
 async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
   provider = provider || thread?.cacheProvider || "zenmux";
   // Do not make a standalone summary request. It would have a different prompt
@@ -3550,6 +3563,7 @@ const server = createServer(async (req, res) => {
             input: `<internal_call_declined>言言拒绝了你刚才主动发起的电话。${input.note ? `她留下的理由是：${String(input.note).slice(0, 120)}。` : "她没有留下理由。"}请自然地发一条聊天消息，理解她可能在忙，不要责怪，也不要提及内部标签。</internal_call_declined>`,
             systemPrompt: input.systemPrompt,
             thread,
+            ...callProviderRoute(input, thread),
             callMode: true
           });
         } catch {
@@ -3568,6 +3582,7 @@ const server = createServer(async (req, res) => {
           input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。${input.softVoice ? "请用温柔、轻声、稍慢的语气。" : ""}不要提及内部标签。</internal_call_accepted>`,
           systemPrompt: input.systemPrompt,
           thread,
+          ...callProviderRoute(input, thread),
           callMode: true,
           allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
           speechProvider: input.tts?.provider,
@@ -3653,6 +3668,7 @@ const server = createServer(async (req, res) => {
         speechModel: input.tts?.model,
         systemPrompt: input.systemPrompt,
         thread,
+        ...callProviderRoute(input, thread),
         callMode: true,
         callHistory: call.turns
       });
@@ -3715,6 +3731,7 @@ const server = createServer(async (req, res) => {
         speechModel: input.tts?.model,
         systemPrompt: input.systemPrompt,
         thread,
+        ...callProviderRoute(input, thread),
         callMode: true
       });
       const now = new Date().toISOString();
