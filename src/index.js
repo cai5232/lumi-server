@@ -33,12 +33,13 @@ const pushTokensPath = join(dataDir, "push-tokens.json");
 const voipTokensPath = join(dataDir, "voip-tokens.json");
 const galleryDir = join(dataDir, "gallery");
 const diaryPath = join(dataDir, "diaries.json");
+const drawerItemsPath = join(dataDir, "drawer-items.json");
 const screenShareDir = join(dataDir, "screen-share");
 const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -1349,6 +1350,74 @@ function estimateTokens(text) {
   return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
 }
 
+function normalizeDrawerPixel(content) {
+  try {
+    const data = JSON.parse(content);
+    const { w, h, palette, grid } = data || {};
+    if (!Number.isInteger(w) || !Number.isInteger(h) || w < 1 || h < 1 || w > 64 || h > 64) return null;
+    if (!Array.isArray(palette) || palette.length < 1 || palette.length > 256 || !["#0000", "#00000000", "transparent"].includes(String(palette[0]).toLowerCase())) return null;
+    const colorPattern = /^#[0-9a-fA-F]{3,4}$|^#[0-9a-fA-F]{6}$|^#[0-9a-fA-F]{8}$/;
+    if (palette.some(color => typeof color !== "string" || (color !== "transparent" && !colorPattern.test(color)))) return null;
+    if (!Array.isArray(grid) || grid.length === 0 || Math.abs(grid.length - w * h) > w) return null;
+    if (grid.some(index => !Number.isInteger(index) || index < 0 || index >= palette.length)) return null;
+    return JSON.stringify({ w, h, palette, grid: [...grid, ...Array(Math.max(0, w * h - grid.length)).fill(0)].slice(0, w * h) });
+  } catch { return null; }
+}
+
+function extractDrawerBlocks(reply) {
+  const source = String(reply || "");
+  const block = /\[\[DRAWER:(\w+)\]\]([\s\S]*?)\[\[\/DRAWER\]\]/g;
+  const matches = [...source.matchAll(block)];
+  const content = source.replace(block, "").trim();
+  if (content.includes("[[DRAWER:") || content.includes("[[/DRAWER]]")) throw new Error("抽屉标记未闭合或格式无效");
+  const items = matches.map(match => {
+    const kind = match[1].toLowerCase();
+    const value = match[2].trim();
+    if (!value) return null;
+    if (value.length > 65536) throw new Error("抽屉内容超过 65536 字符");
+    if (kind === "pixel") {
+      const pixel = normalizeDrawerPixel(value);
+      if (pixel !== null) return { kind: "pixel", content: pixel };
+    }
+    return { kind: "text", content: value };
+  }).filter(Boolean);
+  return { content, items };
+}
+
+let drawerWriteQueue = Promise.resolve();
+function updateDrawerItems(chatID, update) {
+  const operation = drawerWriteQueue.then(async () => {
+    let all = {};
+    try { all = JSON.parse(await readFile(drawerItemsPath, "utf8")); } catch (error) { if (error?.code !== "ENOENT") throw error; }
+    const current = Array.isArray(all[chatID]) ? all[chatID] : [];
+    const next = update(current);
+    all[chatID] = next.items;
+    await mkdir(dataDir, { recursive: true });
+    const tempPath = `${drawerItemsPath}.${randomUUID()}.tmp`;
+    await writeFile(tempPath, JSON.stringify(all), { mode: 0o600 });
+    await rename(tempPath, drawerItemsPath);
+    return next.result;
+  });
+  drawerWriteQueue = operation.catch(() => {});
+  return operation;
+}
+
+async function readDrawerItems(chatID) {
+  await drawerWriteQueue;
+  try {
+    const all = JSON.parse(await readFile(drawerItemsPath, "utf8"));
+    return Array.isArray(all[chatID]) ? all[chatID] : [];
+  } catch { return []; }
+}
+
+function saveDrawerItems(chatID, entries) {
+  return updateDrawerItems(chatID, current => {
+    const createdAt = new Date().toISOString();
+    const added = entries.map(entry => ({ id: randomUUID(), kind: entry.kind, content: entry.content, created_at: createdAt, seen: false }));
+    return { items: [...added, ...current], result: added };
+  });
+}
+
 function extractOptionItems(text) {
   const items = [];
   for (const match of String(text || "").matchAll(new RegExp(OPTION_MARKER_SOURCE, "g"))) {
@@ -2121,6 +2190,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     );
   }
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
+  if (!callMode && !proactive && !system.includes("【抽屉】")) system += "\n\n【抽屉】你可以偶尔在正常回复旁边留下便签或像素小画：[[DRAWER:text]]便签内容[[/DRAWER]] 或 [[DRAWER:pixel]]完整像素 JSON[[/DRAWER]]。只在值得留给以后看的瞬间使用，低频，不要求回应。标记块必须完整闭合；不要在聊天正文预告或暗示留下了内容。像素 JSON 使用 w/h 1 到 64、palette 第 0 项为透明色、grid 含 w*h 个合法整数。";
   const summaryText = thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
@@ -2395,9 +2465,14 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   const emotionUpdate = applyEmotionUpdateFromOutput(raw);
   if (emotionUpdate) await saveEmotionState();
-  const cleanedRaw = (callMode
+  let cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
     : withoutSpeechPlanning(raw));
+  if (!callMode && !proactive) {
+    const drawer = extractDrawerBlocks(cleanedRaw);
+    cleanedRaw = drawer.content;
+    if (drawer.items.length) await saveDrawerItems(thread.id, drawer.items);
+  }
   const optionItems = callMode || proactive ? [] : extractOptionItems(cleanedRaw);
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const speechMatch = allowSpeech ? cleanedRaw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
@@ -2440,7 +2515,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
+  const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim();
+  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
 }
 
 async function checkCacheKeepalive() {
@@ -3472,6 +3548,25 @@ const server = createServer(async (req, res) => {
         }
         await saveThreads(threads);
         return send(res, 200, activity);
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
+    const drawerMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/drawer(?:\/(unseen|seen))?$/);
+    if (drawerMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const id = decodeURIComponent(drawerMatch[1]);
+      const operation = drawerMatch[2];
+      if (req.method === "GET" && !operation) return send(res, 200, { items: await readDrawerItems(id) });
+      if (req.method === "GET" && operation === "unseen") {
+        const items = await readDrawerItems(id);
+        return send(res, 200, { count: items.filter(item => !item.seen).length });
+      }
+      if (req.method === "POST" && operation === "seen") {
+        const input = await body(req);
+        if (!Array.isArray(input.ids) || input.ids.length > 10000 || input.ids.some(value => typeof value !== "string" || value.length > 100)) return send(res, 400, { error: "ids_must_be_string_array" });
+        const ids = new Set(input.ids);
+        await updateDrawerItems(id, current => ({ items: current.map(item => ids.has(item.id) ? { ...item, seen: true } : item), result: null }));
+        return send(res, 200, { ok: true });
       }
       return send(res, 405, { error: "method_not_allowed" });
     }
