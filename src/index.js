@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createHash, createHmac, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
 import { connect } from "node:http2";
 import { createServer, request as httpRequest } from "node:http";
 import { connect as connectSocket } from "node:net";
@@ -27,6 +27,7 @@ const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const mcpClientStore = new McpClientStore(join(dataDir, "mcp-clients.json"));
 const threadPath = join(dataDir, "threads.json");
 const emotionStatePath = join(dataDir, "emotion-state.json");
+const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
@@ -102,6 +103,40 @@ function normalizeCustomProvider(input) {
   // configurations. Keep the public request field named `apiKey`, then
   // normalize it here so frontend presets work without server env variables.
   return { key: apiKey, url: baseURL.replace(/\/+$/, ""), apiFormat, chatPath };
+}
+
+function murmurEncryptionKey() {
+  const value = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "");
+  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("LUMI_MURMUR_KEY_ENCRYPTION_KEY must be 32-byte hex");
+  return Buffer.from(value, "hex");
+}
+async function readMurmurRoutes() {
+  try { return JSON.parse(await readFile(murmurRoutePath, "utf8")); }
+  catch (error) { if (error?.code === "ENOENT") return {}; throw error; }
+}
+function encryptMurmurProvider(provider) {
+  const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", murmurEncryptionKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(provider), "utf8"), cipher.final()]);
+  return { iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: ciphertext.toString("base64") };
+}
+function decryptMurmurProvider(value) {
+  const decipher = createDecipheriv("aes-256-gcm", murmurEncryptionKey(), Buffer.from(value.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(value.tag, "base64"));
+  return JSON.parse(Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]).toString("utf8"));
+}
+async function saveMurmurRoute(threadId, provider, model, customProvider = null) {
+  const routes = await readMurmurRoutes();
+  routes[threadId] = { provider, model, updatedAt: Date.now(), ...(customProvider ? { customProvider: encryptMurmurProvider(customProvider) } : {}) };
+  await mkdir(dataDir, { recursive: true });
+  const temporaryPath = `${murmurRoutePath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(routes));
+  await rename(temporaryPath, murmurRoutePath);
+}
+async function resolveMurmurRoute(threadId = "") {
+  const routes = await readMurmurRoutes();
+  const route = (threadId && routes[threadId]) || Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  if (!route) return null;
+  return { provider: route.provider, model: route.model, customProvider: route.customProvider ? decryptMurmurProvider(route.customProvider) : null };
 }
 
 function mailMcpConfiguredFor(provider = "zenmux", model = "", customProvider = null, enabled = true) {
@@ -317,6 +352,7 @@ function finishUserConversation(thread, content) {
 
 async function generateEmotionMurmur(thread, current) {
   const state = sharedEmotionState;
+  const murmurRoute = await resolveMurmurRoute(thread.id).catch(error => { console.warn(`Murmur route unavailable: ${error.message}`); return null; });
   const recent = (thread.messages || []).slice(-12).map((message) => `${message.role === "user" ? "用户" : "沈屿"}：${message.content}`).join("\n");
   const output = await callModel({
     temperature: 0.85,
@@ -326,8 +362,9 @@ async function generateEmotionMurmur(thread, current) {
       { role: "system", content: "你在记录一条私密的内心独白。依据当前连续情绪状态和真实关系上下文，用第一人称写一句自然、具体、不重复的中文心声（15-50字）。不要提模型、驱动力数值、系统、定时器或通知。只输出独白正文。" },
       { role: "user", content: `${emotionContext(state)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
     ],
-    provider: thread.cacheProvider || "zenmux",
-    model: thread.cacheModel || ""
+    provider: murmurRoute?.provider || thread.cacheProvider || "zenmux",
+    model: murmurRoute?.model || thread.cacheModel || "",
+    customProvider: murmurRoute?.customProvider || null
   });
   const entry = addEmotionArc(state, { drive: current.drive, text: output, type: "murmur", value: current.value });
   state.lastReflectionAt = Date.now();
@@ -3233,6 +3270,22 @@ const server = createServer(async (req, res) => {
     if ((["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
+
+    if (url.pathname === "/v1/internal/murmur/generate") {
+      const expected = String(process.env.MURMUR_INTERNAL_TOKEN || "");
+      const supplied = String(req.headers.authorization || "").replace(/^Bearer\\s+/i, "");
+      if (!expected || supplied.length !== expected.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      try {
+        const input = await body(req);
+        const route = await resolveMurmurRoute(String(input.threadId || ""));
+        if (!route) return send(res, 409, { error: "model_route_unavailable" });
+        const messages = Array.isArray(input.messages) ? input.messages.slice(-20).filter(item => item && ["system", "user", "assistant"].includes(item.role) && typeof item.content === "string").map(item => ({ role: item.role, content: item.content.slice(0, 12000) })) : [];
+        if (!messages.length) return send(res, 400, { error: "messages_required" });
+        const content = await callModel({ messages, provider: route.provider, model: route.model, customProvider: route.customProvider, temperature: 0.85, maxOutputTokens: 100, cacheCurrentUser: false });
+        return send(res, 200, { content });
+      } catch (error) { console.warn(`Murmur model request failed: ${error.message}`); return send(res, error.status || 502, { error: "murmur_model_unavailable" }); }
+    }
     const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate))?$/);
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -3965,6 +4018,7 @@ const server = createServer(async (req, res) => {
       const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
       generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider).catch(error => { console.warn(`Murmur route was not persisted: ${error.message}`); });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
