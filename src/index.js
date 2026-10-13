@@ -2274,7 +2274,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     maxOutputTokens: proactive ? undefined : pendingCompaction
       ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
       : undefined,
-    useMaximumModelOutput: proactive,
+    // Voice calls may tell long stories; do not inherit the ordinary chat 8192-token default.
+    useMaximumModelOutput: proactive || callMode,
     messages: cacheRequestMessages,
     provider,
     model,
