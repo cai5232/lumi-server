@@ -126,7 +126,21 @@ export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_takeout_order") {
     const cart = args.cart === true;
     if (!cart && !String(args.kw || args.dish || "").trim()) throw new Error("需要商品关键词，或在处理已有购物车时使用 cart:true。");
-    const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args.spec ?? args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true, owner: context.threadID || "default" };
+    let kw = String(args.kw || args.dish || "").trim();
+    let dish = String(args.dish || "").trim();
+    const shop = String(args.shop || "").trim();
+    const norm = (value) => String(value || "").replace(/\s+/g, "").toLowerCase();
+    if (!cart && shop && norm(kw) === norm(shop)) {
+      if (dish) kw = dish;
+      else throw new Error(`只收到店铺名「${shop}」，没有收到要买的商品名；请从当前对话里补上用户点名的商品，再调用。`);
+    } else if (!cart && shop && !dish && kw.startsWith(shop) && kw.length > shop.length) {
+      kw = kw.slice(shop.length).trim();
+      dish = kw;
+    } else if (!cart && shop && !dish && kw.endsWith(shop) && kw.length > shop.length) {
+      kw = kw.slice(0, -shop.length).trim();
+      dish = kw;
+    }
+    const request = { kw, dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args.spec ?? args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true, owner: context.threadID || "default" };
     const result = await enqueueTakeoutJob(request);
     const amount = Number(result && result.amount);
     if (!result || result.ok !== true || !Number.isFinite(amount) || args.previewOnly === true) return JSON.stringify(result);
