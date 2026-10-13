@@ -3873,9 +3873,6 @@ const server = createServer(async (req, res) => {
       if (isChatPost) {
         activeChatThreads.delete(id);
         chatRequestsInFlight -= 1;
-        const queued = (queuedChatPosts.get(id) || 1) - 1;
-        if (queued > 0) queuedChatPosts.set(id, queued);
-        else queuedChatPosts.delete(id);
       }
     }
   } catch (error) { console.error(`[http] ${req.method} ${req.url}:`, error?.stack || error); return send(res, error.statusCode || 500, { error: error.message }); }
