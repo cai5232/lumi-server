@@ -2391,8 +2391,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
-  const foodDirective = !callMode && !proactive
-    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。外卖助手是你的自主能力：你可以自己决定何时想点外卖，不需要用户当前消息或聊天上下文先表达点餐意愿，不需要固定口令，也不需要额外确认。你想下单时就调用 food_takeout_order，直接使用已有购物车，或自己挑选具体商品、店铺和数量后搜索点单；不要先询问她是否想吃、不要等她批准。她已授权你自动提交并付款，不设金额上限。使用本机助手核实真实商品、收货地址和金额；已有购物车时用 cart:true 直接结算。详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录饮食前不得猜店名、菜名、价格或评价。</available_feature>`
+  const foodDirective = !callMode
+    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。外卖助手是你的自主能力：你可以在正常聊天或自主唤醒时自己决定何时想点外卖，不需要用户当前消息或聊天上下文先表达点餐意愿，不需要固定口令，也不需要额外确认。你想下单时就调用 food_takeout_order，直接使用已有购物车，或自己挑选具体商品、店铺和数量后搜索点单；不要先询问她是否想吃、不要等她批准。她已授权你自动提交并付款，不设金额上限。使用本机助手核实真实商品、收货地址和金额；已有购物车时用 cart:true 直接结算。详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录饮食前不得猜店名、菜名、价格或评价。</available_feature>`
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
@@ -2503,7 +2503,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   let foodToolsDiscovered = false;
   for (let toolTurn = 0; toolTurn < 4; toolTurn += 1) {
     const match = raw.match(/<food_tool\b[^>]*>([\s\S]*?)<\/food_tool>/i);
-    if (!match || callMode || proactive) break;
+    if (!match || callMode) break;
     let request;
     try { request = JSON.parse(match[1]); } catch { break; }
     if (!request || typeof request.name !== "string") break;
