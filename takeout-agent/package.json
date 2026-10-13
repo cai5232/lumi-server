@@ -2,6 +2,6 @@
   "name": "lumi-takeout-agent",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node agent.mjs", "check": "node --check agent.mjs", "start-mac": "zsh ./start-mac.sh" },
+  "scripts": { "start": "node agent.mjs", "check": "node --check agent.mjs", "setup-token": "zsh ./setup-token.sh", "start-mac": "zsh ./start-mac.sh" },
   "dependencies": { "playwright-core": "^1.62.1" }
 }

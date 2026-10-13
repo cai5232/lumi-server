@@ -14,8 +14,11 @@ const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
 
 function readToken() {
   if (process.env.LUMI_PUSH_API_TOKEN) return process.env.LUMI_PUSH_API_TOKEN.trim();
-  try { return execFileSync('security', ['find-generic-password', '-s', 'com.cai5232.Lumi', '-a', 'push-api-token', '-w'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
-  catch { return ''; }
+  for (const account of ['takeout-bridge-token', 'push-api-token']) {
+    try { return execFileSync('security', ['find-generic-password', '-s', 'com.cai5232.Lumi', '-a', account, '-w'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+    catch {}
+  }
+  return '';
 }
 const token = readToken();
 if (!token) {

@@ -1141,6 +1141,16 @@ function pushRequestAuthorized(req) {
   return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
 }
 
+function takeoutBridgeRequestAuthorized(req) {
+  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const matches = expected => {
+    const expectedBytes = Buffer.from(String(expected || ""));
+    const suppliedBytes = Buffer.from(supplied);
+    return expectedBytes.length > 0 && suppliedBytes.length > 0 && expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+  };
+  return matches(process.env.LUMI_TAKEOUT_BRIDGE_TOKEN) || matches(process.env.LUMI_PUSH_API_TOKEN);
+}
+
 async function sendCalendarChangePush(toolName, item) {
   if (!apnsConfigured() || !item || typeof item !== "object") return;
   const day = String(item.starts_at || item.anchor_date || item.date || "").slice(0, 10);
@@ -3172,7 +3182,7 @@ const server = createServer(async (req, res) => {
       res.writeHead(302, { location: "/v1/food/index.html" }); return res.end();
     }
     if (url.pathname.startsWith("/v1/takeout/bridge")) {
-      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (!takeoutBridgeRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (url.pathname === "/v1/takeout/bridge/status" && req.method === "GET") return send(res, 200, takeoutAgentStatus());
       if (url.pathname === "/v1/takeout/bridge/heartbeat" && req.method === "POST") { markTakeoutAgentSeen(); return send(res, 200, { ok: true, ...takeoutAgentStatus() }); }
       if (url.pathname === "/v1/takeout/bridge/next" && req.method === "GET") {
