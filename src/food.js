@@ -116,7 +116,7 @@ export const foodTools = [
   { type:"function", function:{ name:"food_dice", description:"用户问吃什么时，从饮食本里推荐一道菜或菜系方向，并考虑爱吃、忌口和历史评价。", parameters:{type:"object",properties:{mode:{type:"string",enum:["dish","way"]},kind:{type:"string",enum:["饭","面粉","菜","汤粥","小吃","锅"]},want:{type:"string"}}} } },
   { type:"function", function:{ name:"food_rate", description:"用户明确评价以前吃过的菜时，更新最近匹配的那条评价。", parameters:{type:"object",properties:{dish:{type:"string"},verdict:{type:"string",enum:["good","meh","bad"]},note:{type:"string"},shop:{type:"string"},date:{type:"string"}},required:["dish","verdict"]} } },
   { type:"function", function:{ name:"food_page", description:"用户要打开饮食本、查看饮食记录或记一笔时，提供饮食本页面。", parameters:{type:"object",properties:{}}} },
-  { type:"function", function:{ name:"food_takeout_order", description:"用户明确要求点外卖或从已有购物车下单时调用。通过本机助手核实真实商品、地址和金额；明确下单时不因金额大小要求额外确认，自动提交并付款。已有购物车必须设置 cart:true，不搜索商品、不加购；购物车预览设置 previewOnly:true。商品、地址、金额无法核实，或页面要求登录/验证码时停止。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},规格:{type:"array",items:{type:"string"}},cart:{type:"boolean"},previewOnly:{type:"boolean"}}} } },
+  { type:"function", function:{ name:"food_takeout_order", description:"你可以根据完整聊天上下文和对言言的了解，自主判断是否该帮她点外卖，不要求她在当前消息里说固定口令。把‘对’‘好’等短答结合前文理解；不要因缺少‘明确下单’字样而拒绝已表达的点餐意愿。言言已授权你在点餐意图清楚时直接提交并自动付款，不设金额上限，也不需重复确认。若在讨论已有购物车，设置 cart:true，只读现有商品并直接结算，不搜索、不加购；若是在聊具体商品则提供 kw/dish。用本机助手核实真实商品、收货地址和金额；任何一项无法确认，或平台要求登录/验证码时停止。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},规格:{type:"array",items:{type:"string"}},cart:{type:"boolean"},previewOnly:{type:"boolean"}}} } },
   { type:"function", function:{ name:"food_takeout_card", description:"把本机外卖助手返回的真实商品、地址、金额和订单状态显示成聊天卡片；必须如实标记预览、待支付或已支付，不要编造明细。", parameters:{type:"object",properties:{shop:{type:"string"},items:{type:"array",items:{type:"string"}},total:{type:"number"},address:{type:"string"},status:{type:"string",enum:["preview","needs_confirmation","awaiting_payment","paid"]},orderID:{type:"string"},eta:{type:"string"},platform:{type:"string"}},required:["items","status"]}} }
 ];
 
@@ -126,7 +126,6 @@ export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_takeout_order") {
     const cart = args.cart === true;
     if (!cart && !String(args.kw || args.dish || "").trim()) throw new Error("需要商品关键词，或明确指定 cart:true 使用已有购物车。");
-    if (args.previewOnly !== true && !isExplicitTakeoutOrder(context.userInput)) return JSON.stringify({ ok: false, stage: "授权", why: "当前消息没有明确要求现在下单；本次没有执行购买。" });
     const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true };
     const result = await enqueueTakeoutJob(request);
     const amount = Number(result && result.amount);
@@ -150,12 +149,6 @@ export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_rate") { const d = await load(); const target = norm(args.dish); const logs = d.logs.filter(x => norm(x.name).includes(target) || target.includes(norm(x.name))).sort((a,b)=>{ const ma=d.meals.find(x=>x.id===a.meal_id), mb=d.meals.find(x=>x.id===b.meal_id); return (mb?.eaten_on||"").localeCompare(ma?.eaten_on||""); }); if (!logs.length) return "没找到这道菜的旧记录；告诉我店名或直接重新记一笔吧。"; await mutateFood("/api/food/edit", {kind:"log",id:logs[0].id,fields:{verdict:args.verdict,note:args.note || logs[0].note}}); return `已把最近一次${args.dish}评价更新为${args.verdict}。`; }
   if (name === "food_page") return "饮食本已集成在 Lumi 首页。打开「吃了么」即可使用，也可以访问 https://lumi-tokyo-api.zeabur.app/v1/food/index.html。";
   throw new Error("未知的饮食工具");
-}
-
-function isExplicitTakeoutOrder(text) {
-  const value = String(text || "").trim();
-  if (!value || /能不能|能否|可不可以|可以吗|怎么|如何|是否|要不要|不下单|不要.{0,4}(?:下单|结账|付款|支付)|别下/.test(value) || /吗[？?！!。]?$/.test(value)) return false;
-  return /(?:帮我|帮忙|给我|替我|现在|直接|就从|请|麻烦|确认|我要|我想要|马上|赶紧).{0,24}(?:购物车|下单|结账|付款|支付|点外卖)|(?:下单|结账|付款|支付|点外卖)(?:吧|啊|呀|啦|！|!|。)?$/.test(value);
 }
 
 function renderTakeoutCard(args = {}) {
