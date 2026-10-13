@@ -50,7 +50,7 @@ const memoryCacheTTL = Number(process.env.LUMI_MEMORY_CACHE_TTL_MS || 300000);
 const memorySearchCache = new Map();
 const promptCacheEnabled = process.env.LUMI_PROMPT_CACHE_ENABLED !== "false";
 const cacheTTL = process.env.LUMI_PROMPT_CACHE_TTL || "1h";
-const ttsTimeoutMs = Math.max(3_000, Number(process.env.LUMI_TTS_TIMEOUT_MS || 12_000));
+const ttsTimeoutMs = Math.max(30_000, Number(process.env.LUMI_TTS_TIMEOUT_MS || 90_000));
 const keepaliveEnabled = process.env.LUMI_CACHE_KEEPALIVE_ENABLED === "true";
 const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
