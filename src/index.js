@@ -1377,7 +1377,7 @@ function extractHTMLBlock(content, preferredTitle = "") {
 // Older persisted turns and cache snapshots may still contain these directives.
 function withoutStaleCompactionDirective(value) {
   return typeof value === "string"
-    ? value.replace(/<internal_context_compaction\\b[^>]*>[\\s\\S]*?<\\/internal_context_compaction>/gi, "").trim()
+    ? value.replace(/<internal_context_compaction\b[^>]*>[\s\S]*?<\/internal_context_compaction>/gi, "").trim()
     : value;
 }
 function contextMessages(thread) {
@@ -2205,7 +2205,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? (withoutStaleCompactionDirective(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
   const cachedPrefixHasStaleCompaction = Array.isArray(thread?.cacheKeepaliveMessages) &&
-    thread.cacheKeepaliveMessages.some(message => /<internal_context_compaction\\b/i.test(String(message.content || "")));
+    thread.cacheKeepaliveMessages.some(message => /<internal_context_compaction\b/i.test(String(message.content || "")));
   const exactCachedPrefix = !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
