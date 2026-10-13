@@ -2485,10 +2485,40 @@ async function checkCacheKeepalive() {
 
 const ttsModels = ["speech-2.8-hd", "speech-2.8-turbo", "speech-2.6-hd", "speech-2.6-turbo", "speech-02-hd", "speech-02-turbo", "speech-01-hd", "speech-01-turbo"];
 const elevenLabsModels = ["eleven_v4", "eleven_v4_turbo", "eleven_multilingual_v2", "eleven_flash_v2_5", "eleven_turbo_v2_5"];
+function splitCallSpeech(text, limit = 450) {
+  const parts = [];
+  let remaining = text;
+  while (remaining.length > limit) {
+    const window = remaining.slice(0, limit);
+    const punctuation = Math.max(window.lastIndexOf("。"), window.lastIndexOf("！"), window.lastIndexOf("？"), window.lastIndexOf("；"), window.lastIndexOf("，"), window.lastIndexOf(". "), window.lastIndexOf(", "));
+    const cut = punctuation >= Math.floor(limit * 0.45) ? punctuation + 1 : limit;
+    parts.push(remaining.slice(0, cut).trim());
+    remaining = remaining.slice(cut).trim();
+  }
+  if (remaining) parts.push(remaining);
+  return parts.filter(Boolean);
+}
+
 async function synthesizeSpeech(text, settings) {
   if (!settings?.apiKey || !settings?.voiceID) return null;
   const speechText = spokenReply(text);
   if (!speechText) return null;
+  if (!settings?.singleChunk && speechText.length > 450) {
+    const chunks = splitCallSpeech(speechText);
+    const audioParts = [];
+    let duration = 0;
+    // Bounded parallelism keeps long stories from overwhelming the TTS provider.
+    for (let i = 0; i < chunks.length; i += 3) {
+      const batch = await Promise.all(chunks.slice(i, i + 3).map(chunk => synthesizeSpeech(chunk, { ...settings, singleChunk: true })));
+      for (const item of batch) {
+        if (!item?.audioBase64) throw new Error("TTS segment returned no audio");
+        audioParts.push(Buffer.from(item.audioBase64, "base64"));
+        duration += Number(item.duration || 0);
+      }
+    }
+    // Both providers request MP3; concatenated MP3 frames remain playable as one response.
+    return { audioBase64: Buffer.concat(audioParts).toString("base64"), duration };
+  }
   if (settings.provider === "elevenlabs") {
     if (!elevenLabsModels.includes(settings.model)) throw new Error("ElevenLabs 语音模型不受支持");
     const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(settings.voiceID)}?output_format=mp3_44100_128`;
