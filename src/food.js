@@ -116,7 +116,7 @@ export const foodTools = [
   { type:"function", function:{ name:"food_dice", description:"用户问吃什么时，从饮食本里推荐一道菜或菜系方向，并考虑爱吃、忌口和历史评价。", parameters:{type:"object",properties:{mode:{type:"string",enum:["dish","way"]},kind:{type:"string",enum:["饭","面粉","菜","汤粥","小吃","锅"]},want:{type:"string"}}} } },
   { type:"function", function:{ name:"food_rate", description:"用户明确评价以前吃过的菜时，更新最近匹配的那条评价。", parameters:{type:"object",properties:{dish:{type:"string"},verdict:{type:"string",enum:["good","meh","bad"]},note:{type:"string"},shop:{type:"string"},date:{type:"string"}},required:["dish","verdict"]} } },
   { type:"function", function:{ name:"food_page", description:"用户要打开饮食本、查看饮食记录或记一笔时，提供饮食本页面。", parameters:{type:"object",properties:{}}} },
-  { type:"function", function:{ name:"food_takeout_order", description:"外卖助手是你的自主能力：你可以自己决定何时想点外卖，并直接调用本工具；不需要用户当前消息或聊天上下文先表达点餐意愿，也不需要固定口令或额外确认。你想下单时可以直接使用已有购物车（cart:true），或自己选定具体商品、店铺和数量后搜索点单；不要先询问用户是否想吃、不要等她批准。用户已授权你自动提交并付款，不设金额上限。用本机助手核实真实商品、收货地址和金额后完成订单；若详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},spec:{type:"array",items:{type:"string"}},cart:{type:"boolean"},previewOnly:{type:"boolean"}}} } },
+  { type:"function", function:{ name:"food_takeout_order", description:"外卖助手是你的自主能力：你可以自己决定何时想点外卖，并直接调用本工具；不需要用户当前消息或聊天上下文先表达点餐意愿，也不需要固定口令或额外确认。你想下单时可以直接使用已有购物车（cart:true），或自己选定具体商品、店铺和数量后搜索点单；不要先询问用户是否想吃、不要等她批准。用户已授权你自动提交并付款，不设金额上限。用本机助手核实真实商品、收货地址和金额后完成订单；若详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若返回 retryable:false 或订单状态待核实，严禁重复调用；先如实告知用户检查订单状态。", parameters:{type:"object",properties:{kw:{type:"string"},dish:{type:"string"},shop:{type:"string"},qty:{type:"integer",minimum:1,maximum:10},addr:{type:"string"},spec:{type:"array",items:{type:"string"}},cart:{type:"boolean"},previewOnly:{type:"boolean"}}} } },
   { type:"function", function:{ name:"food_takeout_card", description:"把本机外卖助手返回的真实商品、地址、金额和订单状态显示成聊天卡片；必须如实标记预览、待支付或已支付，不要编造明细。", parameters:{type:"object",properties:{shop:{type:"string"},items:{type:"array",items:{type:"string"}},total:{type:"number"},address:{type:"string"},status:{type:"string",enum:["preview","needs_confirmation","awaiting_payment","paid"]},orderID:{type:"string"},eta:{type:"string"},platform:{type:"string"}},required:["items","status"]}} }
 ];
 
@@ -126,7 +126,7 @@ export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_takeout_order") {
     const cart = args.cart === true;
     if (!cart && !String(args.kw || args.dish || "").trim()) throw new Error("需要商品关键词，或在处理已有购物车时使用 cart:true。");
-    const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args.spec ?? args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true };
+    const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args.spec ?? args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true, owner: context.threadID || "default" };
     const result = await enqueueTakeoutJob(request);
     const amount = Number(result && result.amount);
     if (!result || result.ok !== true || !Number.isFinite(amount) || args.previewOnly === true) return JSON.stringify(result);
