@@ -409,13 +409,11 @@ async function generateSentinelWake(thread) {
   const decision = generated.sentinelDecision || {};
   const action = allowedActions.includes(decision.action) ? decision.action : "";
   const requestedNextWakeMinutes = Number(decision.nextWakeMinutes);
-  if (!generated.content || !generated.thinking || !action || !Number.isFinite(requestedNextWakeMinutes) || requestedNextWakeMinutes < 1 || requestedNextWakeMinutes > 1440) {
-    throw new Error("sentinel reply missing normal chat content, thought, allowed action, or AI-selected nextWakeMinutes");
+  if (!generated.content || !action || !Number.isFinite(requestedNextWakeMinutes) || requestedNextWakeMinutes < 1 || requestedNextWakeMinutes > 1440) {
+    throw new Error(`sentinel invalid response: content=${Boolean(generated.content)} action=${Boolean(action)} nextWakeValid=${Number.isFinite(requestedNextWakeMinutes) && requestedNextWakeMinutes >= 1 && requestedNextWakeMinutes <= 1440}`);
   }
   const nextWakeMinutes = Math.round(requestedNextWakeMinutes);
-  const followUpDecision = followUp
-    ? followUp
-    : normalizeFollowUpDecision(decision, allowedActions);
+  const followUpDecision = normalizeFollowUpDecision(decision, allowedActions);
   return {
     message: { id: randomUUID(), role: "assistant", content: generated.content, thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
     action,
@@ -903,7 +901,7 @@ async function runBackgroundPulse() {
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         changed = true;
       } catch (error) {
-        console.warn(`sentinel skipped: ${error.message}`);
+        console.warn(`sentinel skipped thread=${thread.id}: ${error.message}`);
         // A malformed model response must not be presented as an AI decision
         // or retried (and billed) on every 15-second pulse.
         activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
