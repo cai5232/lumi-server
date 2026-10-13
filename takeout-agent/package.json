@@ -1,0 +1,7 @@
+{
+  "name": "lumi-takeout-agent",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node agent.mjs", "check": "node --check agent.mjs", "start-mac": "./start-mac.sh" },
+  "dependencies": { "playwright-core": "^1.62.1" }
+}

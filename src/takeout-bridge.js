@@ -4,6 +4,13 @@ const jobs = new Map();
 const queue = [];
 const previews = new Map();
 const leaseMs = 45_000;
+let agentSeenAt = 0;
+
+export function markTakeoutAgentSeen() { agentSeenAt = Date.now(); }
+
+export function takeoutAgentStatus() {
+  return { connected: Date.now() - agentSeenAt < 40_000, lastSeenAt: agentSeenAt ? new Date(agentSeenAt).toISOString() : null };
+}
 
 export function saveTakeoutPreview(threadID, preview) {
   const id = String(threadID || "default");
@@ -16,6 +23,7 @@ export function getTakeoutPreview(threadID) {
 }
 
 export function enqueueTakeoutJob(input, timeoutMs = 210_000) {
+  if (!takeoutAgentStatus().connected) return Promise.resolve({ ok: false, stage: "本机连接", why: "Mac 外卖助手没有连接。请先启动本机外卖助手，并保持专用 Chrome 已登录。" });
   const id = randomUUID();
   return new Promise((resolve) => {
     const job = {
@@ -36,6 +44,7 @@ export function enqueueTakeoutJob(input, timeoutMs = 210_000) {
 }
 
 export function claimTakeoutJob() {
+  markTakeoutAgentSeen();
   const now = Date.now();
   for (const job of jobs.values()) {
     if (job.status === "claimed" && now - job.claimedAt > leaseMs) job.status = "queued";
@@ -66,7 +75,7 @@ export function finishTakeoutJob(id, result) {
 }
 
 function sanitizeTakeoutInput(input = {}) {
-  const allowed = ["kw", "dish", "shop", "qty", "addr", "规格", "max", "dry"];
+  const allowed = ["kw", "dish", "shop", "qty", "addr", "规格", "max", "dry", "cart"];
   const value = Object.fromEntries(allowed.filter((key) => input[key] !== undefined).map((key) => [key, input[key]]));
   value.kw = String(value.kw || value.dish || "").trim().slice(0, 80);
   value.shop = String(value.shop || "").trim().slice(0, 80);
@@ -75,6 +84,7 @@ function sanitizeTakeoutInput(input = {}) {
   const requestedMax = Number(value.max);
   value.max = Number.isFinite(requestedMax) ? Math.max(0.01, requestedMax) : Number.MAX_SAFE_INTEGER;
   value.dry = value.dry !== false;
+  value.cart = value.cart === true;
   if (Array.isArray(value["规格"])) value["规格"] = value["规格"].slice(0, 8).map((item) => String(item).slice(0, 30));
   else delete value["规格"];
   return value;
@@ -84,7 +94,7 @@ function sanitizeTakeoutResult(result) {
   if (!result || typeof result !== "object") return { ok: false, stage: "本机连接", why: "外卖助手返回了无法识别的结果。" };
   const { shot } = result;
   const safe = {};
-  for (const key of ["ok", "stage", "why", "amount", "paid", "shop", "items", "eta", "previewOnly", "status"]) {
+  for (const key of ["ok", "stage", "why", "amount", "paid", "shop", "items", "eta", "address", "previewOnly", "status"]) {
     if (result[key] !== undefined) safe[key] = result[key];
   }
   return {

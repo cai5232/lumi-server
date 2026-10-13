@@ -39,6 +39,14 @@ Zeabur 环境变量：
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。
 
+## 本机外卖助手
+
+云端服务不能访问 Mac 的 `127.0.0.1:9222`。在本仓库的 `takeout-agent/` 运行 `npm install && npm run start-mac`，助手会连到 Lumi 的 `/v1/takeout/bridge`，并复用独立的 `~/Documents/Codex/LumiTakeoutChromeBridge` Chrome 档案。它从 macOS Keychain 读取 Lumi 的 `push-api-token`；读不到时可通过 `LUMI_PUSH_API_TOKEN` 环境变量提供。已有购物车走本机助手的直接结算流程，不搜索商品，也不重新加购。关键词点单脚本默认从 `~/Documents/Codex/ai-order-takeout/script/order.js` 加载，可用 `LUMI_TAKEOUT_ORDER_SCRIPT` 覆盖路径。
+
+助手会先读取并回报真实商品、地址和金额；只有用户明确下单时才提交。购物车订单必须匹配已保存地址“桃李春风如山13幢2单元1210”。读不清商品或金额、地址不符、需要确认地址或出现安全验证时立即停止。支付口令只在 Mac 本机从 `~/.takeout_pay` 读取，不会发送到云端。安全验证必须由本人完成，助手不会绕过。
+
+Mac、专用 Chrome 和助手进程都必须保持运行且电脑不能睡眠；屏幕熄灭可以。先在 Lumi 里说“看看购物车”核对卡片，再明确说“现在从购物车下单”执行。
+
 ## 共享手帐日历
 
 共享日历由当前 Lumi 后端提供 API 和 Streamable HTTP MCP，不需要再单独部署一个日历服务。事件、便签、页面 PNG 和变更记录保存在 `LUMI_DATA_DIR/calendar.json` 与 `LUMI_DATA_DIR/calendar-pages/`；Zeabur 应把 `LUMI_DATA_DIR` 指向已挂载的持久卷（当前服务挂载点为 `/data`）。日历 API 复用 `LUMI_PUSH_API_TOKEN` 鉴权，也可单独设置 `LUMI_CALENDAR_MCP_TOKEN`；iOS 页面入口是首页日历，MCP 地址为 `https://lumi-tokyo-api.zeabur.app/v1/calendar/mcp`。
