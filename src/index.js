@@ -3295,7 +3295,7 @@ const server = createServer(async (req, res) => {
       if (!threads[threadID]) return send(res, 404, { error: "thread_not_found" });
       const thread = threads[threadID];
 
-      const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\\/+$/, "");
+      const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\/+$/, "");
       if (murmurServiceUrl) {
         try {
           const target = `${murmurServiceUrl}/internal/v1/chats/${encodeURIComponent(threadID)}/emotion/${operation}${url.search}`;
