@@ -57,6 +57,7 @@ const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS |
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
 let backgroundPulseInFlight = false;
+const proactiveDiagnostics = { lastCheckAt: null, lastReason: "not_checked", lastAttemptAt: null, lastSuccessAt: null, lastError: null, checks: 0, attempts: 0 };
 let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
@@ -734,6 +735,8 @@ async function runBackgroundPulse() {
   try {
   const threads = await readThreads();
   const now = Date.now();
+  proactiveDiagnostics.lastCheckAt = new Date(now).toISOString();
+  proactiveDiagnostics.checks += 1;
   let changed = false;
   const pendingPushes = [];
   // Emotion is request-driven. The background pulse must not mutate or reflect it while idle.
@@ -742,6 +745,10 @@ async function runBackgroundPulse() {
   for (const thread of Object.values(threads)) {
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+    if (thread.id === proactiveSettings.threadId) {
+      const due = Date.parse(activity.nextWakeAt || "");
+      proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : activeChatThreads.has(thread.id) ? "chat_in_progress" : "wake_due";
+    }
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
       if (Math.random() < sleepInsomniaProbability) {
@@ -828,6 +835,9 @@ async function runBackgroundPulse() {
           changed = true;
           continue;
         }
+        proactiveDiagnostics.lastReason = "generating";
+        proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
+        proactiveDiagnostics.attempts += 1;
         const wake = await generateSentinelWake(thread);
         // The autonomous turn can include an email MCP action. Persist its exact
         // request prefix and assistant output so the next visible chat continues
@@ -883,6 +893,9 @@ async function runBackgroundPulse() {
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
         }
+        proactiveDiagnostics.lastSuccessAt = new Date().toISOString();
+        proactiveDiagnostics.lastError = null;
+        proactiveDiagnostics.lastReason = "generated";
         activity.lastWakeAt = wake.message.createdAt;
         if (followUpForWake) {
           activity.followUp = activity.followUp || followUpForWake;
@@ -901,6 +914,8 @@ async function runBackgroundPulse() {
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         changed = true;
       } catch (error) {
+        proactiveDiagnostics.lastReason = "generation_failed";
+        proactiveDiagnostics.lastError = String(error.message || error).slice(0, 240);
         console.warn(`sentinel skipped thread=${thread.id}: ${error.message}`);
         // A malformed model response must not be presented as an AI decision
         // or retried (and billed) on every 15-second pulse.
@@ -3232,6 +3247,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       buildVersion,
       htmlCards: "separate-content-title-v1",
+      proactiveDiagnostic: { enabled: proactiveSettings.enabled, threadId: proactiveSettings.threadId, intervalMin: proactiveSettings.intervalMin, nextDueAt: proactiveSettings.nextDueAt, activityMode: activeThread?.activity?.mode || null, activityNextWakeAt: activeThread?.activity?.nextWakeAt || null, backgroundPulseInFlight, ...proactiveDiagnostics },
       cache: {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
