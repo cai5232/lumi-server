@@ -125,7 +125,7 @@ export async function foodContext() { const d = await load(); const taste = d.ta
 export async function executeFoodTool(name, args = {}, context = {}) {
   if (name === "food_takeout_order") {
     const cart = args.cart === true;
-    if (!cart && !String(args.kw || args.dish || "").trim()) throw new Error("需要商品关键词，或明确指定 cart:true 使用已有购物车。");
+    if (!cart && !String(args.kw || args.dish || "").trim()) throw new Error("需要商品关键词，或在处理已有购物车时使用 cart:true。");
     const request = { kw: args.kw, dish: args.dish, shop: args.shop, qty: args.qty, addr: args.addr, 规格: args["规格"], cart, max: Number.MAX_SAFE_INTEGER, dry: true };
     const result = await enqueueTakeoutJob(request);
     const amount = Number(result && result.amount);
