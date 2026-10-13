@@ -39,7 +39,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -166,7 +166,6 @@ const legacyRetryWindowMs = 3 * 60_000;
 let memoryCookie = "";
 const sleepDelayMinutes = Number(process.env.LUMI_SLEEP_DELAY_MINUTES || 60);
 const sleepHours = Number(process.env.LUMI_SLEEP_HOURS || 5.5);
-const sleepInsomniaProbability = Number(process.env.LUMI_SLEEP_INSOMNIA_PROBABILITY || 0.15);
 const sleepNightmareProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_NIGHTMARE_PROBABILITY || 0.35)));
 const sleepReentryProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_REENTRY_PROBABILITY || 0.5)));
 const sleepDreamIntervalMinutes = Math.max(0.01, Number(process.env.LUMI_SLEEP_DREAM_INTERVAL_MINUTES || 120));
@@ -646,25 +645,14 @@ async function runSleepDreamSegment(thread, activity, now) {
       const nightmare = await runSleepStage(thread, "nightmare", cycle, { contextHeader, trauma: formatSleepMemories(seeds.slice(0, 3), 3), competence: thread.competence || "尚未明确" }, seedIds.slice(0, 3));
       const decision = resolveNightmareDecision(nightmare.content, Math.random(), sleepReentryProbability);
       sleep.nightmare = { triggeredAt: new Date().toISOString(), cycle: cycle + 1, decision: decision.decision, reenteredSleep: decision.reenteredSleep };
-      if (decision.decision === "send_message" && decision.message) {
-        thread.messages.push({ id: randomUUID(), role: "assistant", content: decision.message, contentType: "nightmare", createdAt: new Date().toISOString() });
-        sleep.nightmare.pushMessage = decision.message;
-      }
-      if (decision.decision === "sentinel" || (decision.decision === "continue_sleep" && !decision.reenteredSleep) || decision.decision === "send_message") {
-        activity.mode = "sentinel";
-        activity.sleepStage = "insomnia";
-        const interval = Math.max(1, Number(ensureProactive(thread).intervalMin) || 60);
-        const proactive = ensureProactive(thread);
-        activity.nextWakeAt = proactive.enabled ? new Date(now + interval * 60_000).toISOString() : null;
-        activity.nextWakeSource = proactive.enabled ? "settings" : null;
-      } else {
-        activity.sleepStage = "sleeping_again";
-        activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
-      }
+      // A nightmare is private sleep-state activity. It must never wake or
+      // message the user after they explicitly said good night.
+      activity.sleepStage = decision.decision === "continue_sleep" && decision.reenteredSleep
+        ? "sleeping_again"
+        : "sleeping_after_nightmare";
+      activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
     }
-    return sleep.nightmare?.triggeredAt && sleep.nightmare.cycle === cycle + 1 && sleep.nightmare.pushMessage
-      ? { message: sleep.nightmare.pushMessage, metadata: { kind: "nightmare" } }
-      : null;
+    return null;
   } finally {
     sleep.running = false;
   }
@@ -753,17 +741,8 @@ async function runBackgroundPulse() {
     }
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
-      if (Math.random() < sleepInsomniaProbability) {
-        activity.mode = "sentinel";
-        activity.sleepStage = "insomnia";
-        const interval = Math.max(1, Number(proactive.intervalMin) || 60);
-        activity.nextWakeAt = proactive.enabled ? new Date(now + interval * 60_000).toISOString() : null;
-        activity.nextWakeSource = proactive.enabled ? "settings" : null;
-        proactive.nextDueAt = activity.nextWakeAt;
-        activity.sleepPendingAt = null;
-        changed = true;
-        continue;
-      }
+      // Explicit bedtime is authoritative; do not turn a random insomnia roll
+      // into an autonomous wake-up.
       activity.mode = "sleeping";
       activity.sleepStartedAt = new Date(now).toISOString();
       activity.sleepUntil = new Date(now + sleepHours * 3_600_000).toISOString();
@@ -803,7 +782,7 @@ async function runBackgroundPulse() {
         proactive.nextDueAt = activity.nextWakeAt;
         changed = true;
       }
-    } else if (proactive.enabled && activity.mode === "sentinel" && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
+    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
       const actions = proactiveSettings.threadId === thread.id ? proactiveSettings.actions : proactive.actions;
       if (actions && !actions.message && !actions.phone && !actions.screen) {
         activity.nextWakeAt = null;
@@ -3418,7 +3397,7 @@ const server = createServer(async (req, res) => {
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens },
-      sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, insomniaProbability: sleepInsomniaProbability, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
+      sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
     }
