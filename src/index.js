@@ -2406,7 +2406,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode
-    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order，使用已有购物车时传 cart:true；如果已有购物车没有想要的商品，先选定具体商品、店铺和数量再下单。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
+    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order。用户点名商品和店铺时，商品原词必须放入 kw（并传入 dish），店铺/品牌单独放入 shop；例如‘罗森香肠面包’传 kw:'香肠面包', dish:'香肠面包', shop:'罗森', cart:false。不能只打开首页推荐后停止，也不能用 shop 替代商品词。只有用户明确说要买现有购物车里的东西时才传 cart:true；否则走商品搜索、进店、匹配商品并加购流程。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
