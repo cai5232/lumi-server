@@ -806,6 +806,8 @@ async function runBackgroundPulse() {
         continue;
       }
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
+      const followUpForWake = activity.followUp || null;
+      const isFollowUp = Boolean(followUpForWake);
       // The configured interval is the first system wake after chat/settings.
       // Keep the plan's 30-minute recent-activity guard only for AI-written notes.
       if (!isFollowUp && activity.nextWakeSource !== "settings" && activity.nextWakeSource !== "sleep_wake" && now - lastActivityAt < 30 * 60_000) {
