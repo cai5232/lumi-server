@@ -64,7 +64,13 @@ async function openPage() {
   const browser = await chromium.connectOverCDP(cdp, { timeout: 8_000 });
   const context = browser.contexts()[0];
   if (!context) { await browser.close(); throw new Error('专用 Chrome 没有浏览器上下文。'); }
-  const page = context.pages().find(tab => { try { return /(^|\.)ele\.me$/i.test(new URL(tab.url()).hostname); } catch { return false; } }) || await context.newPage();
+  const page = context.pages().reverse().find(tab => {
+    try {
+      const url = new URL(tab.url());
+      return /(^|\.)ele\.me$/i.test(url.hostname) &&
+        !/order-detail|address|cashier|payment|\/pay|\/login|checkout|confirm/i.test(url.pathname);
+    } catch { return false; }
+  }) || await context.newPage();
   let restoreWindow = async () => {};
   try {
     const browserSession = await browser.newBrowserCDPSession();
@@ -102,15 +108,32 @@ async function openCart(page) {
 
 function summarize(text, pageURL) {
   const lines = String(text).split(/\n+/).map(normalize).filter(Boolean);
-  const items = lines.filter(line => /(?:×|x)\s*\d+/.test(line) && line.length < 140).slice(0, 25);
-  const amounts = [...String(text).matchAll(/(?:实付|合计|总计)\s*[¥￥]?\s*(\d+(?:\.\d{1,2})?)/g)].map(match => Number(match[1]));
+  const end = lines.findIndex(line => /打包费|(?:实付|应付|合计|总计)/.test(line));
+  const itemLines = end < 0 ? lines : lines.slice(0, end);
+  const items = itemLines.filter(line => /(?:×|x)\s*\d+/.test(line) && line.length < 140).slice(0, 25);
+  const textValue = String(text);
+  const paidAmounts = [...textValue.matchAll(/(?:实付|应付)\s*[¥￥]?\s*(\d+(?:\.\d{1,2})?)/g)].map(match => Number(match[1]));
+  let amounts = paidAmounts;
+  if (!amounts.length) {
+    const totalLines = [...textValue.matchAll(/(?:合计|总计)[^\n]{0,50}/g)].map(match => match[0]);
+    amounts = totalLines.map(line => {
+      const discounted = line.match(/已优惠\s*[¥￥]?\s*\d+(?:\.\d{1,2})?[\s\S]{0,12}?[¥￥]\s*(\d+(?:\.\d{1,2})?)/);
+      const labeled = line.match(/(?:合计|总计)\s*[¥￥]?\s*(\d+(?:\.\d{1,2})?)/);
+      return Number(discounted?.[1] || labeled?.[1]);
+    }).filter(Number.isFinite);
+  }
+  const distinctAmounts = [...new Set(amounts)];
   const address = lines.find(line => /桃李春风|如山|收货地址|单元|幢/.test(line)) || '';
   const shop = lines.find(line => /商家|店铺/.test(line)) || lines[0] || '淘宝闪购';
-  return { ok: items.length > 0 && amounts.length > 0, shop, items, amount: amounts.at(-1) ?? null, address, page: pageURL, excerpt: lines.slice(-32).join('\n').slice(0, 2600) };
+  const flattened = textValue.replace(/\s+/g, '').replace(/栋/g, '幢');
+  const addressMatches = /桃李春风.{0,24}如山.{0,12}13幢.{0,8}2单元.{0,12}1210/.test(flattened);
+  const hasAddressPicker = /请选择收货地址|选择收货地址|添加收货地址/.test(textValue);
+  return { ok: items.length > 0 && distinctAmounts.length === 1 && addressMatches && !hasAddressPicker, shop, items, amount: distinctAmounts.length === 1 ? distinctAmounts[0] : null, address, page: pageURL, excerpt: lines.slice(-32).join('\n').slice(0, 2600) };
 }
 
 async function cartJob(input) {
   const { browser, page, restoreWindow } = await openPage();
+  let submitAttempted = false;
   try {
     let text = await openCart(page);
     if (!/提交订单/.test(text)) {
@@ -126,10 +149,9 @@ async function cartJob(input) {
       await page.waitForTimeout(600);
       text = await page.locator('body').innerText().catch(() => '');
     }
-    if (/请选择收货地址/.test(text)) throw new Error('结算页没有已选地址。助手已停下，未提交订单。');
-    if (!/桃李春风/.test(text) || !/如山/.test(text) || !/1210/.test(text)) throw new Error(`结算地址与“桃李春风如山13幢2单元1210”不符。未提交订单。页面摘要：${normalize(text).slice(-450)}`);
+    if (/请选择收货地址|选择收货地址|添加收货地址|请确认/.test(text)) throw new Error('结算页还没有明确选中收货地址。助手已停下，未提交订单。');
     const details = summarize(text, page.url());
-    if (!details.ok) throw new Error(`没有读清购物车商品或总金额。未提交订单。页面摘要：${normalize(text).slice(-600)}`);
+    if (!details.ok) throw new Error(`没有同时核实购物车商品、唯一结算金额和已选收货地址。未提交订单。页面摘要：${normalize(text).slice(-600)}`);
     if (input.dry !== false) return { ...details, previewOnly: true, status: 'preview' };
 
     const paymentFile = process.env.LUMI_TAKEOUT_PAYMENT_FILE || join(homedir(), '.takeout_pay');
@@ -137,8 +159,9 @@ async function cartJob(input) {
     try { password = (await readFile(paymentFile, 'utf8')).trim(); } catch {}
     if (!password) throw new Error('本机没有付款口令；助手停在提交前，未下单。');
     const submit = page.locator('.submit-btn__button').first();
-    if (!await submit.count()) throw new Error('没有识别到提交订单按钮，未提交。');
-    await submit.click({ timeout: 7_000, force: true });
+    if (!await submit.count() || !await submit.isVisible() || !await submit.isEnabled()) throw new Error('没有识别到可用的提交订单按钮，未提交。');
+    submitAttempted = true;
+    await submit.click({ timeout: 7_000 });
     await page.waitForTimeout(1_800);
     text = await page.locator('body').innerText().catch(() => '');
     if (challenge(text)) throw new Error('提交时出现安全验证。助手已停下；请先检查订单记录再重试。');
@@ -154,7 +177,11 @@ async function cartJob(input) {
     const finalText = await page.locator('body').innerText().catch(() => '');
     if (!/支付成功/.test(finalText)) throw new Error(`支付结果未确认，请先检查订单记录再重试。页面摘要：${normalize(finalText).slice(-500)}`);
     const orderID = (finalText.match(/订单号\s*(\d{8,})/) || [])[1] || null;
-    return { ...details, ok: true, paid: details.amount, order: orderID, status: 'paid' };
+    const final = summarize(finalText, page.url());
+    return { ...details, ok: true, paid: final.amount, paidAmountVerified: final.amount !== null, order: orderID, status: 'paid' };
+  } catch (error) {
+    if (submitAttempted) error.takeoutSubmitAttempted = true;
+    throw error;
   } finally {
     await restoreWindow();
     await browser.close();
@@ -168,14 +195,15 @@ async function runSearchOrder(input) {
     if (!output) throw new Error('外卖脚本没有返回订单结果。');
     return JSON.parse(output);
   } catch (error) {
-    return { ok: false, stage: '本机外卖脚本', why: String(error.message || error).slice(0, 700) };
+    const timedOut = error.killed === true || error.code === 'ETIMEDOUT';
+    return { ok: false, stage: timedOut ? '订单状态待核实' : '本机外卖脚本', retryable: !timedOut, why: timedOut ? `外卖脚本运行超时；订单可能已提交。请先检查订单记录，不要重试。${String(error.message || error).slice(0, 500)}` : String(error.message || error).slice(0, 700) };
   }
 }
 
 async function runJob(job) {
   if (job.input?.cart === true) {
     try { return await cartJob(job.input); }
-    catch (error) { return { ok: false, stage: '购物车结算', why: String(error.message || error).slice(0, 1000) }; }
+    catch (error) { return { ok: false, stage: error.takeoutSubmitAttempted ? '订单状态待核实' : '购物车结算', retryable: !error.takeoutSubmitAttempted, why: String(error.message || error).slice(0, 1000) }; }
   }
   return await runSearchOrder(job.input || {});
 }
