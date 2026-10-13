@@ -38,7 +38,8 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1";
+const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
 const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
@@ -1347,6 +1348,47 @@ function estimateTokens(text) {
   const cjkCharacters = (value.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu) || []).length;
   return cjkCharacters + Math.ceil((value.length - cjkCharacters) / 4);
 }
+
+function extractOptionItems(text) {
+  const items = [];
+  for (const match of String(text || "").matchAll(new RegExp(OPTION_MARKER_SOURCE, "g"))) {
+    for (const raw of match[1].split(/[|｜]/)) {
+      const item = Array.from(raw.trim().replace(/[。.]$/, "")).slice(0, 14).join("");
+      if (item && !items.includes(item) && items.length < 4) items.push(item);
+    }
+  }
+  return items.length >= 2 ? items : [];
+}
+
+function stripOptionMarkers(text) {
+  return String(text || "").replace(new RegExp(OPTION_MARKER_SOURCE, "g"), "").trim();
+}
+
+function answerPreviousOptions(thread, userMessage, requestedPick) {
+  let previous = null;
+  for (let index = (thread.messages?.length || 0) - 1; index >= 0; index -= 1) {
+    const candidate = thread.messages[index];
+    if (candidate?.role === "user") break;
+    if (candidate?.role !== "assistant" || candidate.contentType === "gallery_collected") continue;
+    previous = candidate;
+    break;
+  }
+  if (!previous) return null;
+  const option = previous.attachments?.find((item) => item?.type === "options" && !item.answered_by && Array.isArray(item.items));
+  if (!option) return null;
+  let selected = null;
+  if (requestedPick && String(requestedPick.msg_id || "") === previous.id) {
+    const index = Number(requestedPick.idx);
+    if (Number.isInteger(index) && index >= 0 && index < option.items.length && String(requestedPick.text || "") === option.items[index]) {
+      selected = { msg_id: previous.id, idx: index, text: option.items[index] };
+      userMessage.attachments = [{ type: "pick", of: previous.id, idx: index, text: option.items[index] }];
+    }
+  }
+  option.answered_by = userMessage.id;
+  option.answered_at = Date.now() / 1000;
+  option.picked = selected?.idx ?? null;
+  return previous;
+}
 function estimateCacheTokens(text) { return estimateTokens(text); }
 function isHTMLContent(content) {
   const source = String(content || "").trim().replace(/^```(?:html|xml)?\s*/i, "").replace(/\s*```$/, "").trim();
@@ -2078,6 +2120,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       `自主唤醒时可以自主决定是否写信，但只能发给默认收件人 ${MAIL_OWNER_EMAIL}，不得添加抄送或发给其他人；服务端会强制执行此限制。引用邮件内容前，先查找并读取原邮件。`
     );
   }
+  if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   const summaryText = thread.contextSummary;
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
@@ -2355,6 +2398,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
     : withoutSpeechPlanning(raw));
+  const optionItems = callMode || proactive ? [] : extractOptionItems(cleanedRaw);
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const speechMatch = allowSpeech ? cleanedRaw.match(/<speech>([\s\S]*?)<\/speech>/i) : null;
   const callDecision = cleanedRaw.match(/<call_decision>\s*(accept|reject)\s*<\/call_decision>/i)?.[1]?.toLowerCase() || null;
@@ -2379,6 +2423,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const visibleRaw = stripPrivateReasoning(cleanedRaw);
   const thinking = extractThinkingText(raw);
   let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
+  content = stripOptionMarkers(content);
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
   if (!content && diaryEntry) content = "嗯，我在。";
@@ -2389,13 +2434,13 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
   if (htmlBlock) content = htmlBlock.content;
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
-  const speechText = speechMatch ? spokenReply(speechMatch[1]) : "";
+  const speechText = speechMatch ? stripOptionMarkers(spokenReply(speechMatch[1])) : "";
   // Preserve the exact provider text for the next request's cache prefix. The
   // user-visible content is intentionally cleaned separately below.
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
+  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
 }
 
 async function checkCacheKeepalive() {
@@ -3782,7 +3827,8 @@ const server = createServer(async (req, res) => {
           const userMessage = threads[id].messages[previousIndex];
           const assistantMessage = threads[id].messages[previousIndex + 1];
           if (assistantMessage?.role !== "assistant") return send(res, 409, { error: "incomplete_previous_request" });
-          return send(res, 200, { userMessage, assistantMessage, memorySaved: false, speechAudioBase64: null, speechDuration: null, speechScript: null });
+          const updatedOptionMessage = threads[id].messages[previousIndex - 1]?.role === "assistant" ? threads[id].messages[previousIndex - 1] : null;
+          return send(res, 200, { userMessage, assistantMessage, updatedOptionMessage, memorySaved: false, speechAudioBase64: null, speechDuration: null, speechScript: null });
         }
       }
       // Older iOS builds retry the exact same POST up to three times. Coalesce
@@ -3816,12 +3862,14 @@ const server = createServer(async (req, res) => {
       const messageText = String(input.content || "").trim();
       markUserActivity(threads[id], messageText);
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), createdAt: new Date().toISOString() };
-      const storedUserMessage = { ...userMessage, ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
+      const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
+      const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
+      const storedUserMessage = { ...userMessage, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
-      generated = await generateReply({ input: `${userMessage.content}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
@@ -3885,7 +3933,8 @@ const server = createServer(async (req, res) => {
         contentType,
         htmlContent: generated.htmlContent,
         htmlTitle: generated.htmlTitle,
-        createdAt: new Date().toISOString()
+        createdAt: new Date().toISOString(),
+        ...(generated.optionItems?.length ? { attachments: [{ type: "options", items: generated.optionItems, asked_at: Date.now() / 1000 }] } : {})
       };
       const galleryMessages = galleryItems.map((item, index) => ({
         id: randomUUID(),
@@ -3932,7 +3981,7 @@ const server = createServer(async (req, res) => {
       // registered APNs destination so the user is notified when the reply is ready.
       if (invite) await sendIncomingCallPush(id, invite);
       else await sendProactivePush(id, visibleContent);
-      return { userMessage: storedUserMessage, assistantMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
+      return { userMessage: storedUserMessage, assistantMessage, updatedOptionMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
