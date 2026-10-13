@@ -1373,6 +1373,13 @@ function extractHTMLBlock(content, preferredTitle = "") {
   if (!isHTMLContent(htmlContent)) return null;
   return { content: `${source.slice(0, start)} ${source.slice(start + end)}`.trim(), htmlContent, htmlTitle: titleFrom(htmlContent) };
 }
+// Internal compaction instructions are one-turn controls, never conversation memory.
+// Older persisted turns and cache snapshots may still contain these directives.
+function withoutStaleCompactionDirective(value) {
+  return typeof value === "string"
+    ? value.replace(/<internal_context_compaction\\b[^>]*>[\\s\\S]*?<\\/internal_context_compaction>/gi, "").trim()
+    : value;
+}
 function contextMessages(thread) {
   const messages = thread.messages || [];
   const boundaryId = thread.compactedThroughMessageId;
@@ -2072,7 +2079,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     .flatMap((message) => {
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
-      const content = message.modelContent || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
+      const content = withoutStaleCompactionDirective(message.modelContent) || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
       if (typeof content !== "string" || !content.trim()) return [];
       // An unsolicited nudge has an internal user request that is deliberately
       // absent from the visible timeline. It is nevertheless part of the
@@ -2195,9 +2202,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
   cacheSystem = injectedSystem[0].content;
   const previousUserContent = previousUser
-    ? (previousUser.modelContent || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
+    ? (withoutStaleCompactionDirective(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
-  const exactCachedPrefix = Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const cachedPrefixHasStaleCompaction = Array.isArray(thread?.cacheKeepaliveMessages) &&
+    thread.cacheKeepaliveMessages.some(message => /<internal_context_compaction\\b/i.test(String(message.content || "")));
+  const exactCachedPrefix = !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -2359,7 +2368,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary) };
+  return { foodToolUsed, content, thinking, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: raw.replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim(), userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
 }
 
 async function checkCacheKeepalive() {
@@ -3753,7 +3762,7 @@ const server = createServer(async (req, res) => {
       generated = await generateReply({ input: `${userMessage.content}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
-      storedUserMessage.modelContent = generated.userModelContent;
+      storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheRequestedSystemPrompt = typeof input.systemPrompt === "string" ? input.systemPrompt : "";
       const selectedConfig = selectedProvider === "custom" ? null : providerConfig(selectedProvider, selectedModel);
@@ -3777,8 +3786,8 @@ const server = createServer(async (req, res) => {
         threads[id].cacheKeepalivePrefixHash = "";
         threads[id].cacheKeepaliveAt = 0;
       } else {
-        threads[id].cacheKeepaliveMessages = generated.cacheKeepaliveMessages;
-        threads[id].cacheKeepaliveAssistantContent = generated.modelContent;
+        threads[id].cacheKeepaliveMessages = generated.compactionDirectivePresent ? null : generated.cacheKeepaliveMessages;
+        threads[id].cacheKeepaliveAssistantContent = generated.compactionDirectivePresent ? "" : generated.modelContent;
         threads[id].cacheKeepaliveSnapshotKind = generated.foodToolUsed ? "food_tool" : "chat";
       }
       threads[id].cacheLastChatContinuity = generated.cacheContinuity;
