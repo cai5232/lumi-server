@@ -1740,6 +1740,20 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}${tool.name === "mail_send" && autonomous ? " 自主唤醒时只能发送给默认邮箱" : ""}`, parameters: schema && typeof schema === "object" ? schema : { type: "object", properties: {} } } });
     }
   }
+  const foodToolsEnabled = Boolean(mcpThreadId && messages.some((message) =>
+    typeof message.content === "string" && message.content.includes('<available_feature name="food_notebook">')));
+  if (foodToolsEnabled) {
+    for (const item of foodTools) {
+      const tool = item.function;
+      mcpToolMap.set(tool.name, {
+        tool: { name: tool.name, description: tool.description },
+        foodTool: true,
+        allowWrite: true,
+        execute: (args) => executeFoodTool(tool.name, args, { threadID: mcpThreadId })
+      });
+      mcpTools.push(item);
+    }
+  }
   if (mcpThreadId && !proactive) {
     for (const [toolIndex, tool] of calendarTools.entries()) {
       const name = `lumi_calendar_${toolIndex}_${tool.name}`.slice(0, 64);
@@ -1748,7 +1762,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save")
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const requestBody = nativeAnthropic
@@ -2392,7 +2406,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode
-    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。外卖助手是你的自主能力：你可以在正常聊天或自主唤醒时自己决定何时想点外卖，不需要用户当前消息或聊天上下文先表达点餐意愿，不需要固定口令，也不需要额外确认。你想下单时就调用 food_takeout_order，直接使用已有购物车，或自己挑选具体商品、店铺和数量后搜索点单；不要先询问她是否想吃、不要等她批准。她已授权你自动提交并付款，不设金额上限。使用本机助手核实真实商品、收货地址和金额；已有购物车时用 cart:true 直接结算。详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录饮食前不得猜店名、菜名、价格或评价。</available_feature>`
+    ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order，使用已有购物车时传 cart:true；如果已有购物车没有想要的商品，先选定具体商品、店铺和数量再下单。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
@@ -2505,8 +2519,19 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     const match = raw.match(/<food_tool\b[^>]*>([\s\S]*?)<\/food_tool>/i);
     if (!match || callMode) break;
     let request;
-    try { request = JSON.parse(match[1]); } catch { break; }
-    if (!request || typeof request.name !== "string") break;
+    try { request = JSON.parse(match[1].trim()); } catch {
+      // A malformed internal call must never be shown to the user. Give the
+      // model one structured chance to correct it through the same executor.
+      foodToolUsed = true;
+      cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: "上一条外卖/饮食工具调用格式无效，没有执行任何操作。请不要输出工具标签；如仍需操作，按 <food_tool>{\"name\":\"工具名\",\"arguments\":{...}}</food_tool> 输出一条有效调用，否则直接正常回复。" }];
+      raw = await callModel({ messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+      continue;
+    }
+    if (!request || typeof request.name !== "string") {
+      foodToolUsed = true;
+      raw = raw.replace(match[0], "").trim();
+      continue;
+    }
     foodToolUsed = true;
     let result;
     if (request.name === "discover_food_tools") {
@@ -2535,6 +2560,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     try { toolCalls = JSON.parse(raw.slice(traceStart + 17, traceEnd)).slice(0, 32); } catch {}
     raw = (raw.slice(0, traceStart) + raw.slice(traceEnd + 18)).trim();
   }
+  if (toolCalls.some((call) => /^food_(?:takeout|note|taste|book|dice|rate|page)/i.test(String(call?.name || "")))) foodToolUsed = true;
   const compactedSummary = pendingCompaction
     ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
     : null;
@@ -2552,6 +2578,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   let cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
     : withoutSpeechPlanning(raw));
+  // Tool protocol is always private. This also covers models that stop after
+  // emitting a call instead of returning a user-facing message.
+  cleanedRaw = cleanedRaw.replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
   if (!callMode && !proactive) {
     const drawer = extractDrawerBlocks(cleanedRaw);
     cleanedRaw = drawer.content;
@@ -2599,7 +2628,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").trim();
+  const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
   return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
 }
 
