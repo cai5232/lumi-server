@@ -2382,7 +2382,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode && !proactive
-    ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。用户明确要点外卖时，调用 food_takeout_order，使用本机助手核实实际店铺、商品、地址和金额，不要编造；25元以内按用户已设定授权处理，超过25元先用 food_takeout_card 给出真实预览，并要求用户回复卡片上的准确金额后再继续。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。若要求登录、验证码、地址不明或金额无法核实就停止，不尝试绕过。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
+    ? `\n\n<available_feature name="food_notebook">Lumi 有可选饮食本，可记录用户明确说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。只有用户提出相关需求时才使用，不要默认读取饮食记录。用户明确要点外卖时，调用 food_takeout_order，使用本机助手核实实际店铺、商品、地址和金额，不要编造；用户明确要求下单时，不因金额大小要求额外确认；只有商品、地址或金额无法核实才停止并询问。每次拿到外卖助手结果后，都用 food_takeout_card 显示商品、金额和真实状态。若要求登录、验证码、地址不明或金额无法核实就停止，不尝试绕过。需要饮食本功能时先输出 <food_tool>{"name":"discover_food_tools","arguments":{}}</food_tool> 获取工具定义和当前饮食本信息，再选具体工具；记录前不得猜店名、菜名、价格或评价。</available_feature>`
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
