@@ -1227,13 +1227,13 @@ async function saveSentinelActivity(signals) {
   await rename(temporaryPath, sentinelActivityPath);
 }
 
-async function recentSentinelActivityContext() {
+async function recentSentinelActivityContext({ includeEmpty = false } = {}) {
   const signals = await readSentinelActivity();
   const recent = signals.events.filter(event => Date.now() - Date.parse(event.createdAt) <= 6 * 60 * 60_000).slice(-12);
-  if (!recent.length) return "";
+  if (!recent.length) return includeEmpty ? "最近 6 小时没有收到 App 活动记录。" : "";
   const byApp = new Map();
   for (const event of recent) byApp.set(event.app, (byApp.get(event.app) || 0) + 1);
-  return `近 6 小时自愿分享的 App 打开记录：${[...byApp].map(([app, count]) => `${app} ${count} 次`).join("、")}。只作为轻量聊天背景；除非话题自然相关，不要突然点名提到你知道用户打开过哪些 App。`;
+  return `近 6 小时自愿分享的 App 打开记录：${[...byApp].map(([app, count]) => `${app} ${count} 次`).join("、")}。`;
 }
 
 function takeoutBridgeRequestAuthorized(req) {
@@ -2513,6 +2513,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
   const sentinelActivitySummary = proactive ? await recentSentinelActivityContext() : "";
+  const asksAboutPhoneActivity = !proactive && !callMode && /app|应用|软件|使用情况|使用记录|打开过|打开了|最近用|手机活动|快捷指令|活动摘要/i.test(String(input || ""));
+  const phoneActivitySummary = asksAboutPhoneActivity ? await recentSentinelActivityContext({ includeEmpty: true }) : "";
+  const phoneActivityDirective = phoneActivitySummary
+    ? `<phone_activity_summary source="user-selected-shortcut">${phoneActivitySummary}</phone_activity_summary>\n根据这份近期记录回答。记录中有活动时，不要说没有收到；明确显示无记录时，再如实说明。`
+    : "";
   const engawaEnabled = proactive && mailSettings.servers.some(server => server.id === ENGAWA_SERVER_ID && server.enabled);
   const engawaDirective = engawaEnabled
     ? "<available_feature name=\"engawa\">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>\n"
@@ -2536,7 +2541,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<promise_alarm_instructions>如果你明确答应在具体时间提醒、叫醒或回来找她，系统会替你记下并到点回来兑现。只有明确答应且时间具体时才算；不要声称已经设置成功，除非当前对话明确显示约定已记录。若她说取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3852,6 +3857,8 @@ const server = createServer(async (req, res) => {
       if (!duplicate) signals.events.push({ app, createdAt: new Date(now).toISOString() });
       signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
       await saveSentinelActivity(signals);
+      const recentSignalCount = signals.events.filter(event => now - Date.parse(event.createdAt) <= 6 * 60 * 60_000).length;
+      console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} recent_6h=${recentSignalCount} proactive_enabled=${Number(proactiveSettings.enabled)}`);
       if (!duplicate && proactiveSettings.enabled) {
         const threads = await readThreads();
         const thread = threads[proactiveSettings.threadId] || threads.default;
