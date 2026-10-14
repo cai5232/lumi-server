@@ -172,29 +172,12 @@ export async function markCalendarChangesSeen(ids) {
   await writeCalendar(state);
 }
 
-export async function extractCalendarMessage(text, messageId, callModel, route = {}) {
+export async function applyCalendarMessage(text, messageId, parsed = {}) {
   const source = String(text || "").trim();
   if (source.length < Number(process.env.LUMI_CALENDAR_EXTRACTOR_MIN_CHARS || 4)) return { ok: true, candidates_seen: 0, applied: [], skipped: [] };
   const state = await readCalendar();
   if (state.events.some(event => event.source_message_id === messageId)) return { ok: true, candidates_seen: 0, applied: [], skipped: [{ reason: "duplicate_message" }] };
-  const timezoneName = timezone();
-  const now = new Intl.DateTimeFormat("zh-CN", { timeZone: timezoneName, dateStyle: "full", timeStyle: "short" }).format(new Date());
-  const raw = await callModel({
-    messages: [
-      { role: "system", content: `你是日历安排提取器。根据用户单独这一句话判断是否有已确定的、与用户本人有关的未来安排。忽略假设、建议、他人安排、重复习惯和已发生事项。当前时间：${now}（${timezoneName}）。只输出 JSON：{"events":[{"title":"简短标题","starts_at":"带时区的 ISO 时间或 YYYY-MM-DD","ends_at":"可选的带时区 ISO 时间或 YYYY-MM-DD","precision":"time 或 day","confidence":0.0}]}。没有明确安排时返回空 events。不要补充未说出的细节。` },
-      { role: "user", content: source }
-    ],
-    provider: route.provider || process.env.LUMI_CALENDAR_EXTRACTOR_PROVIDER || "zenmux",
-    model: route.model || process.env.LUMI_CALENDAR_EXTRACTOR_MODEL || process.env.LUMI_MODEL_NAME || "",
-    customProvider: route.customProvider || null,
-    maxOutputTokens: 1200,
-    mcpThreadId: "",
-    mailThreadId: ""
-  });
-  let parsed = {};
-  try { parsed = JSON.parse(String(raw).replace(/<thinking>[\s\S]*?<\/thinking>/g, "").match(/\{[\s\S]*\}/)?.[0] || "{}"); }
-  catch { return { ok: false, error: "extractor_invalid_json", candidates_seen: 0, applied: [], skipped: [] }; }
-  const candidates = Array.isArray(parsed.events) ? parsed.events : [];
+  const candidates = Array.isArray(parsed?.events) ? parsed.events : [];
   const applied = [], skipped = [];
   const confidenceFloor = Number(process.env.LUMI_CALENDAR_EXTRACTOR_MIN_CONFIDENCE || 0.65);
   for (const candidate of candidates.slice(0, 8)) {
@@ -204,7 +187,7 @@ export async function extractCalendarMessage(text, messageId, callModel, route =
     if (confidence < confidenceFloor) { skipped.push({ title: candidate.title || "", reason: "low_confidence" }); continue; }
     if (!String(candidate.title || "").trim() || !validTime(starts, ends)) { skipped.push({ title: candidate.title || "", reason: "invalid_candidate" }); continue; }
     const day = starts.slice(0, 10);
-    const duplicate = state.events.some(event => !event.deleted_at && event.starts_at.slice(0, 10) === day && event.title.replace(/\s/g, "").includes(String(candidate.title).replace(/\s/g, "")));
+    const duplicate = state.events.some(event => !event.deleted_at && event.starts_at.slice(0, 10) === day && event.title.replace(/\\s/g, "").includes(String(candidate.title).replace(/\\s/g, "")));
     if (duplicate) { skipped.push({ title: candidate.title, reason: "duplicate" }); continue; }
     const event = { id: `cal_${randomUUID().replaceAll("-", "").slice(0, 16)}`, title: String(candidate.title).trim(), starts_at: starts, ends_at: ends, precision: candidate.precision === "day" ? "day" : "time", note: "", created_by: "auto", source_message_id: messageId, confidence, created_at: new Date().toISOString() };
     state.events.push(event); recordChange(state, event, "create"); applied.push(event);
