@@ -172,7 +172,7 @@ export async function markCalendarChangesSeen(ids) {
   await writeCalendar(state);
 }
 
-export async function extractCalendarMessage(text, messageId, callModel) {
+export async function extractCalendarMessage(text, messageId, callModel, route = {}) {
   const source = String(text || "").trim();
   if (source.length < Number(process.env.LUMI_CALENDAR_EXTRACTOR_MIN_CHARS || 4)) return { ok: true, candidates_seen: 0, applied: [], skipped: [] };
   const state = await readCalendar();
@@ -184,8 +184,9 @@ export async function extractCalendarMessage(text, messageId, callModel) {
       { role: "system", content: `你是日历安排提取器。根据用户单独这一句话判断是否有已确定的、与用户本人有关的未来安排。忽略假设、建议、他人安排、重复习惯和已发生事项。当前时间：${now}（${timezoneName}）。只输出 JSON：{"events":[{"title":"简短标题","starts_at":"带时区的 ISO 时间或 YYYY-MM-DD","ends_at":"可选的带时区 ISO 时间或 YYYY-MM-DD","precision":"time 或 day","confidence":0.0}]}。没有明确安排时返回空 events。不要补充未说出的细节。` },
       { role: "user", content: source }
     ],
-    provider: process.env.LUMI_CALENDAR_EXTRACTOR_PROVIDER || "zenmux",
-    model: process.env.LUMI_CALENDAR_EXTRACTOR_MODEL || process.env.LUMI_MODEL_NAME || "",
+    provider: route.provider || process.env.LUMI_CALENDAR_EXTRACTOR_PROVIDER || "zenmux",
+    model: route.model || process.env.LUMI_CALENDAR_EXTRACTOR_MODEL || process.env.LUMI_MODEL_NAME || "",
+    customProvider: route.customProvider || null,
     maxOutputTokens: 1200,
     mcpThreadId: "",
     mailThreadId: ""

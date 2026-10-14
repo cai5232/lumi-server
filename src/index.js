@@ -1826,6 +1826,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
+  const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
+  const nativeThinkingEnabled = !disableThinkingRetry &&
+    (process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude;
+  const configuredThinkingBudget = Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096));
+  // Reserve at least 1024 tokens for the visible answer; small-output tasks
+  // such as calendar extraction should not send an unusable thinking budget.
+  const nativeThinkingBudget = Math.min(configuredThinkingBudget, outputTokenLimit - 1024);
   const requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
@@ -1837,7 +1844,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             ? message.content
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(!disableThinkingRetry && (process.env.LUMI_NATIVE_THINKING_ENABLED === "true" || (!customProvider && process.env.LUMI_NATIVE_THINKING_ENABLED !== "false")) && isClaude ? { thinking: { type: "enabled", budget_tokens: Math.max(1024, Number(process.env.LUMI_NATIVE_THINKING_BUDGET_TOKENS || 4096)) } } : {}),
+        ...(nativeThinkingEnabled && nativeThinkingBudget >= 1024 ? { thinking: { type: "enabled", budget_tokens: nativeThinkingBudget } } : {}),
         ...((nativeMailMcp || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
           ...((nativeMailMcp || nativeRemoteMcpServers.length) ? {
             mcp_servers: [
@@ -4350,7 +4357,11 @@ const server = createServer(async (req, res) => {
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
       if (messageText && !images.length && !galleryImageIDs.length) {
-        void extractCalendarMessage(messageText, userMessage.id, callModel).then(result => {
+        void extractCalendarMessage(messageText, userMessage.id, callModel, {
+          provider: selectedProvider,
+          model: selectedModel,
+          customProvider
+        }).then(result => {
           if (result.applied?.length || result.skipped?.length) console.info(`[calendar-extract] message=${userMessage.id} applied=${result.applied?.length || 0} skipped=${result.skipped?.length || 0}`);
         }).catch(error => console.warn(`[calendar-extract] message=${userMessage.id} failed: ${String(error.message || error).slice(0, 240)}`));
       }
