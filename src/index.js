@@ -1229,11 +1229,12 @@ async function saveSentinelActivity(signals) {
 
 async function recentSentinelActivityContext({ includeEmpty = false } = {}) {
   const signals = await readSentinelActivity();
-  const recent = signals.events.filter(event => Date.now() - Date.parse(event.createdAt) <= 6 * 60 * 60_000).slice(-12);
-  if (!recent.length) return includeEmpty ? "最近 6 小时没有收到 App 活动记录。" : "";
-  const byApp = new Map();
-  for (const event of recent) byApp.set(event.app, (byApp.get(event.app) || 0) + 1);
-  return `近 6 小时自愿分享的 App 打开记录：${[...byApp].map(([app, count]) => `${app} ${count} 次`).join("、")}。`;
+  const recent = signals.events
+    .filter(event => Number.isFinite(Date.parse(event.createdAt)) && Date.parse(event.createdAt) <= Date.now())
+    .slice(-10);
+  if (!recent.length) return includeEmpty ? "最近的 10 次记录中没有 App 活动。" : "";
+  const apps = recent.slice().reverse().map(event => event.app);
+  return `最近 ${recent.length} 次自愿分享的 App 打开记录（从新到旧）：${apps.join("、")}。`;
 }
 
 function takeoutBridgeRequestAuthorized(req) {
@@ -3857,8 +3858,7 @@ const server = createServer(async (req, res) => {
       if (!duplicate) signals.events.push({ app, createdAt: new Date(now).toISOString() });
       signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
       await saveSentinelActivity(signals);
-      const recentSignalCount = signals.events.filter(event => now - Date.parse(event.createdAt) <= 6 * 60 * 60_000).length;
-      console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} recent_6h=${recentSignalCount} proactive_enabled=${Number(proactiveSettings.enabled)}`);
+      console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} retained_events=${signals.events.length} context_window=10 proactive_enabled=${Number(proactiveSettings.enabled)}`);
       if (!duplicate && proactiveSettings.enabled) {
         const threads = await readThreads();
         const thread = threads[proactiveSettings.threadId] || threads.default;
