@@ -2815,9 +2815,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const callUserText = cleanedRaw.match(/<call_user_text>([\s\S]*?)<\/call_user_text>/i)?.[1]?.trim() || null;
   const sentinelDecisionRaw = cleanedRaw.match(/<sentinel_decision\b[^>]*>([\s\S]*?)<\/sentinel_decision>/i)?.[1];
   const sentinelDecision = sentinelDecisionRaw ? safeJSON(sentinelDecisionRaw, null) : null;
-  const promiseAlarmRaw = cleanedRaw.match(/<promise_alarm_decision>([\\s\\S]*?)<\\/promise_alarm_decision>/i)?.[1];
+  const promiseAlarmRaw = cleanedRaw.match(/<promise_alarm_decision>([\s\S]*?)<\/promise_alarm_decision>/i)?.[1];
   const promiseAlarmDecision = promiseAlarmRaw ? safeJSON(promiseAlarmRaw, null) : null;
-  const calendarEventsRaw = cleanedRaw.match(/<calendar_events>([\\s\\S]*?)<\\/calendar_events>/i)?.[1];
+  const calendarEventsRaw = cleanedRaw.match(/<calendar_events>([\s\S]*?)<\/calendar_events>/i)?.[1];
   const calendarEvents = calendarEventsRaw ? safeJSON(calendarEventsRaw, { events: [] }) : { events: [] };
   const emojiMood = cleanedRaw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const galleryCollectionMatch = cleanedRaw.match(/<gallery_collection>([\s\S]*?)<\/gallery_collection>/i);
