@@ -88,7 +88,13 @@ def chat(messages: list[dict], max_tokens: int = 600, temperature: float = 0.7, 
             return _anthropic_request(settings, messages, max_tokens, temperature)
         return _openai_request(settings, messages, max_tokens, temperature, json_mode)
     except HTTPError as error:
-        raise LLMError(f"接口返回 {error.code}，检查 API Key、地址和模型名。") from error
+        try:
+            detail = error.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        detail = " ".join(detail.split())[:400]
+        suffix = f"：{detail}" if detail else ""
+        raise LLMError(f"接口返回 {error.code}{suffix}") from error
     except (URLError, TimeoutError) as error:
         raise LLMError("连不上模型接口，检查网络和 api_base。") from error
     except (KeyError, IndexError, TypeError, ValueError) as error:
