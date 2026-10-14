@@ -90,21 +90,22 @@ export async function promiseAlarmContext(sessionID) {
   } catch { return ""; }
 }
 
-export function capturePromiseAlarm(sessionID, userText, reply) {
+export function capturePromiseAlarm(sessionID, userText, reply, decision = null) {
   if (!promiseAlarmEnabled) return;
   const post = (path, payload) => alarmFetch(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ session_id: sessionID, ...payload })
-  }, path === "/promises/capture" ? 5_000 : 5_000, path === "/promises/capture" ? 95_000 : 5_000);
+  }, 5_000, 5_000);
   void (async () => {
     for (const [role, content] of [["user", userText], ["assistant", reply]]) {
       const stored = await post("/promises/message", { role, content });
       if (!stored.ok) throw new Error(`message sync HTTP ${stored.status}`);
     }
-    const response = await post("/promises/capture", { user_text: userText, reply });
+    if (!decision || typeof decision !== "object") return;
+    const response = await post("/promises/capture", { user_text: userText, reply, decision });
     if (!response.ok) {
-      const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
+      const detail = (await response.text()).replace(/\\s+/g, " ").slice(0, 500);
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const result = await response.json();
