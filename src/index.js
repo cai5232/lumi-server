@@ -2446,16 +2446,30 @@ function withoutSpeechPlanning(content) {
   });
 }
 
-function callProviderRoute(input, thread) {
-  // A selected custom preset must never silently route to Zenmux.
-  const provider = input?.customProvider && typeof input.customProvider === "object"
-    ? "custom" : (typeof input?.provider === "string" && input.provider ? input.provider : thread?.cacheProvider || "zenmux");
-  const model = provider === "zenmux" ? "" : (typeof input?.model === "string" && input.model ? input.model : thread?.cacheModel || "");
-  if (provider === "custom") {
-    const customProvider = normalizeCustomProvider(input?.customProvider);
-    if (!customProvider || !model) throw new Error("call_custom_provider_or_model_required");
-    return { provider, model, customProvider };
+async function callProviderRoute(input, thread) {
+  // Calls must use the same durable chat route as the latest normal message.
+  // cacheProvider is intentionally "zenmux" for custom chats so cache plumbing
+  // stays compatible; it is not the provider to use for a phone call.
+  const explicitCustom = input?.customProvider && typeof input.customProvider === "object"
+    ? normalizeCustomProvider(input.customProvider) : null;
+  if (explicitCustom) {
+    const model = typeof input?.model === "string" && input.model ? input.model : thread?.lastChatModel || "";
+    if (!model) throw new Error("call_custom_provider_or_model_required");
+    return { provider: "custom", model, customProvider: explicitCustom };
   }
+
+  const saved = await resolveMurmurRoute(thread?.id || "");
+  if (saved?.provider === "custom") {
+    if (!saved.customProvider || !saved.model) throw new Error("call_custom_provider_or_model_required");
+    return saved;
+  }
+  if (saved?.provider) return saved;
+
+  const provider = typeof input?.provider === "string" && input.provider
+    ? input.provider : thread?.lastChatProvider || thread?.cacheProvider || "zenmux";
+  const model = provider === "zenmux"
+    ? ""
+    : (typeof input?.model === "string" && input.model ? input.model : thread?.lastChatModel || thread?.cacheModel || "");
   return { provider, model };
 }
 
@@ -4220,7 +4234,7 @@ const server = createServer(async (req, res) => {
             input: `<internal_call_declined>言言拒绝了你刚才主动发起的电话。${input.note ? `她留下的理由是：${String(input.note).slice(0, 120)}。` : "她没有留下理由。"}请自然地发一条聊天消息，理解她可能在忙，不要责怪，也不要提及内部标签。</internal_call_declined>`,
             systemPrompt: input.systemPrompt,
             thread,
-            ...callProviderRoute(input, thread),
+            ...await callProviderRoute(input, thread),
             callMode: true
           });
         } catch {
