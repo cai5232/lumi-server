@@ -163,7 +163,7 @@ def context(session_id: str) -> str:
 def worth_checking(user_text: str, reply: str, has_pending: bool = False) -> bool:
     if has_pending and any(re.search(r"(?:不用|别|不要|取消).{0,8}(?:叫|提醒|催|闹钟|找你|找我)", text or "", re.IGNORECASE) for text in (reply, user_text)):
         return True
-    combined = f"{user_text or ''}\\n{reply or ''}"
+    combined = f"{user_text or ''}\n{reply or ''}"
     return bool(TIME_PATTERN.search(combined) and CALL_PATTERN.search(combined))
 
 
@@ -235,7 +235,7 @@ def deterministic_clock_fallback(user_text: str, reply: str, now: datetime):
     assistant_confirmed = bool(re.search(r"收到|记着|记下|答应|好[的了]?|行[的吧]?|可以|我会|我来|到点", reply or ""))
     if not assistant_promised and not (user_requested and assistant_confirmed):
         return None
-    clock_pattern = r"(?<!\\d)([01]?\\d|2[0-3])[:：]([0-5]\\d)(?!\\d)"
+    clock_pattern = r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)"
     reply_matches = re.findall(clock_pattern, reply or "")
     matches = reply_matches or re.findall(clock_pattern, user_text or "")
     clocks = set(matches)
