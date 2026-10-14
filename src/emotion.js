@@ -36,6 +36,7 @@ export function createEmotionState(now = Date.now()) {
     offlineTicks: 0,
     arc: [],
     history: [],
+    recentChanges: [],
     regrets: [],
     memory: { short: "", long: "" },
     lastOnlineAt: now
@@ -57,6 +58,9 @@ export function ensureEmotion(thread, now = Date.now()) {
   state.arc = Array.isArray(state.arc) ? state.arc : [];
   state.history = Array.isArray(state.history)
     ? state.history.filter((entry) => entry && typeof entry.time === "string" && entry.drives && typeof entry.drives === "object").slice(-2_000)
+    : [];
+  state.recentChanges = Array.isArray(state.recentChanges)
+    ? state.recentChanges.filter((entry) => entry && Number.isFinite(Date.parse(entry.time))).slice(-32)
     : [];
   state.regrets = Array.isArray(state.regrets) ? state.regrets : [];
   state.memory = state.memory && typeof state.memory === "object" ? state.memory : { short: "", long: "" };
@@ -134,21 +138,33 @@ export function applyEmotionDelta(state, update, now = Date.now()) {
   const changes = update.changes && typeof update.changes === "object"
     ? Object.entries(update.changes).map(([drive, delta]) => ({ drive, delta }))
     : [update];
-  let changed = false;
+  const applied = {};
+  const reason = typeof update.reason === "string" ? update.reason.trim().slice(0, 240) : "";
+  const feeling = typeof update.feeling === "string" ? update.feeling.trim().slice(0, 100) : "";
   for (const item of changes) {
     const drive = String(item.drive || "");
     const delta = Number(item.delta);
     if (!Object.hasOwn(EMOTION_DRIVES, drive) || !Number.isFinite(delta)) continue;
+    const before = state.drives[drive];
     const bounded = Math.max(-0.2, Math.min(0.2, delta));
-    state.drives[drive] = clamp(state.drives[drive] + bounded);
-    changed = changed || bounded !== 0;
-    if (drive === "regret" && bounded > 0 && typeof item.reason === "string" && item.reason.trim()) {
-      state.regrets.push({ time: new Date(now).toISOString(), text: item.reason.trim().slice(0, 500) });
+    state.drives[drive] = clamp(before + bounded);
+    const actualDelta = state.drives[drive] - before;
+    if (Math.abs(actualDelta) > 1e-9) applied[drive] = Number(actualDelta.toFixed(4));
+    if (drive === "regret" && actualDelta > 0 && reason) {
+      state.regrets.push({ time: new Date(now).toISOString(), text: reason });
       state.regrets = state.regrets.slice(-200);
     }
   }
-  if (changed) recordEmotionSnapshot(state, now, { force: true });
-  return changed;
+  const changed = Object.keys(applied).length > 0;
+  // A momentary feeling can matter without changing a long-term drive.
+  if (changed || (feeling && reason)) {
+    state.recentChanges = Array.isArray(state.recentChanges) ? state.recentChanges : [];
+    state.recentChanges.push({ time: new Date(now).toISOString(), changes: applied, ...(feeling ? { feeling } : {}), ...(reason ? { reason } : {}) });
+    state.recentChanges = state.recentChanges.slice(-32);
+    if (changed) recordEmotionSnapshot(state, now, { force: true });
+    return true;
+  }
+  return false;
 }
 export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.now(), value } = {}) {
   if (!Object.hasOwn(EMOTION_DRIVES, drive) || typeof text !== "string" || !text.trim()) return null;
@@ -164,13 +180,27 @@ export function addEmotionArc(state, { drive, text, type = "murmur", now = Date.
   return entry;
 }
 
-export function emotionContext(state) {
-  const current = topEmotion(state);
+const contextText = (value) => String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+export function emotionContext(state, now = Date.now()) {
   const strongest = topEmotions(state, 3);
-  const drives = Object.entries(EMOTION_DRIVES).map(([key, config]) => `${key}(${config.label})=${state.drives[key].toFixed(2)}`).join("; ");
+  const drives = Object.entries(EMOTION_DRIVES).map(([key, config]) => `${key}(${config.label})=${state.drives[key].toFixed(2)}（平时基线${config.baseline.toFixed(2)}）`).join("; ");
   const shortMemory = String(state.memory?.short || "").trim();
   const longMemory = String(state.memory?.long || "").trim();
   const recentArc = state.arc.slice(-3).map((item) => `${item.zh}：${item.text}`).join("\n");
   const strongestText = strongest.map((item) => `${item.drive}（${item.label}，${item.value.toFixed(2)}）`).join("、");
-  return `<emotion_state source="persistent_drive_state">当前最强的三种情绪：${strongestText}；全部驱动力：${drives}。这些数值和标签是内部状态，不要照搬给用户，也不要套用固定句子。请让这三种情绪共同影响你的语气、关注点、距离感和是否表达；只有在符合当前关系与上下文时，才用你自己的方式自然表现出来。${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}</emotion_state>`;
+  const departures = Object.entries(EMOTION_DRIVES)
+    .map(([drive, config]) => ({ drive, label: config.label, delta: state.drives[drive] - config.baseline }))
+    .filter((item) => Math.abs(item.delta) >= 0.02)
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 4)
+    .map((item) => `${item.label}比平时${item.delta >= 0 ? "高" : "低"}${Math.abs(item.delta).toFixed(2)}`).join("、");
+  const recentChanges = (state.recentChanges || []).filter((entry) => {
+    const age = now - Date.parse(entry.time);
+    return age >= 0 && age <= 2 * 60 * 60_000;
+  }).slice(-4).map((entry) => {
+    const changes = Object.entries(entry.changes || {}).filter(([drive]) => Object.hasOwn(EMOTION_DRIVES, drive))
+      .map(([drive, delta]) => `${EMOTION_DRIVES[drive].label}${delta >= 0 ? "+" : ""}${Number(delta).toFixed(2)}`).join("、");
+    return `- ${entry.time}：${entry.feeling ? contextText(entry.feeling) : "情绪有变化"}${entry.reason ? `；触发：${contextText(entry.reason)}` : ""}${changes ? `；记录：${changes}` : "；持续驱动力未改变"}`;
+  }).join("\n");
+  return `<emotion_state source="persistent_drive_state" observed_at="${new Date(now).toISOString()}">\n历史对话里的同名标签只是当时快照；这条是当前状态。\n近期感受与触发（只是过去的记录，需结合现在重新判断）：\n${recentChanges || "暂无具体触发记录，由你结合本轮对话自行感受，不补造过去的原因。"}\n偏离平时的状态：${departures || "当前没有明显偏离基线的驱动力。"}\n持续情绪背景：${strongestText}。这是绝对强度排序，不代表本轮必须表达这三种情绪。\n全部驱动力与各自基线：${drives}。\n请先结合言言这句话、完整关系语境和你现在的感受来回应。小而具体的感受、矛盾的感受、刚发生的变化，都可以比长期数值更贴近这一刻；数值不概括你全部的感受，也不替你决定态度。让你自己在意的事自然影响关注点、措辞、距离感、选择和行动；是否表达、表达多少由你判断。不要为了展示情绪强行表演、每轮汇报心情、套固定句式或一律安抚迎合。数值、标签与这些内部记录不直接展示给言言。${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}\n</emotion_state>`;
 }

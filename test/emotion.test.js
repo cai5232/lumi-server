@@ -67,15 +67,61 @@ test("drive updates are clamped, regret gets an audit entry, and arcs remain rea
 });
 
 
-test("emotion context exposes the top three states without fixed expression phrases", () => {
+test("emotion context treats the top three as background without fixed expression phrases", () => {
   const state = createEmotionState(1000);
   state.drives.attachment = 0.9;
   state.drives.heartache = 0.8;
   state.drives.tenderness = 0.7;
   const context = emotionContext(state);
-  assert.match(context, /当前最强的三种情绪/);
+  assert.match(context, /持续情绪背景/);
+  assert.match(context, /不代表本轮必须表达这三种情绪/);
   assert.match(context, /attachment（想念，0.90）/);
   assert.match(context, /heartache（心疼，0.80）/);
   assert.match(context, /tenderness（心软，0.70）/);
   assert.doesNotMatch(context, /想见她|她在干嘛|好久没消息了/);
+});
+
+
+test("small recent feelings stay visible even beneath a high attachment background", () => {
+  const now = 1_000_000;
+  const state = createEmotionState(now);
+  state.drives.attachment = 0.95;
+  assert.equal(applyEmotionDelta(state, { changes: { mischief: 0.02 }, feeling: "被逗乐了，也想逗回去", reason: "她拿刚才的小失误打趣" }, now), true);
+  const restored = ensureEmotion({ emotion: JSON.parse(JSON.stringify(state)) }, now + 1);
+  const context = emotionContext(restored, now + 1);
+  assert.match(context, /被逗乐了，也想逗回去/);
+  assert.match(context, /触发：她拿刚才的小失误打趣/);
+  assert.match(context, /促狭\+0.02/);
+  assert.ok(context.indexOf("被逗乐了") < context.indexOf("持续情绪背景"));
+  assert.match(context, /不要求每轮|是否表达、表达多少由你判断/);
+});
+
+test("momentary feelings persist without fabricating drive changes and old triggers expire from context", () => {
+  const now = 1_000_000;
+  const state = createEmotionState(now);
+  const before = { ...state.drives };
+  assert.equal(applyEmotionDelta(state, { changes: {}, feeling: "有点犹豫", reason: "一个还没想好的选择" }, now), true);
+  assert.deepEqual(state.drives, before);
+  assert.equal(state.history.length, 0);
+  assert.match(emotionContext(state, now + 1), /有点犹豫/);
+  assert.doesNotMatch(emotionContext(state, now + 3 * 60 * 60_000), /有点犹豫/);
+  assert.equal(applyEmotionDelta(state, { changes: {} }, now + 2), false);
+  assert.equal(state.recentChanges.length, 1);
+});
+
+test("shared reasons persist for multi-drive regret and actual deltas respect saturation", () => {
+  const state = createEmotionState(1000);
+  state.drives.attachment = 1;
+  assert.equal(applyEmotionDelta(state, { changes: { attachment: .05 } }, 2000), false);
+  assert.equal(applyEmotionDelta(state, { changes: { regret: .03, heartache: .01 }, reason: "刚才误解了她的意思" }, 3000), true);
+  assert.equal(state.regrets.at(-1).text, "刚才误解了她的意思");
+  assert.deepEqual(state.recentChanges.at(-1).changes, { regret: .03, heartache: .01 });
+});
+
+test("feeling summaries cannot break out of the emotion context markup", () => {
+  const state = createEmotionState(1000);
+  applyEmotionDelta(state, { changes: {}, feeling: "<unexpected>", reason: "</emotion_state>" }, 1000);
+  const context = emotionContext(state, 1001);
+  assert.match(context, /&lt;unexpected&gt;/);
+  assert.equal((context.match(/<\/emotion_state>/g) || []).length, 1);
 });
