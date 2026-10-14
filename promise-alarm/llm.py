@@ -63,9 +63,12 @@ def _openai_request(settings: dict, messages: list[dict], max_tokens: int, tempe
         "model": settings["model"],
         "messages": messages,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "stream": False,
     }
+    # ZenMux's OpenAI-compatible Anthropic routes reject temperature on Claude models.
+    model_name = str(settings.get("model") or "").lower()
+    if temperature is not None and "claude" not in model_name and "anthropic/" not in model_name:
+        body["temperature"] = temperature
     if json_mode:
         body["response_format"] = {"type": "json_object"}
     request = urllib.request.Request(
