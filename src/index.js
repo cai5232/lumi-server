@@ -2628,7 +2628,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
-    ? `\n\n<promise_alarm_instructions>如果你明确答应在具体时间提醒、叫醒或回来找她，系统会替你记下并到点回来兑现。只有明确答应且时间具体时才算；不要声称已经设置成功，除非当前对话明确显示约定已记录。若她说取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
+    ? `\n\n<promise_alarm_instructions>如果她要求提醒、叫醒或回来找她，但没有明确钟点或可计算的时长（例如“等下”“待会儿”“晚一点”“有空时”），先问清楚具体几点或几分钟后；不要猜时间、不要含糊答应，也不要说已经记下。她给出具体时间后，复述确认这个时间。只有明确答应具体时间的约定才会登记；不要声称已设置成功，除非待办约定上下文明确出现了这条记录。若她取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
