@@ -276,6 +276,6 @@ export async function calendarRoute(req, res, pathname, body, binary, extract, n
     return binary(image, "image/png");
   }
   if (pathname === "/v1/calendar/env" && req.method === "GET") return res(await calendarEnvironment());
-  if (pathname === "/v1/calendar/extract" && req.method === "POST") return res(await extract(body.text, body.message_id));
+  if (pathname === "/v1/calendar/extract" && req.method === "POST") return res(await extract(body.text, body.message_id, body.events));
   return null;
 }
