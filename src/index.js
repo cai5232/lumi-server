@@ -3443,9 +3443,29 @@ const server = createServer(async (req, res) => {
       if (isPromiseAlarmAPI && !pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       return proxyPromiseAlarm(req, res, pathname, url.search);
     }
-    if (req.method === "POST" && url.pathname === "/v1/internal/promise-alarm/fire") {
+    if (req.method === "POST" && ["/v1/internal/promise-alarm/fire", "/v1/internal/promise-alarm/usage"].includes(url.pathname)) {
       if (!promiseAlarmAuthorized(req.headers.authorization)) return send(res, 401, { error: "unauthorized" });
       const input = await body(req);
+      if (url.pathname === "/v1/internal/promise-alarm/usage") {
+        const record = input.record && typeof input.record === "object" ? input.record : {};
+        if (!record.model || !Number.isFinite(Number(record.status))) return send(res, 400, { error: "invalid_promise_alarm_usage" });
+        await recordModelRequest({
+          id: randomUUID(),
+          createdAt: Number.isFinite(Date.parse(record.createdAt)) ? new Date(record.createdAt).toISOString() : new Date().toISOString(),
+          provider: String(record.provider || "promise-alarm").slice(0, 40),
+          model: String(record.model).slice(0, 160),
+          format: String(record.format || "").slice(0, 24),
+          status: Number(record.status),
+          durationMs: Math.max(0, Number(record.durationMs) || 0),
+          inputTokens: Math.max(0, Number(record.inputTokens) || 0),
+          outputTokens: Math.max(0, Number(record.outputTokens) || 0),
+          cachedTokens: Math.max(0, Number(record.cachedTokens) || 0),
+          requestJSON: modelRequestLogJSON(record.requestJSON || {}),
+          responseJSON: modelRequestLogJSON(record.responseJSON || {})
+        });
+        console.info(`[promise-alarm] model request logged model=${String(record.model).slice(0, 120)} status=${Number(record.status)}`);
+        return send(res, 200, { ok: true });
+      }
       const id = String(input.session_id || "default").slice(0, 80);
       const text = String(input.text || "").trim().slice(0, 4000);
       const promise = input.promise && typeof input.promise === "object" ? input.promise : {};
@@ -3455,9 +3475,13 @@ const server = createServer(async (req, res) => {
       thread.messages = Array.isArray(thread.messages) ? thread.messages : [];
       if (thread.messages.some((message) => message.promiseAlarmId === Number(promise.id))) return send(res, 200, { ok: true, duplicate: true });
       thread.messages.push({ id: randomUUID(), role: "assistant", content: text, contentType: "promise_alarm", promiseAlarmId: Number(promise.id), createdAt: new Date().toISOString() });
+      const callRequested = promise.call_requested === true;
+      let invite = null;
+      if (callRequested) invite = await createIncomingCallInvite(thread, String(promise.task || text));
       await persistChatThread(id, thread);
-      await sendProactivePush(id, text);
-      return send(res, 200, { ok: true });
+      if (callRequested) startIncomingCallRing(id, invite);
+      else await sendProactivePush(id, text);
+      return send(res, 200, { ok: true, callRequested });
     }
     if (url.pathname.startsWith("/v1/calendar/")) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
