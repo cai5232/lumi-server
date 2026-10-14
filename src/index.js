@@ -30,6 +30,7 @@ const threadPath = join(dataDir, "threads.json");
 const emotionStatePath = join(dataDir, "emotion-state.json");
 const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
+const modelRequestLogsPath = join(dataDir, "model-request-logs.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const voipTokensPath = join(dataDir, "voip-tokens.json");
@@ -41,7 +42,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -1085,6 +1086,31 @@ async function saveCacheStats() {
   await rename(temporaryPath, cacheStatsPath);
 }
 
+let modelRequestLogsWriteQueue = Promise.resolve();
+
+async function recordModelRequest(record) {
+  modelRequestLogsWriteQueue = modelRequestLogsWriteQueue.catch(() => {}).then(async () => {
+    await mkdir(dataDir, { recursive: true });
+    let requests = [];
+    try { requests = JSON.parse(await readFile(modelRequestLogsPath, "utf8")).requests || []; }
+    catch (error) { if (error?.code !== "ENOENT") console.warn(`model request logs unavailable: ${error.message}`); }
+    const cutoff = Date.now() - 100 * 24 * 60 * 60 * 1000;
+    requests.push(record);
+    requests = requests.filter((item) => Date.parse(item.createdAt) >= cutoff).slice(-20_000);
+    const temporaryPath = `${modelRequestLogsPath}.${randomUUID()}.tmp`;
+    await writeFile(temporaryPath, JSON.stringify({ requests }), { mode: 0o600 });
+    await rename(temporaryPath, modelRequestLogsPath);
+  });
+  return modelRequestLogsWriteQueue;
+}
+
+function modelRequestLogJSON(value) {
+  return JSON.stringify(value, (_key, item) => {
+    if (typeof item !== "string") return item;
+    return item.replace(/data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+/gi, "[image attachment omitted]");
+  });
+}
+
 async function loadProactiveSettings() {
   await mkdir(dataDir, { recursive: true });
   try { Object.assign(proactiveSettings, JSON.parse(await readFile(proactiveSettingsPath, "utf8"))); }
@@ -1796,6 +1822,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : { model, messages: preparedMessages, ...(mcpTools.length && mcpRound < 4 ? { tools: mcpTools, tool_choice: "auto" } : {}), ...(!/claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
+  const startedAt = Date.now();
   const response = await fetch(apiURL, {
     method: "POST",
     headers: {
@@ -1811,6 +1838,21 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const raw = await response.text();
   let data = {};
   try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
+  const providerUsage = data?.usage || {};
+  const cachedTokens = cacheUsage(providerUsage).read;
+  await recordModelRequest({
+    id: randomUUID(),
+    createdAt: new Date(startedAt).toISOString(),
+    provider,
+    model: String(requestBody.model || model),
+    status: response.status,
+    durationMs: Date.now() - startedAt,
+    inputTokens: Number(providerUsage.prompt_tokens ?? providerUsage.input_tokens ?? 0) || 0,
+    outputTokens: Number(providerUsage.completion_tokens ?? providerUsage.output_tokens ?? 0) || 0,
+    cachedTokens,
+    requestJSON: modelRequestLogJSON(requestBody),
+    responseJSON: modelRequestLogJSON(data)
+  }).catch((error) => console.warn(`model request log save skipped: ${error.message}`));
   if (!response.ok) {
     const rawProviderError = data?.error?.message || data?.error || data?.message || `模型服务返回 ${response.status}`;
     const providerError = typeof rawProviderError === "string" ? rawProviderError : JSON.stringify(rawProviderError);
@@ -3168,6 +3210,46 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "GET" && url.pathname === "/v1/usage/requests") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      let requests = [];
+      try { requests = JSON.parse(await readFile(modelRequestLogsPath, "utf8")).requests || []; }
+      catch (error) { if (error?.code !== "ENOENT") console.warn(`model request logs unavailable: ${error.message}`); }
+      const now = new Date();
+      const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+      const startDay = new Date(today);
+      startDay.setUTCDate(startDay.getUTCDate() - 29);
+      const dayKey = (date) => date.toISOString().slice(0, 10);
+      const daily = new Map();
+      for (let offset = 0; offset < 30; offset += 1) {
+        const date = new Date(startDay);
+        date.setUTCDate(date.getUTCDate() + offset);
+        daily.set(dayKey(date), { date: dayKey(date), requests: 0, tokens: 0 });
+      }
+      const monday = new Date(today);
+      monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
+      let weekTokens = 0, weekRequests = 0, weekCached = 0, weekInput = 0;
+      for (const item of requests) {
+        const created = new Date(item.createdAt);
+        if (!Number.isFinite(created.getTime()) || created < startDay) continue;
+        const inputTokens = Number(item.inputTokens) || 0;
+        const outputTokens = Number(item.outputTokens) || 0;
+        const tokens = inputTokens + outputTokens;
+        const day = daily.get(dayKey(new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate()))));
+        if (day) { day.requests += 1; day.tokens += tokens; }
+        if (created >= monday) {
+          weekRequests += 1;
+          weekTokens += tokens;
+          weekInput += inputTokens;
+          weekCached += Number(item.cachedTokens) || 0;
+        }
+      }
+      return send(res, 200, {
+        days: [...daily.values()],
+        week: { tokens: weekTokens, requests: weekRequests, cacheRate: weekInput > 0 ? Math.min(1, weekCached / weekInput) : 0 },
+        requests: requests.slice(-20).reverse()
+      });
+    }
     if (url.pathname === "/promise-alarm" || url.pathname.startsWith("/promise-alarm/")) {
       const pathname = url.pathname.slice("/promise-alarm".length) || "/";
       const isPromiseAlarmAPI = pathname === "/api" || pathname.startsWith("/api/") || pathname === "/promises" || pathname.startsWith("/promises/");
