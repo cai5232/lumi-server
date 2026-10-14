@@ -15,7 +15,7 @@ import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTI
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { claimTakeoutJob, finishTakeoutJob, markTakeoutAgentSeen, takeoutAgentStatus } from "./takeout-bridge.js";
 import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, connectMcpServer, modelToolsForServer, normalizeMcpServers } from "./mcp-clients.js";
-import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, extractCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
+import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
 import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
@@ -2628,10 +2628,13 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
-    ? `\n\n<promise_alarm_instructions>如果她要求提醒、叫醒或回来找她，但没有明确钟点或可计算的时长（例如“等下”“待会儿”“晚一点”“有空时”），先问清楚具体几点或几分钟后；不要猜时间、不要含糊答应，也不要说已经记下。她给出具体时间后，复述确认这个时间。若她明确要求到时打电话或来电叫醒，按电话提醒登记；普通“叫我/提醒我”仍发聊天消息，不要擅自打电话。只有明确答应具体时间的约定才会登记；不要声称已设置成功，除非待办约定上下文明确出现了这条记录。若她取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
+    ? `\\n\\n<promise_alarm_instructions>如果她要求提醒、叫醒或回来找她，但没有明确钟点或可计算的时长，先问清楚具体时间，不要猜。她给出时间且你明确答应后，在正常回复末尾附加隐藏标签 <promise_alarm_decision>{"action":"create","due_local":"YYYY-MM-DD HH:MM","task":"提醒内容","call_requested":true或false}</promise_alarm_decision>。修改用 action=replace 并提供 target_id；取消用 action=cancel 和 target_id。仅在确实形成/修改/取消约定时输出标签；其他情况不输出。电话提醒设 call_requested=true，普通提醒为 false。不要展示标签，也不要声称已登记成功。</promise_alarm_instructions>${alarmContext ? `\\n${alarmContext}` : ""}`
+    : "";
+  const calendarDirective = !proactive && !callMode
+    ? `\\n\\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -2812,6 +2815,10 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const callUserText = cleanedRaw.match(/<call_user_text>([\s\S]*?)<\/call_user_text>/i)?.[1]?.trim() || null;
   const sentinelDecisionRaw = cleanedRaw.match(/<sentinel_decision\b[^>]*>([\s\S]*?)<\/sentinel_decision>/i)?.[1];
   const sentinelDecision = sentinelDecisionRaw ? safeJSON(sentinelDecisionRaw, null) : null;
+  const promiseAlarmRaw = cleanedRaw.match(/<promise_alarm_decision>([\\s\\S]*?)<\\/promise_alarm_decision>/i)?.[1];
+  const promiseAlarmDecision = promiseAlarmRaw ? safeJSON(promiseAlarmRaw, null) : null;
+  const calendarEventsRaw = cleanedRaw.match(/<calendar_events>([\\s\\S]*?)<\\/calendar_events>/i)?.[1];
+  const calendarEvents = calendarEventsRaw ? safeJSON(calendarEventsRaw, { events: [] }) : { events: [] };
   const emojiMood = cleanedRaw.match(/<emoji_mood>([\s\S]*?)<\/emoji_mood>/i)?.[1]?.trim() || "";
   const galleryCollectionMatch = cleanedRaw.match(/<gallery_collection>([\s\S]*?)<\/gallery_collection>/i);
   let galleryCollection = null;
@@ -2831,7 +2838,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   const visibleRaw = stripPrivateReasoning(cleanedRaw);
   const thinking = extractThinkingText(raw);
-  let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<user_remark>[\s\S]*?<\/user_remark>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
+  let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<user_remark>[\s\S]*?<\/user_remark>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<promise_alarm_decision>[\s\S]*?<\/promise_alarm_decision>/gi, "").replace(/<calendar_events>[\s\S]*?<\/calendar_events>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
   content = stripOptionMarkers(content);
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
@@ -2850,7 +2857,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
+  return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
 }
 
 async function checkCacheKeepalive() {
@@ -4619,7 +4626,7 @@ const server = createServer(async (req, res) => {
         createdAt: new Date(Date.now() + index + 1).toISOString()
       }));
       threads[id].messages.push(storedUserMessage, assistantMessage, ...galleryMessages);
-      capturePromiseAlarm(id, messageText, visibleContent);
+      capturePromiseAlarm(id, messageText, visibleContent, generated.promiseAlarmDecision);
       // Keep the model's diary decision inside the same durable record as its
       // chat history. diaries.json remains a backwards-compatible mirror only.
       const diaryItem = generated.diaryEntry
@@ -4640,12 +4647,8 @@ const server = createServer(async (req, res) => {
       finishUserConversation(threads[id], messageText);
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
-      if (messageText && !images.length && !galleryImageIDs.length) {
-        void extractCalendarMessage(messageText, userMessage.id, callModel, {
-          provider: selectedProvider,
-          model: selectedModel,
-          customProvider
-        }).then(result => {
+      if (messageText && !images.length && !galleryImageIDs.length && generated.calendarEvents) {
+        void applyCalendarMessage(messageText, userMessage.id, generated.calendarEvents).then(result => {
           if (result.applied?.length || result.skipped?.length) console.info(`[calendar-extract] message=${userMessage.id} applied=${result.applied?.length || 0} skipped=${result.skipped?.length || 0}`);
         }).catch(error => console.warn(`[calendar-extract] message=${userMessage.id} failed: ${String(error.message || error).slice(0, 240)}`));
       }
