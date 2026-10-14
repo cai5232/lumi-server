@@ -10,6 +10,8 @@ export const EMOTION_DRIVES = {
   regret: { baseline: 0.10, decay: 0.006, label: "后悔" },
   desire: { baseline: 0.25, decay: 0.006, label: "欲望" },
   gloom: { baseline: 0.10, decay: 0.003, label: "低落" },
+  fatigue: { baseline: 0.12, decay: 0.01, label: "疲惫" },
+  anger: { baseline: 0.08, decay: 0.012, label: "生气" },
   jealousy: { baseline: 0.10, decay: 0.008, label: "吃醋" }
 };
 
