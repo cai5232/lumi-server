@@ -3498,7 +3498,7 @@ const server = createServer(async (req, res) => {
       if (url.pathname === "/v1/calendar/mcp" && input.method === "notifications/initialized") { res.writeHead(202); return res.end(); }
       const handled = await calendarRoute(req, (payload, status = 200) => send(res, status, payload), url.pathname, input,
         (bytes, contentType = "image/png", status = 200) => sendBinary(res, status, bytes, contentType),
-        (text, messageId) => extractCalendarMessage(text, messageId, callModel),
+        (text, messageId, events) => applyCalendarMessage(text, messageId, events),
         (actionName, result) => sendCalendarChangePush(actionName, result));
       if (handled === null) return send(res, 404, { error: "not_found" });
       return handled;
