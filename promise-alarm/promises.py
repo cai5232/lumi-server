@@ -231,7 +231,7 @@ def deterministic_clock_fallback(reply: str, now: datetime) -> dict | None:
     """模型判约定失败时，从助手明确承诺的唯一钟点中兜底登记。"""
     if not CALL_PATTERN.search(reply or ""):
         return None
-    matches = re.findall(r"(?<!\\d)([01]?\\d|2[0-3])[:：]([0-5]\\d)(?!\\d)", reply or "")
+    matches = re.findall(r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)", reply or "")
     clocks = set(matches)
     if len(clocks) != 1:
         return None
@@ -260,10 +260,9 @@ def capture(session_id: str, user_text: str, reply: str) -> str:
             print(f"promise-alarm capture outcome=failed at={now.isoformat()} error={str(error)[:240]}")
             raise
         print(f"promise-alarm capture fallback=explicit_clock due_local={decision['due_local']} at={now.isoformat()}")
-    said = f"她：{user_text[:300]}\\n他：{reply[:600]}"
+    said = f"她：{user_text[:300]}\n他：{reply[:600]}"
     outcome = apply_decision(session_id, decision, now, said)
     items = pending(session_id)
-    saved = next((item for item in items if item["status"] == "pending" and item["due_local"] == decision.get("due_local", "")[11:]), None)
     print(f"promise-alarm capture outcome={outcome} at={now.isoformat()} pending_count={len(items)}")
     return outcome
 
