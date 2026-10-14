@@ -103,9 +103,13 @@ export function capturePromiseAlarm(sessionID, userText, reply) {
       if (!stored.ok) throw new Error(`message sync HTTP ${stored.status}`);
     }
     const response = await post("/promises/capture", { user_text: userText, reply });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const detail = (await response.text()).replace(/\\s+/g, " ").slice(0, 500);
+      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    }
     const result = await response.json();
-    if (!["none", "skipped", "duplicate"].includes(result.outcome)) console.log(`promise-alarm: ${result.outcome}`);
+    const items = Array.isArray(result.items) ? result.items.map((item) => `${item.id}@${item.due_local}:${item.status}`).join(",") : "";
+    console.log(`promise-alarm capture outcome=${result.outcome || "unknown"} pending=[${items}]`);
   })().catch((error) => console.warn(`promise-alarm capture failed: ${error.message}`));
 }
 
