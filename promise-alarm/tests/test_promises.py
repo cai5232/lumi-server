@@ -65,13 +65,9 @@ class DecisionTests(TempData):
         for due in ("2026-10-11 13:00", "2026-10-13 09:00", "明天", None):
             self.assertEqual(promises.apply_decision("s", {"action": "create", "due_local": due}, now), "bad_time")
 
-    def test_capture_uses_the_model_only_when_the_gate_passes(self):
-        calls = []
-        llm.chat_json = lambda messages, max_tokens=300: calls.append(messages) or {"action": "none"}
-        self.assertEqual(promises.capture("s", "今天好累", "抱抱"), "skipped")
-        self.assertEqual(promises.capture("s", "十分钟后叫我", "好，十分钟后叫你"), "none")
-        self.assertEqual(len(calls), 1)
-        self.assertIn("十分钟后叫你", calls[0][1]["content"])
+    def test_capture_does_not_make_a_model_request(self):
+        llm.chat_json = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("capture must not call the model"))
+        self.assertEqual(promises.capture("s", "今天好累", "抱抱"), "none")
 
     def test_context_lists_pending(self):
         self.assertEqual(promises.context("s"), "")
@@ -171,8 +167,8 @@ class HttpTests(TempData):
 
     def test_capture_and_cancel_over_http(self):
         due = (promises.now_utc() + timedelta(minutes=10)).astimezone(ZONE).strftime("%Y-%m-%d %H:%M")
-        llm.chat_json = lambda messages, max_tokens=300: {"action": "create", "due_local": due, "task": "叫她起床"}
-        result = self.post("/promises/capture", {"session_id": "me", "user_text": "十分钟后叫我", "reply": "好，十分钟后叫你"})
+        llm.chat_json = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("capture must not make another model request"))
+        result = self.post("/promises/capture", {"session_id": "me", "user_text": "定个七点半的电话", "reply": "好，七点半打电话给你", "decision": {"action": "create", "due_local": due, "task": "叫她起床", "call_requested": True}})
         self.assertEqual(result["outcome"], "created")
         with urllib.request.urlopen(self.base + "/promises/context?session_id=me") as response:
             self.assertIn("叫她起床", response.read().decode("utf-8"))
