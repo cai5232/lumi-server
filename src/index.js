@@ -110,9 +110,17 @@ function normalizeCustomProvider(input) {
 }
 
 function murmurEncryptionKey() {
-  const value = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "");
-  if (!/^[a-f0-9]{64}$/i.test(value)) throw new Error("LUMI_MURMUR_KEY_ENCRYPTION_KEY must be 32-byte hex");
-  return Buffer.from(value, "hex");
+  const explicit = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "");
+  if (explicit) {
+    if (!/^[a-f0-9]{64}$/i.test(explicit)) throw new Error("LUMI_MURMUR_KEY_ENCRYPTION_KEY must be 32-byte hex");
+    return Buffer.from(explicit, "hex");
+  }
+  // Reuse an already-required server secret so custom model routes can be
+  // persisted without asking operators to add a second encryption variable.
+  // This value never leaves the server and is domain-separated from its other uses.
+  const existingSecret = String(process.env.LUMI_PUSH_API_TOKEN || process.env.LUMI_MODEL_API_KEY || "");
+  if (!existingSecret) throw new Error("No server secret is available to encrypt the custom provider route");
+  return createHash("sha256").update("lumi-murmur-route-v1\\0").update(existingSecret).digest();
 }
 async function readMurmurRoutes() {
   try { return JSON.parse(await readFile(murmurRoutePath, "utf8")); }
