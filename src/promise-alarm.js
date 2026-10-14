@@ -104,7 +104,7 @@ export function capturePromiseAlarm(sessionID, userText, reply) {
     }
     const response = await post("/promises/capture", { user_text: userText, reply });
     if (!response.ok) {
-      const detail = (await response.text()).replace(/\\s+/g, " ").slice(0, 500);
+      const detail = (await response.text()).replace(/\s+/g, " ").slice(0, 500);
       throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
     const result = await response.json();
