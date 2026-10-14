@@ -43,7 +43,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -3297,36 +3297,44 @@ const server = createServer(async (req, res) => {
       catch (error) { if (error?.code !== "ENOENT") console.warn(`model request logs unavailable: ${error.message}`); }
       const now = new Date();
       const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-      const startDay = new Date(today);
-      startDay.setUTCDate(startDay.getUTCDate() - 29);
       const dayKey = (date) => date.toISOString().slice(0, 10);
       const daily = new Map();
-      for (let offset = 0; offset < 30; offset += 1) {
-        const date = new Date(startDay);
-        date.setUTCDate(date.getUTCDate() + offset);
-        daily.set(dayKey(date), { date: dayKey(date), requests: 0, tokens: 0 });
+      const validRequests = requests.filter((item) => {
+        const time = Date.parse(item.createdAt);
+        return Number.isFinite(time) && time <= now.getTime();
+      });
+      const firstDay = validRequests.length
+        ? new Date(Math.min(...validRequests.map((item) => Date.parse(item.createdAt)).map((time) => {
+            const date = new Date(time);
+            return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+          })))
+        : today;
+      for (const item of validRequests) {
+        const created = new Date(item.createdAt);
+        const key = dayKey(created);
+        const value = daily.get(key) || { date: key, requests: 0, tokens: 0 };
+        value.requests += 1;
+        value.tokens += (Number(item.inputTokens) || 0) + (Number(item.outputTokens) || 0);
+        daily.set(key, value);
       }
       const monday = new Date(today);
       monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7));
-      let weekTokens = 0, weekRequests = 0, weekCached = 0, weekInput = 0;
-      for (const item of requests) {
-        const created = new Date(item.createdAt);
-        if (!Number.isFinite(created.getTime()) || created < startDay) continue;
-        const inputTokens = Number(item.inputTokens) || 0;
-        const outputTokens = Number(item.outputTokens) || 0;
-        const tokens = inputTokens + outputTokens;
-        const day = daily.get(dayKey(new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate()))));
-        if (day) { day.requests += 1; day.tokens += tokens; }
-        if (created >= monday) {
-          weekRequests += 1;
-          weekTokens += tokens;
-          weekInput += inputTokens;
-          weekCached += Number(item.cachedTokens) || 0;
-        }
-      }
+      const week = validRequests.filter((item) => Date.parse(item.createdAt) >= monday.getTime());
+      const cacheRates = week
+        .map((item) => ({ input: Number(item.inputTokens) || 0, cached: Number(item.cachedTokens) || 0 }))
+        .filter((item) => item.input > 0)
+        .map((item) => Math.min(1, Math.max(0, item.cached / item.input)));
       return send(res, 200, {
-        days: [...daily.values()],
-        week: { tokens: weekTokens, requests: weekRequests, cacheRate: weekInput > 0 ? Math.min(1, weekCached / weekInput) : 0 },
+        days: Array.from({ length: Math.floor((today.getTime() - firstDay.getTime()) / 86_400_000) + 1 }, (_, offset) => {
+          const date = new Date(firstDay.getTime() + offset * 86_400_000);
+          const key = dayKey(date);
+          return daily.get(key) || { date: key, requests: 0, tokens: 0 };
+        }),
+        week: {
+          tokens: week.reduce((sum, item) => sum + (Number(item.inputTokens) || 0) + (Number(item.outputTokens) || 0), 0),
+          requests: week.length,
+          cacheRate: cacheRates.length ? cacheRates.reduce((sum, rate) => sum + rate, 0) / cacheRates.length : 0
+        },
         requests: requests.slice(-20).reverse()
       });
     }
