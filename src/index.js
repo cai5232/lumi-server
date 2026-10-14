@@ -88,7 +88,7 @@ const providerConfigs = () => [
 function providerConfig(id = "zenmux", modelOverride = "") {
   const config = providerConfigs().find((item) => item.id === id);
   if (!config) throw new Error(`${id === "backup" ? "备用中转" : "ZenMux"}线路尚未配置`);
-  return { ...config, model: modelOverride || config.model };
+  return { ...config, model: id === "zenmux" ? config.model : (modelOverride || config.model) };
 }
 
 function normalizeCustomProvider(input) {
@@ -1795,7 +1795,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
 
 async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [] }) {
   let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
-  selected = { ...selected, model: requestedModel || selected.model };
+  selected = { ...selected, model: provider === "zenmux" ? selected.model : (requestedModel || selected.model) };
   if (!selected.model && provider !== "zenmux") {
     const discovered = await listProviderModels(selected);
     if (discovered[0]) selected = { ...selected, model: discovered[0] };
@@ -2430,7 +2430,7 @@ function callProviderRoute(input, thread) {
   // A selected custom preset must never silently route to Zenmux.
   const provider = input?.customProvider && typeof input.customProvider === "object"
     ? "custom" : (typeof input?.provider === "string" && input.provider ? input.provider : thread?.cacheProvider || "zenmux");
-  const model = typeof input?.model === "string" && input.model ? input.model : thread?.cacheModel || "";
+  const model = provider === "zenmux" ? "" : (typeof input?.model === "string" && input.model ? input.model : thread?.cacheModel || "");
   if (provider === "custom") {
     const customProvider = normalizeCustomProvider(input?.customProvider);
     if (!customProvider || !model) throw new Error("call_custom_provider_or_model_required");
@@ -4467,7 +4467,7 @@ const server = createServer(async (req, res) => {
       const selectedProvider = input.customProvider && typeof input.customProvider === "object"
         ? "custom"
         : requestedProvider;
-      const selectedModel = typeof input.model === "string" ? input.model : "";
+      // Zenmux model is owned by Zeabur, never by a stale frontend preset.\n      const selectedModel = selectedProvider === "zenmux" ? "" : (typeof input.model === "string" ? input.model : "");
       let customProvider = null;
       if (selectedProvider === "custom") {
         try { customProvider = normalizeCustomProvider(input.customProvider); }
