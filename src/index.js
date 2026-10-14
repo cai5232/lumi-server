@@ -1,3 +1,4 @@
+import { requestMurmurEmotion } from "./murmur-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
@@ -605,12 +606,59 @@ function safeJSON(text, fallback = {}) {
   try { return JSON.parse(text.match(/\{[\s\S]*\}/)?.[0] || text); } catch { return fallback; }
 }
 
-function applyEmotionUpdateFromOutput(raw) {
+let murmurFlushInFlight = null;
+
+function mirrorMurmurState(remote) {
+  if (!remote?.drives) return;
+  for (const drive of Object.keys(EMOTION_DRIVES)) {
+    const value = Number(remote.drives[drive]?.v);
+    if (Number.isFinite(value)) sharedEmotionState.drives[drive] = Math.max(0, Math.min(1, value));
+  }
+  if (Number.isFinite(Number(remote.offlineTicks))) sharedEmotionState.offlineTicks = Number(remote.offlineTicks);
+}
+
+async function flushMurmurUpdates() {
+  if (!process.env.MURMUR_SERVICE_URL) return;
+  if (murmurFlushInFlight) return murmurFlushInFlight;
+  murmurFlushInFlight = (async () => {
+    const pending = sharedEmotionState.pendingMurmurUpdates ||= [];
+    while (pending.length) {
+      const item = pending[0];
+      await requestMurmurEmotion(item.threadID, "update", item.payload);
+      pending.shift();
+      await saveEmotionState();
+    }
+  })();
+  try { await murmurFlushInFlight; }
+  finally { murmurFlushInFlight = null; }
+}
+
+async function refreshMurmurState(threadID, { online = false } = {}) {
+  if (!process.env.MURMUR_SERVICE_URL) return;
+  try {
+    await flushMurmurUpdates();
+    const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
+    mirrorMurmurState(result.state);
+    await saveEmotionState();
+  } catch (error) { console.warn(`Murmur state sync deferred: ${error.message}`); }
+}
+
+async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
   const emotionUpdateRaw = String(raw || "").match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
   if (!emotionUpdateRaw) return null;
   try {
     const parsed = JSON.parse(emotionUpdateRaw);
-    return applyEmotionDelta(sharedEmotionState, parsed) ? parsed : null;
+    const initialDrives = { ...sharedEmotionState.drives };
+    if (!applyEmotionDelta(sharedEmotionState, parsed)) return null;
+    if (process.env.MURMUR_SERVICE_URL) {
+      const changes = parsed.changes && typeof parsed.changes === "object" ? parsed.changes : { [parsed.drive]: parsed.delta };
+      const validChanges = Object.fromEntries(Object.entries(changes).filter(([drive, delta]) => Object.hasOwn(EMOTION_DRIVES, drive) && Number.isFinite(Number(delta))).map(([drive, delta]) => [drive, Math.max(-0.2, Math.min(0.2, Number(delta)))]));
+      (sharedEmotionState.pendingMurmurUpdates ||= []).push({ threadID, payload: { event_id: randomUUID(), initial_drives: initialDrives, changes: validChanges, ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}) } });
+      await saveEmotionState();
+      try { await flushMurmurUpdates(); }
+      catch (error) { console.warn(`Murmur emotion update queued for retry: ${error.message}`); }
+    }
+    return parsed;
   } catch {
     return null;
   }
@@ -645,6 +693,7 @@ function formatSleepMemories(memories, limit = 12) {
 }
 
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
+  await refreshMurmurState(thread.id);
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const output = await callModel({
     messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
@@ -652,7 +701,7 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
     provider: thread.cacheProvider || "zenmux",
     model: thread.cacheModel || ""
   });
-  const emotionUpdate = applyEmotionUpdateFromOutput(output);
+  const emotionUpdate = await applyEmotionUpdateFromOutput(output, thread.id);
   if (emotionUpdate) await saveEmotionState();
   const record = { id: randomUUID(), stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
   thread.sleep.dreams.push(record);
@@ -2372,6 +2421,7 @@ function callProviderRoute(input, thread) {
 }
 
 async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
+  await refreshMurmurState(thread?.id || "default", { online: !proactive });
   provider = provider || thread?.cacheProvider || "zenmux";
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
@@ -2702,7 +2752,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   } else if (pendingCompaction) {
     console.warn("context compaction deferred: model response contained no context_summary");
   }
-  const emotionUpdate = applyEmotionUpdateFromOutput(raw);
+  const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
   if (emotionUpdate) await saveEmotionState();
   let cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
@@ -3569,11 +3619,12 @@ const server = createServer(async (req, res) => {
       const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\/+$/, "");
       if (murmurServiceUrl) {
         try {
+          await flushMurmurUpdates();
           const target = `${murmurServiceUrl}/internal/v1/chats/${encodeURIComponent(threadID)}/emotion/${operation}${url.search}`;
           const headers = { authorization: `Bearer ${process.env.MURMUR_INTERNAL_TOKEN || ""}` };
           let payload;
           if (req.method !== "GET") { payload = await body(req); headers["content-type"] = "application/json"; }
-          const upstream = await fetch(target, { method: req.method, headers, ...(payload ? { body: JSON.stringify(payload) } : {}) });
+          const upstream = await fetch(target, { method: req.method, headers, signal: AbortSignal.timeout(8_000), ...(payload ? { body: JSON.stringify(payload) } : {}) });
           const responseText = await upstream.text();
           return send(res, upstream.status, (() => { try { return JSON.parse(responseText); } catch { return { error: "murmur_invalid_response" }; } })());
         } catch (error) { console.warn(`Murmur service request failed: ${error.message}`); return send(res, 502, { error: "murmur_unavailable" }); }
@@ -4581,6 +4632,7 @@ await loadCacheStats();
 await loadProactiveSettings();
 await loadPushTokens();
 await loadEmotionState();
+await refreshMurmurState(proactiveSettings.threadId || "default");
 startPromiseAlarm();
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 for (const signal of ["SIGINT", "SIGTERM"]) {
