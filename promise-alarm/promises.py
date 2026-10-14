@@ -265,6 +265,11 @@ def capture(session_id: str, user_text: str, reply: str) -> str:
             print(f"promise-alarm capture outcome=failed at={now.isoformat()} error={str(error)[:240]}")
             raise
         print(f"promise-alarm capture fallback=explicit_clock due_local={decision['due_local']} at={now.isoformat()}")
+    if str(decision.get("action") or "none") == "none":
+        fallback = deterministic_clock_fallback(user_text, reply, now)
+        if fallback is not None:
+            decision = fallback
+            print(f"promise-alarm capture fallback=explicit_clock reason=model_none due_local={decision['due_local']} at={now.isoformat()}")
     said = f"她：{user_text[:300]}\n他：{reply[:600]}"
     outcome = apply_decision(session_id, decision, now, said)
     items = pending(session_id)
