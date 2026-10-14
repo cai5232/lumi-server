@@ -4253,7 +4253,7 @@ const server = createServer(async (req, res) => {
           input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。${input.softVoice ? "请用温柔、轻声、稍慢的语气。" : ""}不要提及内部标签。</internal_call_accepted>`,
           systemPrompt: input.systemPrompt,
           thread,
-          ...callProviderRoute(input, thread),
+          ...await callProviderRoute(input, thread),
           callMode: true,
           allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled),
           speechProvider: input.tts?.provider,
@@ -4339,7 +4339,7 @@ const server = createServer(async (req, res) => {
         speechModel: input.tts?.model,
         systemPrompt: input.systemPrompt,
         thread,
-        ...callProviderRoute(input, thread),
+        ...await callProviderRoute(input, thread),
         callMode: true,
         callHistory: call.turns
       });
@@ -4457,7 +4457,7 @@ const server = createServer(async (req, res) => {
         speechModel: input.tts?.model,
         systemPrompt: input.systemPrompt,
         thread,
-        ...callProviderRoute(input, thread),
+        ...await callProviderRoute(input, thread),
         callMode: true
       });
       const now = new Date().toISOString();
