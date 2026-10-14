@@ -107,7 +107,7 @@ class Handler(SimpleHTTPRequestHandler):
             data = self._body()
             session = str(data.get("session_id") or "default")[:80]
             if path == "/promises/capture":
-                outcome = promises.capture(session, str(data.get("user_text") or ""), str(data.get("reply") or ""))
+                outcome = promises.capture(session, str(data.get("user_text") or ""), str(data.get("reply") or ""), data.get("decision"))
                 return self._json({"outcome": outcome, "items": promises.pending(session)}, cors=True)
             if path == "/promises/message":
                 role = str(data.get("role") or "")
