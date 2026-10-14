@@ -42,7 +42,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -4122,6 +4122,61 @@ const server = createServer(async (req, res) => {
       await saveThreads(threads);
       await saveEmotionState();
       return send(res, 200, { userTurn, assistantTurn, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? assistantSpeechText : null, speechError, hangupAfterPlayback: goodnight });
+    }
+    const remarksMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/remarks(?:\/(ai))?$/);
+    if (remarksMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const id = decodeURIComponent(remarksMatch[1]);
+      const threads = await readThreads();
+      const thread = threads[id];
+      if (!thread) return send(res, 404, { error: "thread_not_found" });
+      const current = () => ({ assistantRemark: thread.assistantRemark || "", aiRemark: thread.aiRemark || "" });
+      if (req.method === "GET") return send(res, 200, current());
+      if (req.method === "PUT" && !remarksMatch[2]) {
+        const input = await body(req);
+        const assistantRemark = String(input.assistantRemark || "").trim();
+        if (assistantRemark.length > 32) return send(res, 400, { error: "remark_too_long" });
+        thread.assistantRemark = assistantRemark;
+        await saveThreads(threads);
+        return send(res, 200, current());
+      }
+      if (req.method === "POST" && remarksMatch[2] === "ai") {
+        const input = await body(req);
+        let customProvider = null;
+        try { customProvider = input.provider === "custom" ? normalizeCustomProvider(input.customProvider) : null; }
+        catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
+        const provider = ["zenmux", "backup", "custom"].includes(input.provider) ? input.provider : "zenmux";
+        const history = (Array.isArray(thread.messages) ? thread.messages : [])
+          .filter((message) => ["user", "assistant"].includes(message.role) && !message.contentType && String(message.content || "").trim())
+          .slice(-12)
+          .map((message) => ({ role: message.role, content: String(message.content).slice(0, 1200) }));
+        if (!history.some((message) => message.role === "user")) return send(res, 400, { error: "chat_history_required" });
+        try {
+          const generated = await callModel({
+            messages: [
+              { role: "system", content: "你很了解正在和你聊天的用户。请只根据下面真实的对话，为对方想一个简短、亲近、自然且有个人感的中文备注，像熟悉的人会写在通讯录里的称呼。不要编造姓名或隐私信息，避免泛泛的‘亲爱的’。只输出备注本身，最多18个汉字。" },
+              ...history
+            ],
+            provider,
+            model: String(input.model || ""),
+            customProvider,
+            maxOutputTokens: 96,
+            cacheCurrentUser: false,
+            mcpThreadId: "",
+            mailThreadId: ""
+          });
+          const aiRemark = generated.replace(/^['"“”‘’\s]+|['"“”‘’\s]+$/g, "").replace(/[\r\n]+/g, " ").slice(0, 36).trim();
+          if (!aiRemark) return send(res, 502, { error: "ai_remark_empty" });
+          const latestThreads = await readThreads();
+          if (!latestThreads[id]) return send(res, 404, { error: "thread_not_found" });
+          latestThreads[id].aiRemark = aiRemark;
+          await saveThreads(latestThreads);
+          return send(res, 200, { assistantRemark: latestThreads[id].assistantRemark || "", aiRemark });
+        } catch (error) {
+          return send(res, error.statusCode || 502, { error: String(error.message || error).slice(0, 240) });
+        }
+      }
+      return send(res, 405, { error: "method_not_allowed" });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
