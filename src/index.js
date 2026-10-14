@@ -460,13 +460,25 @@ async function generateSentinelWake(thread) {
   const allowedActions = (nightActivityWake ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
   if (!allowedActions.length) allowedActions.push("message");
   if (restAllowed) allowedActions.push("none");
+  // Background wakes have no frontend payload: use the persisted, encrypted
+  // conversation route rather than the cache provider (custom chats store
+  // "zenmux" there for cache compatibility).
+  const savedRoute = await resolveMurmurRoute(thread.id);
+  const route = savedRoute || {
+    provider: thread.cacheProvider || "zenmux",
+    model: thread.cacheModel || ""
+  };
+  if (route.provider === "custom" && !route.customProvider) {
+    throw new Error("custom_provider_unavailable_for_proactive_wake");
+  }
   const generated = await generateReply({
     input: "",
     thread,
     proactive: true,
     sentinelActions: allowedActions,
-    provider: thread.cacheProvider || "zenmux",
-    model: thread.cacheModel || ""
+    provider: route.provider,
+    model: route.model,
+    customProvider: route.customProvider || null
   });
   const decision = generated.sentinelDecision || {};
   const requestedAction = allowedActions.includes(decision.action) ? decision.action : "message";
