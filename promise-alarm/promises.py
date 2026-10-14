@@ -227,15 +227,45 @@ def apply_decision(session_id: str, decision: dict, now: datetime, said: str = "
     return "created"
 
 
+def deterministic_clock_fallback(reply: str, now: datetime) -> dict | None:
+    """模型判约定失败时，从助手明确承诺的唯一钟点中兜底登记。"""
+    if not CALL_PATTERN.search(reply or ""):
+        return None
+    matches = re.findall(r"(?<!\\d)([01]?\\d|2[0-3])[:：]([0-5]\\d)(?!\\d)", reply or "")
+    clocks = set(matches)
+    if len(clocks) != 1:
+        return None
+    hour, minute = (int(part) for part in next(iter(clocks)))
+    local_now = now.astimezone(config.local_zone())
+    due = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if due <= local_now:
+        due += timedelta(days=1)
+    if due - local_now > MAX_AHEAD:
+        return None
+    return {"action": "create", "target_id": None, "due_local": due.strftime("%Y-%m-%d %H:%M"), "task": "叫她"}
+
+
 def capture(session_id: str, user_text: str, reply: str) -> str:
     """每轮聊天结束后调用。返回 none / created / replaced / cancelled / duplicate / bad_time / skipped。"""
     existing = pending(session_id)
-    if not worth_checking(user_text, reply, bool(existing)):
-        return "skipped"
     now = now_utc()
-    decision = judge(user_text, reply, existing, now)
-    said = f"她：{user_text[:300]}\n他：{reply[:600]}"
-    return apply_decision(session_id, decision, now, said)
+    if not worth_checking(user_text, reply, bool(existing)):
+        print(f"promise-alarm capture outcome=skipped at={now.isoformat()}")
+        return "skipped"
+    try:
+        decision = judge(user_text, reply, existing, now)
+    except llm.LLMError as error:
+        decision = deterministic_clock_fallback(reply, now)
+        if decision is None:
+            print(f"promise-alarm capture outcome=failed at={now.isoformat()} error={str(error)[:240]}")
+            raise
+        print(f"promise-alarm capture fallback=explicit_clock due_local={decision['due_local']} at={now.isoformat()}")
+    said = f"她：{user_text[:300]}\\n他：{reply[:600]}"
+    outcome = apply_decision(session_id, decision, now, said)
+    items = pending(session_id)
+    saved = next((item for item in items if item["status"] == "pending" and item["due_local"] == decision.get("due_local", "")[11:]), None)
+    print(f"promise-alarm capture outcome={outcome} at={now.isoformat()} pending_count={len(items)}")
+    return outcome
 
 
 # ── 到点：让小机写一条消息 ──
@@ -288,13 +318,18 @@ def fire(promise: sqlite3.Row, now: datetime) -> int:
     if existing:
         message_id, text = int(existing["id"]), str(existing["content"])
     else:
+        generation_started = time.monotonic()
+        print(f"promise-alarm generation start id={promise['id']} due_at={promise['due_at']} at={now_utc().isoformat()}")
         text = write_message(promise, now)
         if not text:
             raise llm.LLMError("模型回了空消息。")
+        print(f"promise-alarm generation done id={promise['id']} duration_ms={int((time.monotonic()-generation_started)*1000)}")
         message_id = add_message(str(promise["session_id"]), "assistant", text, int(promise["id"]))
     url = config.load()["webhook_url"]
     if url:
+        webhook_started = time.monotonic()
         post_webhook(url, {"session_id": promise["session_id"], "text": text, "promise": serialise(promise)})
+        print(f"promise-alarm webhook done id={promise['id']} duration_ms={int((time.monotonic()-webhook_started)*1000)}")
     with db() as connection:
         connection.execute(
             "UPDATE promises SET status='fired', fired_at=?, fired_message_id=? WHERE id=?",
@@ -315,6 +350,9 @@ def run_due() -> int:
             ).fetchall()
         fired = 0
         for promise in due:
+            picked_at = now_utc()
+            lateness_ms = max(0, int((picked_at - datetime.fromisoformat(promise["due_at"])).total_seconds() * 1000))
+            print(f"promise-alarm due id={promise['id']} due_at={promise['due_at']} picked_at={picked_at.isoformat()} lateness_ms={lateness_ms} attempt={int(promise['attempts'])+1}")
             with db() as connection:
                 if not connection.execute(
                     "UPDATE promises SET status='firing', attempts=attempts+1 WHERE id=? AND status='pending'", (promise["id"],)
@@ -322,6 +360,9 @@ def run_due() -> int:
                     continue
             try:
                 fire(promise, now)
+                fired_at = now_utc()
+                delay_ms = max(0, int((fired_at - datetime.fromisoformat(promise["due_at"])).total_seconds() * 1000))
+                print(f"promise-alarm fired id={promise['id']} due_at={promise['due_at']} fired_at={fired_at.isoformat()} delay_ms={delay_ms}")
                 fired += 1
             except Exception as error:
                 with db() as connection:
@@ -329,7 +370,7 @@ def run_due() -> int:
                         "UPDATE promises SET status=CASE WHEN attempts >= ? THEN 'failed' ELSE 'pending' END WHERE id=?",
                         (MAX_ATTEMPTS, promise["id"]),
                     )
-                print(f"约定 {promise['id']} 这次没发出去：{error}")
+                print(f"promise-alarm failed id={promise['id']} due_at={promise['due_at']} at={now_utc().isoformat()} attempt={int(promise['attempts'])} error={str(error)[:400]}")
         return fired
 
 
