@@ -32,6 +32,7 @@ const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const modelRequestLogsPath = join(dataDir, "model-request-logs.json");
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
+const sentinelActivityPath = join(dataDir, "sentinel-activity.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const voipTokensPath = join(dataDir, "voip-tokens.json");
 const galleryDir = join(dataDir, "gallery");
@@ -42,7 +43,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v1-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
 const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
@@ -451,10 +452,11 @@ async function generateAutonomousMessage(thread, kind) {
 async function generateSentinelWake(thread) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
+  const nightActivityWake = Date.parse(ensureActivity(thread).nightActivityWakeUntil || "") > Date.now();
   const fatigue = Number(sharedEmotionState.drives?.fatigue || 0);
   const anger = Number(sharedEmotionState.drives?.anger || 0);
   const restAllowed = fatigue >= 0.85 || anger >= 0.90;
-  const allowedActions = ["message", "phone", "screen"].filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
+  const allowedActions = (nightActivityWake ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
   if (!allowedActions.length) allowedActions.push("message");
   if (restAllowed) allowedActions.push("none");
   const generated = await generateReply({
@@ -1200,6 +1202,38 @@ function pushRequestAuthorized(req) {
   const expectedBytes = Buffer.from(expected);
   const suppliedBytes = Buffer.from(supplied);
   return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+function sentinelActivityRequestAuthorized(req) {
+  const expected = String(process.env.SENTINEL_INGEST_TOKEN || "");
+  const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!expected || !supplied) return false;
+  const expectedBytes = Buffer.from(expected);
+  const suppliedBytes = Buffer.from(supplied);
+  return expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes);
+}
+
+async function readSentinelActivity() {
+  try {
+    const saved = JSON.parse(await readFile(sentinelActivityPath, "utf8"));
+    return { events: Array.isArray(saved.events) ? saved.events : [] };
+  } catch { return { events: [] }; }
+}
+
+async function saveSentinelActivity(signals) {
+  await mkdir(dataDir, { recursive: true });
+  const temporaryPath = `${sentinelActivityPath}.${randomUUID()}.tmp`;
+  await writeFile(temporaryPath, JSON.stringify(signals), { mode: 0o600 });
+  await rename(temporaryPath, sentinelActivityPath);
+}
+
+async function recentSentinelActivityContext() {
+  const signals = await readSentinelActivity();
+  const recent = signals.events.filter(event => Date.now() - Date.parse(event.createdAt) <= 6 * 60 * 60_000).slice(-12);
+  if (!recent.length) return "";
+  const byApp = new Map();
+  for (const event of recent) byApp.set(event.app, (byApp.get(event.app) || 0) + 1);
+  return `近 6 小时自愿分享的 App 打开记录：${[...byApp].map(([app, count]) => `${app} ${count} 次`).join("、")}。只作为轻量聊天背景；除非话题自然相关，不要突然点名提到你知道用户打开过哪些 App。`;
 }
 
 function takeoutBridgeRequestAuthorized(req) {
@@ -2477,6 +2511,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
+  const sentinelActivitySummary = proactive ? await recentSentinelActivityContext() : "";
   const engawaEnabled = proactive && mailSettings.servers.some(server => server.id === ENGAWA_SERVER_ID && server.enabled);
   const engawaDirective = engawaEnabled
     ? "<available_feature name=\"engawa\">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>\n"
@@ -2486,7 +2521,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   // Pass only the active action values. User-managed system instructions define behavior.
   const proactiveDirective = proactive
-    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
@@ -3789,6 +3824,54 @@ const server = createServer(async (req, res) => {
         return send(res, 200, { stopped: true });
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    if (url.pathname === "/v1/sentinel/events") {
+      if (!sentinelActivityRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      const input = await body(req);
+      const app = String(input.app || "").trim().replace(/[<>\\x00-\\x1f]/g, "").slice(0, 80);
+      if (!app) return send(res, 400, { error: "app_required" });
+      const now = Date.now();
+      let timeZone = typeof input.timeZone === "string" && input.timeZone.length <= 80 ? input.timeZone : "Asia/Shanghai";
+      try { new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(now)); }
+      catch { timeZone = "Asia/Shanghai"; }
+      const signals = await readSentinelActivity();
+      const duplicate = signals.events.some(event => event.app === app && now - Date.parse(event.createdAt) < 5 * 60_000);
+      if (!duplicate) signals.events.push({ app, createdAt: new Date(now).toISOString() });
+      signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
+      await saveSentinelActivity(signals);
+      if (!duplicate && proactiveSettings.enabled) {
+        const threads = await readThreads();
+        const thread = threads[proactiveSettings.threadId] || threads.default;
+        if (thread) {
+          const activity = ensureActivity(thread);
+          const quietFor = now - (Date.parse(activity.lastUserActivityAt || "") || 0);
+          if (activity.mode !== "sleeping" && !activity.sleepPendingAt && !proactiveSettings.dnd) {
+            const recentCount = signals.events.filter(event => now - Date.parse(event.createdAt) < 60 * 60_000).length;
+            const multiplier = recentCount >= 5 ? 0.6 : recentCount >= 3 ? 0.8 : recentCount >= 1 ? 0.9 : 1;
+            const baseline = Date.parse(activity.lastUserActivityAt || "") || now;
+            const dueAt = baseline + Math.max(1, Number(proactiveSettings.intervalMin) || 60) * multiplier * 60_000;
+            const localHour = Number(new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(new Date(now)));
+            const nightGuard = localHour >= 1 && localHour < 5 && quietFor >= 30 * 60_000 &&
+              proactiveSettings.actions?.message !== false &&
+              now - (Date.parse(activity.lastNightAppWakeAt || "") || 0) >= 30 * 60_000;
+            const currentDueAt = Date.parse(activity.nextWakeAt || "");
+            if (nightGuard) {
+              activity.lastNightAppWakeAt = new Date(now).toISOString();
+              activity.nightActivityWakeUntil = new Date(now + 30 * 60_000).toISOString();
+              activity.nextWakeAt = new Date(now).toISOString();
+              activity.nextWakeSource = "activity";
+            } else if (!Number.isFinite(currentDueAt) || dueAt < currentDueAt) {
+              activity.nextWakeAt = new Date(dueAt).toISOString();
+              activity.nextWakeSource = "activity";
+            }
+            proactiveSettings.nextDueAt = activity.nextWakeAt;
+            await saveThreads(threads);
+            await saveProactiveSettings();
+          }
+        }
+      }
+      return send(res, 200, { ok: true, deduplicated: duplicate });
     }
     const activityMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity$/);
     const activityHistoryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity\/history$/);

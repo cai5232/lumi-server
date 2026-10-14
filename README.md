@@ -18,6 +18,7 @@ Zeabur 环境变量：
 - `LUMI_MODEL_NAME`：模型名称
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
+- `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
 - `LUMI_CONTEXT_LIMIT`：可选，单个聊天窗口的估算 Token 上限，默认 `200000`
 - `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.86`
 - `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
@@ -30,6 +31,12 @@ Zeabur 环境变量：
 
 藏宝地图 MCP 地址为 `${LETTERS_MAP_BASE_URL}/mcp`，传输方式是 Streamable HTTP，授权头由后端使用 `LETTERS_MAP_PASSWORD` 自动生成。Lumi 会连接并读取原仓库提供的五个工具；聊天模型按对话需要调用。无需把地图页面或地图数据搬进 Lumi。
 - `LUMI_WATCH_ANALYSIS_API_URL`、`LUMI_WATCH_ANALYSIS_API_KEY`、`LUMI_WATCH_ANALYSIS_MODEL`：可选的共看视频分析默认模型；iOS 页面填写的配置会按请求单独转发，不要求在这里配置
+
+## 手机 App 活动（可选）
+
+iPhone「快捷指令」可在所选 App 打开时调用 `POST /v1/sentinel/events`，JSON 请求体：`{"app":"X","timeZone":"America/New_York"}`。请求头用 `Authorization: Bearer 你的 SENTINEL_INGEST_TOKEN`。令牌只在 Zeabur 服务环境变量和你自己的快捷指令里设置，不要放进共享链接。
+
+Lumi 只保存所选 App 名称和接收时间，最多保留 7 天；主动唤醒会把最近活动作为聊天背景，并按近一小时活动量适度缩短间隔。凌晨 1:00–5:00 的活动只在主动联系已启用、用户至少 30 分钟没有给 Lumi 发消息、且勿扰/睡眠未开启时安排短消息；不会因 App 活动拨电话。停用快捷指令自动化即可停止上报。
 
 ## 檐廊 Engawa MCP
 
