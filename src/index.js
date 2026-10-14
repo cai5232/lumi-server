@@ -1994,7 +1994,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     method: "POST",
     headers: {
       "content-type": "application/json",
-      ...(nativeAnthropic && (directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
+      ...(nativeAnthropic && (provider === "zenmux" || directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
       ...(nativeAnthropic ? {
         "anthropic-version": "2023-06-01",
         ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
@@ -2180,11 +2180,9 @@ async function zenMuxSubscriptionUsage() {
 }
 
 function zenmuxAnthropicModel(model) {
-  const normalized = String(model).replace(/^anthropic\//i, "");
-  // ZenMux recommends dashed Claude aliases on its native Anthropic route.
-  if (normalized === "claude-sonnet-4.6") return "claude-sonnet-4-6";
-  if (normalized === "claude-sonnet-4.5") return "claude-sonnet-4-5";
-  return normalized;
+  // ZenMux's Anthropic-compatible API uses the same provider/model slug as
+  // its model catalog (for example, anthropic/claude-sonnet-5.5).
+  return String(model || "").trim();
 }
 
 function cacheMessages(messages, model, cacheCurrentUser = true) {
