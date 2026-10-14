@@ -258,30 +258,16 @@ def deterministic_clock_fallback(user_text: str, reply: str, now: datetime):
         return None
     return {"action": "create", "target_id": None, "due_local": due.strftime("%Y-%m-%d %H:%M"), "task": "叫她"}
 
-def capture(session_id: str, user_text: str, reply: str) -> str:
-    """每轮聊天结束后调用。返回 none / created / replaced / cancelled / duplicate / bad_time / skipped。"""
-    existing = pending(session_id)
+def capture(session_id: str, user_text: str, reply: str, decision: dict | None = None) -> str:
+    """保存主聊天模型在同一次回复中给出的提醒决定，不再额外调用模型。"""
     now = now_utc()
-    # 每轮由模型直接判断是否形成了提醒约定，不再由关键词门槛决定是否检查。
-    try:
-        decision = judge(user_text, reply, existing, now)
-    except llm.LLMError as error:
-        decision = deterministic_clock_fallback(user_text, reply, now)
-        if decision is None:
-            print(f"promise-alarm capture outcome=failed at={now.isoformat()} error={str(error)[:240]}")
-            raise
-        print(f"promise-alarm capture fallback=explicit_clock due_local={decision['due_local']} at={now.isoformat()}")
-    if str(decision.get("action") or "none") == "none":
-        fallback = deterministic_clock_fallback(user_text, reply, now)
-        if fallback is not None:
-            decision = fallback
-            print(f"promise-alarm capture fallback=explicit_clock reason=model_none due_local={decision['due_local']} at={now.isoformat()}")
-    said = f"她：{user_text[:300]}\n他：{reply[:600]}"
+    if not isinstance(decision, dict):
+        return "none"
+    said = f"她：{user_text[:300]}\\n他：{reply[:600]}"
     outcome = apply_decision(session_id, decision, now, said)
     items = pending(session_id)
     print(f"promise-alarm capture outcome={outcome} at={now.isoformat()} pending_count={len(items)}")
     return outcome
-
 
 # ── 到点：让小机写一条消息 ──
 def clean_reply(text: str) -> str:
