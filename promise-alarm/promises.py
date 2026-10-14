@@ -163,7 +163,8 @@ def context(session_id: str) -> str:
 def worth_checking(user_text: str, reply: str, has_pending: bool = False) -> bool:
     if has_pending and any(re.search(r"(?:不用|别|不要|取消).{0,8}(?:叫|提醒|催|闹钟|找你|找我)", text or "", re.IGNORECASE) for text in (reply, user_text)):
         return True
-    return any(TIME_PATTERN.search(text or "") and CALL_PATTERN.search(text or "") for text in (reply, user_text))
+    combined = f"{user_text or ''}\\n{reply or ''}"
+    return bool(TIME_PATTERN.search(combined) and CALL_PATTERN.search(combined))
 
 
 def judge(user_text: str, reply: str, existing: list[dict], now: datetime) -> dict:
@@ -227,11 +228,16 @@ def apply_decision(session_id: str, decision: dict, now: datetime, said: str = "
     return "created"
 
 
-def deterministic_clock_fallback(reply: str, now: datetime) -> dict | None:
-    """模型判约定失败时，从助手明确承诺的唯一钟点中兜底登记。"""
-    if not CALL_PATTERN.search(reply or ""):
+def deterministic_clock_fallback(user_text: str, reply: str, now: datetime):
+    """模型判约定失败时，从明确请求及助手确认中的唯一钟点兜底登记。"""
+    user_requested = bool(CALL_PATTERN.search(user_text or ""))
+    assistant_promised = bool(CALL_PATTERN.search(reply or ""))
+    assistant_confirmed = bool(re.search(r"收到|记着|记下|答应|好[的了]?|行[的吧]?|可以|我会|我来|到点", reply or ""))
+    if not assistant_promised and not (user_requested and assistant_confirmed):
         return None
-    matches = re.findall(r"(?<!\d)([01]?\d|2[0-3])[:：]([0-5]\d)(?!\d)", reply or "")
+    clock_pattern = r"(?<!\\d)([01]?\\d|2[0-3])[:：]([0-5]\\d)(?!\\d)"
+    reply_matches = re.findall(clock_pattern, reply or "")
+    matches = reply_matches or re.findall(clock_pattern, user_text or "")
     clocks = set(matches)
     if len(clocks) != 1:
         return None
@@ -244,7 +250,6 @@ def deterministic_clock_fallback(reply: str, now: datetime) -> dict | None:
         return None
     return {"action": "create", "target_id": None, "due_local": due.strftime("%Y-%m-%d %H:%M"), "task": "叫她"}
 
-
 def capture(session_id: str, user_text: str, reply: str) -> str:
     """每轮聊天结束后调用。返回 none / created / replaced / cancelled / duplicate / bad_time / skipped。"""
     existing = pending(session_id)
@@ -255,7 +260,7 @@ def capture(session_id: str, user_text: str, reply: str) -> str:
     try:
         decision = judge(user_text, reply, existing, now)
     except llm.LLMError as error:
-        decision = deterministic_clock_fallback(reply, now)
+        decision = deterministic_clock_fallback(user_text, reply, now)
         if decision is None:
             print(f"promise-alarm capture outcome=failed at={now.isoformat()} error={str(error)[:240]}")
             raise
