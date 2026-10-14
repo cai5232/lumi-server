@@ -4494,7 +4494,15 @@ const server = createServer(async (req, res) => {
       generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       // A custom preset must be durably saved before we report a successful reply;
       // otherwise background wakes can unknowingly use the old Zenmux route.
-      await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider);
+      // Missing encryption configuration must not turn an otherwise successful chat into HTTP 500.
+      // Never persist custom API credentials unencrypted or silently route background jobs to Zenmux.
+      try {
+        await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider);
+      } catch (error) {
+        console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
+        if (selectedProvider !== "custom") throw error;
+        threads[id].lastChatProvider = "custom";
+      }
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
