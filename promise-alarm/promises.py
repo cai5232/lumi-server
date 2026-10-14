@@ -41,6 +41,7 @@ CALL_PATTERN = re.compile(
     r"|\b(?:wake|remind|call|ping|check on|text)\s+(?:you|me)\b",
     re.IGNORECASE,
 )
+PHONE_CALL_PATTERN = re.compile(r"打电话|打给(?:我|你)|给(?:我|你)打电话|电话叫醒|来电提醒|电话提醒|\\bphone call\\b|\\bcall me\\b", re.IGNORECASE)
 _lock = threading.Lock()
 
 
@@ -108,6 +109,7 @@ def serialise(row: sqlite3.Row) -> dict:
         "due_local": local_text(row["due_at"], "%H:%M"),
         "due_day": local_text(row["due_at"], "%m月%d日"),
         "task": str(row["task"] or ""),
+        "call_requested": bool(PHONE_CALL_PATTERN.search(str(row["said"] or ""))),
         "status": str(row["status"]),
     }
 
