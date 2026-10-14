@@ -4526,7 +4526,7 @@ const server = createServer(async (req, res) => {
       // registered APNs destination so the user is notified when the reply is ready.
       if (invite) await sendIncomingCallPush(id, invite);
       else await sendProactivePush(id, visibleContent);
-      return { userMessage: storedUserMessage, assistantMessage, updatedOptionMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
+      return { userMessage: storedUserMessage, assistantMessage, updatedOptionMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, aiRemark: threads[id].aiRemark || "", speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
