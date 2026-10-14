@@ -464,9 +464,13 @@ async function generateSentinelWake(thread) {
   // "zenmux" there for cache compatibility).
   const savedRoute = await resolveMurmurRoute(thread.id);
   const route = savedRoute || {
-    provider: thread.cacheProvider || "zenmux",
-    model: thread.cacheModel || ""
+    provider: thread.lastChatProvider || thread.cacheProvider || "zenmux",
+    model: thread.lastChatModel || thread.cacheModel || ""
   };
+  // A missing encrypted custom preset must never silently become a Zenmux call.
+  if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) {
+    throw new Error("custom_provider_route_missing_for_proactive_wake");
+  }
   if (route.provider === "custom" && !route.customProvider) {
     throw new Error("custom_provider_unavailable_for_proactive_wake");
   }
@@ -707,7 +711,8 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   await refreshMurmurState(thread.id);
   const prompt = SLEEP_STAGE_PROMPTS[stage];
   const savedRoute = await resolveMurmurRoute(thread.id);
-  const route = savedRoute || { provider: thread.cacheProvider || "zenmux", model: thread.cacheModel || "" };
+  const route = savedRoute || { provider: thread.lastChatProvider || thread.cacheProvider || "zenmux", model: thread.lastChatModel || thread.cacheModel || "" };
+  if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
     messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
@@ -4487,7 +4492,9 @@ const server = createServer(async (req, res) => {
       const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
       generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
-      await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider).catch(error => { console.warn(`Murmur route was not persisted: ${error.message}`); });
+      // A custom preset must be durably saved before we report a successful reply;
+      // otherwise background wakes can unknowingly use the old Zenmux route.
+      await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider);
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
@@ -4496,6 +4503,8 @@ const server = createServer(async (req, res) => {
       const selectedConfig = selectedProvider === "custom" ? null : providerConfig(selectedProvider, selectedModel);
       threads[id].cacheModel = selectedModel || selectedConfig?.model || process.env.LUMI_MODEL_NAME || "";
       threads[id].cacheProvider = selectedProvider === "custom" ? "zenmux" : selectedProvider;
+      threads[id].lastChatProvider = selectedProvider;
+      threads[id].lastChatModel = selectedModel || selectedConfig?.model || "";
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.compactionApplied ? 0 : generated.measuredInputTokens;
       // A successful compaction removes old messages from the active context.
