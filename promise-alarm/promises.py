@@ -349,7 +349,9 @@ def fire(promise: sqlite3.Row, now: datetime) -> int:
             raise llm.LLMError("模型回了空消息。")
         print(f"promise-alarm generation done id={promise['id']} duration_ms={int((time.monotonic()-generation_started)*1000)}")
         message_id = add_message(str(promise["session_id"]), "assistant", text, int(promise["id"]))
-    call_requested = bool(promise["call_requested"]) or bool(locals().get("call_requested", False))
+    with db() as connection:
+        stored_call = connection.execute("SELECT call_requested FROM promises WHERE id=?", (promise["id"],)).fetchone()
+    call_requested = bool(stored_call["call_requested"]) if stored_call else bool(promise["call_requested"])
     promise_payload = serialise(promise)
     promise_payload["call_requested"] = call_requested
     url = config.load()["webhook_url"]
