@@ -2,7 +2,9 @@
 """调用 OpenAI Chat Completions 或 Anthropic Messages 兼容的聊天接口。"""
 import json
 import os
+import time
 import urllib.request
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 
 import config
@@ -10,6 +12,41 @@ import config
 
 class LLMError(RuntimeError):
     pass
+
+
+def _record_model_request(settings: dict, api_format: str, request_body: dict, response_payload: dict, status: int, duration_ms: int) -> None:
+    webhook_url = str(settings.get("webhook_url") or "")
+    if not webhook_url:
+        return
+    endpoint = webhook_url.rsplit("/", 1)[0] + "/usage"
+    usage = response_payload.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    api_base = str(settings.get("api_base") or "").lower()
+    record = {
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "provider": "zenmux" if "zenmux" in api_base else "promise-alarm",
+        "model": str(settings.get("model") or ""),
+        "format": api_format,
+        "status": int(status),
+        "durationMs": max(0, int(duration_ms)),
+        "inputTokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+        "outputTokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+        "cachedTokens": int(details.get("cached_tokens") or usage.get("cache_read_input_tokens") or 0),
+        "requestJSON": request_body,
+        "responseJSON": response_payload,
+    }
+    payload = json.dumps({"record": record}, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={"Authorization": f"Bearer {settings.get('webhook_token') or ''}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3):
+            pass
+    except Exception as error:
+        print(f"promise-alarm usage log failed: {error}")
 
 
 def available() -> bool:
@@ -51,8 +88,18 @@ def _anthropic_request(settings: dict, messages: list[dict], max_tokens: int, te
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        _record_model_request(settings, "anthropic", body, payload, 200, int((time.monotonic() - started) * 1000))
+    except HTTPError as error:
+        try:
+            error_payload = json.loads(error.read().decode("utf-8", errors="replace"))
+        except Exception:
+            error_payload = {"error": str(error)}
+        _record_model_request(settings, "anthropic", body, error_payload, error.code, int((time.monotonic() - started) * 1000))
+        raise
     blocks = payload.get("content") or []
     text = "\n".join(str(block.get("text") or "") for block in blocks if isinstance(block, dict) and block.get("type") == "text")
     return text.strip()
@@ -77,8 +124,18 @@ def _openai_request(settings: dict, messages: list[dict], max_tokens: int, tempe
         headers={"Authorization": f"Bearer {settings['api_key']}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        _record_model_request(settings, "openai", body, payload, 200, int((time.monotonic() - started) * 1000))
+    except HTTPError as error:
+        try:
+            error_payload = json.loads(error.read().decode("utf-8", errors="replace"))
+        except Exception:
+            error_payload = {"error": str(error)}
+        _record_model_request(settings, "openai", body, error_payload, error.code, int((time.monotonic() - started) * 1000))
+        raise
     return str(payload["choices"][0]["message"]["content"] or "").strip()
 
 
