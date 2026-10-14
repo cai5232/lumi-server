@@ -39,7 +39,7 @@ async function stopBackend(child) {
   await stopped;
 }
 
-test("farewell starts sleep and nightmare decisions never wake or message the user", async () => {
+test("farewell starts sleep and chosen nightmare contact is delivered without exposing ordinary dreams", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "lumi-sleep-flow-test-"));
   const provider = createServer(async (req, res) => {
     let raw = "";
@@ -104,12 +104,12 @@ test("farewell starts sleep and nightmare decisions never wake or message the us
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     assert.equal(state?.sleep.nightmare?.decision, "send_message", `the AI-selected nightmare action should be persisted; state=${JSON.stringify(state?.activity)}; sleep=${JSON.stringify(state?.sleep)}`);
-    assert.equal(state.activity.mode, "sleeping", "a nightmare must not wake the user");
+    assert.equal(state.activity.mode, "sleeping", "nightmare contact does not terminate the sleep cycle");
     assert.equal(state.activity.sleepStage, "sleeping_after_nightmare");
     assert.deepEqual(state.messages.filter((message) => message.contentType === "dream"), [], "ordinary dreams stay out of chat");
     assert.deepEqual([...new Set(state.sleep.dreams.map((dream) => dream.cycle))], [0, 1], "dreams remain available to the private sleep state");
     const nightmare = state.messages.find((message) => message.contentType === "nightmare");
-    assert.equal(nightmare, undefined, "the nightmare message must remain private");
+    assert.equal(nightmare?.content, "我刚才做了个梦，想跟你说句话。", "an explicitly chosen nightmare contact must be delivered");
   } finally {
     await stopBackend(child);
     await new Promise((resolve) => provider.close(resolve));
