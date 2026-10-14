@@ -4467,7 +4467,8 @@ const server = createServer(async (req, res) => {
       const selectedProvider = input.customProvider && typeof input.customProvider === "object"
         ? "custom"
         : requestedProvider;
-      // Zenmux model is owned by Zeabur, never by a stale frontend preset.\n      const selectedModel = selectedProvider === "zenmux" ? "" : (typeof input.model === "string" ? input.model : "");
+      // Zenmux model is owned by Zeabur, never by a stale frontend preset.
+      const selectedModel = selectedProvider === "zenmux" ? "" : (typeof input.model === "string" ? input.model : "");
       let customProvider = null;
       if (selectedProvider === "custom") {
         try { customProvider = normalizeCustomProvider(input.customProvider); }
