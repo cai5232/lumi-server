@@ -11,9 +11,11 @@ const appPort = Number(process.env.PORT || 8787);
 const defaultAlarmPort = process.env.PORT ? 18768 + (appPort % 30000) : 18768;
 export const promiseAlarmPort = Number(process.env.LUMI_PROMISE_ALARM_PORT || defaultAlarmPort);
 let child = null;
+let stopping = false;
+let restartTimer = null;
 
 export function startPromiseAlarm() {
-  if (!promiseAlarmEnabled || child) return child;
+  if (!promiseAlarmEnabled || child || stopping) return child;
   const apiURL = String(process.env.LUMI_MODEL_API_URL || "").replace(/\/?chat\/completions\/?$/i, "").replace(/\/$/, "");
   const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
   child = spawn(process.env.PYTHON || process.env.PYTHON_EXECUTABLE || "python3", ["server.py"], {
@@ -28,6 +30,7 @@ export function startPromiseAlarm() {
       PROMISE_MODEL: process.env.PROMISE_MODEL || process.env.LUMI_MODEL_NAME || "",
       PROMISE_PERSONA: process.env.PROMISE_PERSONA || process.env.LUMI_SYSTEM_PROMPT || "你是 Lumi，像平时聊天一样自然地兑现你答应过的提醒。",
       PROMISE_UTC_OFFSET_HOURS: process.env.PROMISE_UTC_OFFSET_HOURS || "8",
+      PROMISE_NATIVE_ANTHROPIC: process.env.PROMISE_NATIVE_ANTHROPIC || process.env.LUMI_NATIVE_ANTHROPIC || "",
       PROMISE_WEBHOOK_URL: `http://127.0.0.1:${process.env.PORT || 8787}/v1/internal/promise-alarm/fire`,
       PROMISE_WEBHOOK_TOKEN: promiseAlarmToken,
       PYTHONUNBUFFERED: "1"
@@ -37,11 +40,24 @@ export function startPromiseAlarm() {
   child.on("exit", (code, signal) => {
     child = null;
     if (code || signal) console.warn(`promise-alarm stopped (${signal || code})`);
+    if (!stopping && promiseAlarmEnabled && !restartTimer) {
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        startPromiseAlarm();
+      }, 1_000);
+      restartTimer.unref?.();
+      console.warn("promise-alarm will restart in 1s");
+    }
   });
   return child;
 }
 
 export function stopPromiseAlarm() {
+  stopping = true;
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
   child?.kill("SIGTERM");
 }
 
