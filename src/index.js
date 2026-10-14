@@ -338,8 +338,8 @@ function markUserActivity(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
-  // A user-initiated message supersedes the pending first-wake dream mention.
-  thread.pendingDreamRecall = "";
+  // Keep waking dream fragments available for a later user question.
+  // They are refreshed on the next completed sleep cycle.
   markEmotionOnline(sharedEmotionState, now.getTime());
 }
 
@@ -364,7 +364,6 @@ function finishUserConversation(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
-  thread.pendingDreamRecall = "";
 }
 
 async function generateEmotionMurmur(thread, current) {
@@ -707,11 +706,15 @@ function formatSleepMemories(memories, limit = 12) {
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   await refreshMurmurState(thread.id);
   const prompt = SLEEP_STAGE_PROMPTS[stage];
+  const savedRoute = await resolveMurmurRoute(thread.id);
+  const route = savedRoute || { provider: thread.cacheProvider || "zenmux", model: thread.cacheModel || "" };
+  if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
     messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
-    provider: thread.cacheProvider || "zenmux",
-    model: thread.cacheModel || ""
+    provider: route.provider,
+    model: route.model,
+    customProvider: route.customProvider || null
   });
   const emotionUpdate = await applyEmotionUpdateFromOutput(output, thread.id);
   if (emotionUpdate) await saveEmotionState();
@@ -768,12 +771,17 @@ async function runSleepDreamSegment(thread, activity, now) {
       recordActivityEvent(thread, "dream", "做噩梦", nightmare.content, new Date(now));
       const decision = resolveNightmareDecision(nightmare.content, Math.random(), sleepReentryProbability);
       sleep.nightmare = { triggeredAt: new Date().toISOString(), cycle: cycle + 1, decision: decision.decision, reenteredSleep: decision.reenteredSleep };
-      // A nightmare is private sleep-state activity. It must never wake or
-      // message the user after they explicitly said good night.
       activity.sleepStage = decision.decision === "continue_sleep" && decision.reenteredSleep
         ? "sleeping_again"
         : "sleeping_after_nightmare";
       activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
+      if (decision.decision === "send_message" && decision.message) {
+        // Only an explicitly chosen nightmare contact appears in chat.
+        const message = { id: randomUUID(), role: "assistant", content: decision.message, contentType: "nightmare", createdAt: new Date().toISOString() };
+        thread.messages.push(message);
+        recordActivityEvent(thread, "nightmare", "噩梦惊醒", decision.message, new Date(now));
+        return { message: decision.message, metadata: { kind: "nightmare" } };
+      }
     }
     return null;
   } finally {
@@ -974,7 +982,6 @@ async function runBackgroundPulse() {
         if (wake.action === "screen") wake.message.createdAt = new Date().toISOString();
         if (wake.emotionUpdate) emotionChanged = true;
         const wakeDreamWasPending = Boolean(thread.pendingDreamRecall);
-        thread.pendingDreamRecall = "";
         if (wakeDreamWasPending) wake.message.contentType = "sentinel_wake_dream";
         thread.messages.push(wake.message);
         const wakeAt = Date.parse(wake.message.createdAt) || now;
