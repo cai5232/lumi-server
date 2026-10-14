@@ -140,7 +140,16 @@ async function resolveMurmurRoute(threadId = "") {
   const routes = await readMurmurRoutes();
   const route = (threadId && routes[threadId]) || Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (!route) return null;
-  return { provider: route.provider, model: route.model, customProvider: route.customProvider ? decryptMurmurProvider(route.customProvider) : null };
+  // An absent, malformed or rotated encryption key must not crash normal chat.
+  // Do not expose encrypted credentials or silently fall back to Zenmux for custom routes.
+  if (route.customProvider) {
+    try { return { provider: route.provider, model: route.model, customProvider: decryptMurmurProvider(route.customProvider) }; }
+    catch (error) {
+      console.warn(`[Murmur route] custom credentials unavailable: ${error.message}`);
+      return { provider: "custom", model: route.model, customProvider: null };
+    }
+  }
+  return { provider: route.provider, model: route.model, customProvider: null };
 }
 
 function mailMcpConfiguredFor(provider = "zenmux", model = "", customProvider = null, enabled = true) {
