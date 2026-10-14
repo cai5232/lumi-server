@@ -277,6 +277,20 @@ function ensureActivity(thread) {
   return thread.activity;
 }
 
+function recordActivityEvent(thread, kind, title, content = "", time = new Date()) {
+  if (!Array.isArray(thread.activityEvents)) thread.activityEvents = [];
+  const event = {
+    id: randomUUID(),
+    time: (time instanceof Date ? time : new Date(time)).toISOString(),
+    kind: String(kind || "activity").slice(0, 32),
+    title: String(title || "自主活动").slice(0, 80),
+    content: String(content || "").slice(0, 20_000)
+  };
+  thread.activityEvents.unshift(event);
+  thread.activityEvents = thread.activityEvents.slice(0, 500);
+  return event;
+}
+
 function isFarewell(text) {
   return /(晚安|睡了|先睡|去睡|明天见|先休息|good\s*night)/i.test(String(text || ""));
 }
@@ -437,8 +451,12 @@ async function generateAutonomousMessage(thread, kind) {
 async function generateSentinelWake(thread) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
+  const fatigue = Number(sharedEmotionState.drives?.fatigue || 0);
+  const anger = Number(sharedEmotionState.drives?.anger || 0);
+  const restAllowed = fatigue >= 0.85 || anger >= 0.90;
   const allowedActions = ["message", "phone", "screen"].filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
-  if (!allowedActions.length) throw new Error("sentinel has no enabled wake actions");
+  if (!allowedActions.length) allowedActions.push("message");
+  if (restAllowed) allowedActions.push("none");
   const generated = await generateReply({
     input: "",
     thread,
@@ -448,15 +466,16 @@ async function generateSentinelWake(thread) {
     model: thread.cacheModel || ""
   });
   const decision = generated.sentinelDecision || {};
-  const action = allowedActions.includes(decision.action) ? decision.action : "";
+  const requestedAction = allowedActions.includes(decision.action) ? decision.action : "message";
+  const action = requestedAction === "none" && !restAllowed ? "message" : requestedAction;
   const requestedNextWakeMinutes = Number(decision.nextWakeMinutes);
-  if (!generated.content || !action || !Number.isFinite(requestedNextWakeMinutes) || requestedNextWakeMinutes < 1 || requestedNextWakeMinutes > 1440) {
-    throw new Error(`sentinel invalid response: content=${Boolean(generated.content)} action=${Boolean(action)} nextWakeValid=${Number.isFinite(requestedNextWakeMinutes) && requestedNextWakeMinutes >= 1 && requestedNextWakeMinutes <= 1440}`);
-  }
-  const nextWakeMinutes = Math.round(requestedNextWakeMinutes);
+  const fallbackMinutes = Math.max(1, Number(proactive.intervalMin) || 60);
+  const nextWakeMinutes = Number.isFinite(requestedNextWakeMinutes) && requestedNextWakeMinutes >= 1 && requestedNextWakeMinutes <= 1440
+    ? Math.round(requestedNextWakeMinutes)
+    : fallbackMinutes;
   const followUpDecision = normalizeFollowUpDecision(decision, allowedActions);
   return {
-    message: { id: randomUUID(), role: "assistant", content: generated.content, toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
+    message: { id: randomUUID(), role: "assistant", content: generated.content || "我刚刚想到你，想来找你说说话。", toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
     action,
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
     nextWakeMinutes,
@@ -675,6 +694,7 @@ async function runSleepDreamSegment(thread, activity, now) {
     }, seedIds);
     sleep.dreamArc = rem.content;
     void archiveDreamInNocturne(thread, rem);
+    recordActivityEvent(thread, "dream", "做梦", rem.content, new Date(now));
     activity.dreamCycle = cycle + 1;
     activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
     activity.sleepStage = "sleeping";
@@ -682,6 +702,7 @@ async function runSleepDreamSegment(thread, activity, now) {
     if (shouldTriggerNightmare({ cycle, alreadyTriggered: Boolean(sleep.nightmare?.triggeredAt), roll: Math.random(), probability: sleepNightmareProbability })) {
       activity.sleepStage = `nightmare_${cycle + 1}`;
       const nightmare = await runSleepStage(thread, "nightmare", cycle, { contextHeader, trauma: formatSleepMemories(seeds.slice(0, 3), 3), competence: thread.competence || "尚未明确" }, seedIds.slice(0, 3));
+      recordActivityEvent(thread, "dream", "做噩梦", nightmare.content, new Date(now));
       const decision = resolveNightmareDecision(nightmare.content, Math.random(), sleepReentryProbability);
       sleep.nightmare = { triggeredAt: new Date().toISOString(), cycle: cycle + 1, decision: decision.decision, reenteredSleep: decision.reenteredSleep };
       // A nightmare is private sleep-state activity. It must never wake or
@@ -751,6 +772,7 @@ async function finishSleepCycle(thread, activity, now) {
   sleep.nextCycle += 1;
   activity.mode = "sentinel";
   activity.sleepStage = "awake";
+  recordActivityEvent(thread, "wake", "醒来", recallShards.length ? `睡醒了，残留的梦境片段：${recallShards.join("；")}` : "睡醒了。", new Date(now));
   const proactive = ensureProactive(thread);
   // Natural wake is itself the first sentinel wake. Do not wait for the
   // ordinary idle interval; the request will choose the next wake schedule.
@@ -788,6 +810,7 @@ async function runBackgroundPulse() {
       activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
       activity.dreamCycle = 0;
       activity.sleepStage = "n1_drift";
+      recordActivityEvent(thread, "sleep", "进入睡眠", "开始睡觉了。", new Date(now));
       thread.sleep.dreamArc = "";
       thread.pendingDreamRecall = "";
       thread.sleep.nightmare = null;
@@ -822,14 +845,6 @@ async function runBackgroundPulse() {
         changed = true;
       }
     } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
-      const actions = proactiveSettings.threadId === thread.id ? proactiveSettings.actions : proactive.actions;
-      if (actions && !actions.message && !actions.phone && !actions.screen) {
-        activity.nextWakeAt = null;
-        activity.nextWakeSource = null;
-        proactive.nextDueAt = null;
-        changed = true;
-        continue;
-      }
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
       const followUpForWake = activity.followUp || null;
       const isFollowUp = Boolean(followUpForWake);
@@ -845,20 +860,22 @@ async function runBackgroundPulse() {
       if (activeChatThreads.has(thread.id)) continue;
       activeChatThreads.add(thread.id);
       try {
-        const phoneBlocked = !canPlaceProactiveCall(thread);
-        const enabledActions = proactive.actions || {};
-        if (phoneBlocked && enabledActions.phone && !enabledActions.message && !enabledActions.screen) {
-          const interval = Math.max(10, Number(proactive.intervalMin) || 60);
-          activity.nextWakeAt = new Date(now + interval * 60_000).toISOString();
-          activity.nextWakeSource = "settings";
-          proactive.nextDueAt = activity.nextWakeAt;
-          changed = true;
-          continue;
-        }
         proactiveDiagnostics.lastReason = "generating";
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
         proactiveDiagnostics.attempts += 1;
         const wake = await generateSentinelWake(thread);
+        if (wake.action === "none") {
+          recordActivityEvent(thread, "rest", "休息一下", "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
+          activity.lastWakeAt = new Date(now).toISOString();
+          activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
+          activity.nextWakeSource = "ai";
+          proactive.nextDueAt = activity.nextWakeAt;
+          proactiveDiagnostics.lastSuccessAt = new Date(now).toISOString();
+          proactiveDiagnostics.lastError = null;
+          proactiveDiagnostics.lastReason = "resting_for_high_fatigue_or_anger";
+          changed = true;
+          continue;
+        }
         // The autonomous turn can include an email MCP action. Persist its exact
         // request prefix and assistant output so the next visible chat continues
         // from this turn instead of falling back to the previous chat snapshot.
@@ -897,6 +914,21 @@ async function runBackgroundPulse() {
         thread.pendingDreamRecall = "";
         if (wakeDreamWasPending) wake.message.contentType = "sentinel_wake_dream";
         thread.messages.push(wake.message);
+        const wakeAt = Date.parse(wake.message.createdAt) || now;
+        recordActivityEvent(thread, "wake", "醒来", "自主醒来，开始主动联系你或做点自己的事。", new Date(wakeAt));
+        for (const call of (Array.isArray(wake.message.toolCalls) ? wake.message.toolCalls : []).slice(0, 32)) {
+          const toolName = String(call.name || "自主工具");
+          const title = /(search|browse|web|rss|news|arxiv)/i.test(toolName) ? "联网搜索"
+            : /mail_(send|reply)/i.test(toolName) ? "发送邮件"
+              : /calendar_(create|update|delete)/i.test(toolName) ? "修改日历"
+                : /location|icloud/i.test(toolName) ? "查看行踪" : `自主行动 · ${toolName}`;
+          const content = [
+            call.arguments ? `执行内容：${String(call.arguments)}` : "",
+            call.succeeded === false ? "执行结果：失败" : "执行结果：已返回",
+            call.result ? String(call.result) : ""
+          ].filter(Boolean).join("\n");
+          recordActivityEvent(thread, "action", title, content, new Date(Math.min(wakeAt - 2, Date.parse(call.time || "") || wakeAt - 2)));
+        }
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
         if (wake.action === "screen" && !screenSeen) {
@@ -913,6 +945,9 @@ async function runBackgroundPulse() {
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
         }
+        const actionTitle = wake.action === "phone" ? "主动电话" : wake.action === "screen" ? "查看屏幕" : "主动联系";
+        const actionContent = wake.action === "phone" ? (wake.actionReason || wake.message.content) : wake.message.content;
+        recordActivityEvent(thread, wake.action, actionTitle, actionContent, new Date(wakeAt - 1));
         proactiveDiagnostics.lastSuccessAt = new Date().toISOString();
         proactiveDiagnostics.lastError = null;
         proactiveDiagnostics.lastReason = "generated";
@@ -2446,6 +2481,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const proactiveDirective = proactive
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n`
     : "";
+  const sentinelActionRule = proactive
+    ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
+    : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode
     ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order。用户点名商品和店铺时，商品原词必须放入 kw（并传入 dish），店铺/品牌单独放入 shop；例如‘罗森香肠面包’传 kw:'香肠面包', dish:'香肠面包', shop:'罗森', cart:false。不能只打开首页推荐后停止，也不能用 shop 替代商品词。只有用户明确说要买现有购物车里的东西时才传 cart:true；否则走商品搜索、进店、匹配商品并加购流程。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
@@ -2455,7 +2493,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<promise_alarm_instructions>如果你明确答应在具体时间提醒、叫醒或回来找她，系统会替你记下并到点回来兑现。只有明确答应且时间具体时才算；不要声称已经设置成功，除非当前对话明确显示约定已记录。若她说取消或改时间，按她的意思回应。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3746,6 +3784,7 @@ const server = createServer(async (req, res) => {
       return send(res, 405, { error: "method_not_allowed" });
     }
     const activityMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity$/);
+    const activityHistoryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity\/history$/);
     if (url.pathname === "/v1/settings/proactive") {
       if (req.method === "GET") return send(res, 200, proactiveSettings);
       if (req.method === "PUT") {
@@ -3788,6 +3827,15 @@ const server = createServer(async (req, res) => {
         await saveThreads(threads);
         return send(res, 200, activity);
       }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
+    if (activityHistoryMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const id = decodeURIComponent(activityHistoryMatch[1]);
+      const threads = await readThreads();
+      const events = Array.isArray(threads[id]?.activityEvents) ? threads[id].activityEvents : [];
+      const limit = Math.max(1, Math.min(500, Number(url.searchParams.get("limit") || 200)));
+      if (req.method === "GET") return send(res, 200, { events: events.slice(0, limit) });
       return send(res, 405, { error: "method_not_allowed" });
     }
     const drawerMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/drawer(?:\/(unseen|seen))?$/);
