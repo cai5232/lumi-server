@@ -146,7 +146,7 @@ async function saveMurmurRoute(threadId, provider, model, customProvider = null)
 }
 async function resolveMurmurRoute(threadId = "") {
   const routes = await readMurmurRoutes();
-  const route = (threadId && routes[threadId]) || Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const route = threadId ? routes[threadId] : Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (!route) return null;
   // An absent, malformed or rotated encryption key must not crash normal chat.
   // Do not expose encrypted credentials or silently fall back to Zenmux for custom routes.
@@ -2467,6 +2467,7 @@ async function callProviderRoute(input, thread) {
 
   const provider = typeof input?.provider === "string" && input.provider
     ? input.provider : thread?.lastChatProvider || thread?.cacheProvider || "zenmux";
+  if (provider === "custom") throw new Error("call_custom_provider_route_unavailable");
   const model = provider === "zenmux"
     ? ""
     : (typeof input?.model === "string" && input.model ? input.model : thread?.lastChatModel || thread?.cacheModel || "");
@@ -3479,6 +3480,7 @@ const server = createServer(async (req, res) => {
         const route = await resolveMurmurRoute(id);
         if (!route && thread?.lastChatProvider === "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
         const provider = route?.provider || thread?.lastChatProvider || "zenmux";
+        if (provider === "custom" && route?.provider !== "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
         const model = route?.model || thread?.lastChatModel || "";
         const customProvider = route?.customProvider || null;
         if (provider === "custom" && (!customProvider || !model)) return send(res, 409, { error: "custom_model_route_unavailable" });
