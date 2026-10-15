@@ -2571,9 +2571,12 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .flatMap((message) => {
-      // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
-      // from history and the previous request's Anthropic cache prefix can never match again.
-      const content = withoutStaleCompactionDirective(message.modelContent) || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
+      // Historical user modelContent contains per-turn system_context, summaries and memories.
+      // Replaying it duplicates those large blocks on every subsequent request.
+      // Keep only actual user text; the current turn receives fresh context below.
+      const content = message.role === "user"
+        ? (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content)
+        : (withoutStaleCompactionDirective(message.modelContent) || message.content);
       if (typeof content !== "string" || !content.trim()) return [];
       // An unsolicited nudge has an internal user request that is deliberately
       // absent from the visible timeline. It is nevertheless part of the
@@ -3536,7 +3539,7 @@ const server = createServer(async (req, res) => {
         // as chat and sentinel wakes, rather than the alarm service's isolated mini-chat.
         const chatHistory = thread
           ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").flatMap((message) => {
-              const text = withoutStaleCompactionDirective(message.modelContent) || message.content;
+              const text = message.role === "user" ? message.content : (withoutStaleCompactionDirective(message.modelContent) || message.content);
               if (typeof text !== "string" || !text.trim()) return [];
               const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
                 ? [{ role: "user", content: message.precedingUserModelContent }]
