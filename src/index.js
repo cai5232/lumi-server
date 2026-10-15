@@ -1755,7 +1755,13 @@ function contextMessages(thread) {
   }
   return messages.slice(boundaryIndex + 1);
 }
-function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
+function messageTokens(messages) {
+  // modelContent on stored user messages contains system_context, summaries,
+  // memories and per-request directives. Those are injected again on later
+  // turns, so counting modelContent here repeatedly counts the same context.
+  // Compaction should measure the actual persisted conversation text.
+  return messages.reduce((total, message) => total + estimateTokens(message.content) + 8, 0);
+}
 function cacheUsage(usage = {}) {
   const read = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
   const created = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || usage.cache_creation?.ephemeral_1h_input_tokens || usage.cache_creation?.ephemeral_5m_input_tokens || 0);
