@@ -109,18 +109,22 @@ function normalizeCustomProvider(input) {
   return { key: apiKey, url: baseURL.replace(/\/+$/, ""), apiFormat, chatPath };
 }
 
-function murmurEncryptionKey() {
+function murmurEncryptionKeyCandidates() {
+  const candidates = [];
   const explicit = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "");
   if (explicit) {
     if (!/^[a-f0-9]{64}$/i.test(explicit)) throw new Error("LUMI_MURMUR_KEY_ENCRYPTION_KEY must be 32-byte hex");
-    return Buffer.from(explicit, "hex");
+    candidates.push(Buffer.from(explicit, "hex"));
   }
-  // Reuse an already-required server secret so custom model routes can be
-  // persisted without asking operators to add a second encryption variable.
-  // This value never leaves the server and is domain-separated from its other uses.
+  // Read routes encrypted before the optional dedicated key was configured.
+  // Keep the existing server-secret-derived key as a decryption fallback.
   const existingSecret = String(process.env.LUMI_PUSH_API_TOKEN || process.env.LUMI_MODEL_API_KEY || "");
-  if (!existingSecret) throw new Error("No server secret is available to encrypt the custom provider route");
-  return createHash("sha256").update("lumi-murmur-route-v1\\0").update(existingSecret).digest();
+  if (existingSecret) candidates.push(createHash("sha256").update("lumi-murmur-route-v1\\0").update(existingSecret).digest());
+  if (!candidates.length) throw new Error("No server secret is available to encrypt the custom provider route");
+  return candidates;
+}
+function murmurEncryptionKey() {
+  return murmurEncryptionKeyCandidates()[0];
 }
 async function readMurmurRoutes() {
   try { return JSON.parse(await readFile(murmurRoutePath, "utf8")); }
@@ -132,9 +136,15 @@ function encryptMurmurProvider(provider) {
   return { iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), data: ciphertext.toString("base64") };
 }
 function decryptMurmurProvider(value) {
-  const decipher = createDecipheriv("aes-256-gcm", murmurEncryptionKey(), Buffer.from(value.iv, "base64"));
-  decipher.setAuthTag(Buffer.from(value.tag, "base64"));
-  return JSON.parse(Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]).toString("utf8"));
+  let lastError;
+  for (const key of murmurEncryptionKeyCandidates()) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(value.iv, "base64"));
+      decipher.setAuthTag(Buffer.from(value.tag, "base64"));
+      return JSON.parse(Buffer.concat([decipher.update(Buffer.from(value.data, "base64")), decipher.final()]).toString("utf8"));
+    } catch (error) { lastError = error; }
+  }
+  throw lastError || new Error("Unable to decrypt custom provider route");
 }
 async function saveMurmurRoute(threadId, provider, model, customProvider = null) {
   const routes = await readMurmurRoutes();
@@ -3487,9 +3497,39 @@ const server = createServer(async (req, res) => {
         const model = route?.model || thread?.lastChatModel || "";
         const customProvider = route?.customProvider || null;
         if (provider === "custom" && (!customProvider || !model)) return send(res, 409, { error: "custom_model_route_unavailable" });
+        const reminderSystem = messages.find((message) => message.role === "system")?.content || "";
+        const reminderUser = [...messages].reverse().find((message) => message.role === "user");
+        if (!reminderUser?.content) return send(res, 400, { error: "messages_required" });
+        // Scheduled reminders must use the same durable Lumi conversation context
+        // as chat and sentinel wakes, rather than the alarm service's isolated mini-chat.
+        const chatHistory = thread
+          ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").flatMap((message) => {
+              const text = withoutStaleCompactionDirective(message.modelContent) || message.content;
+              if (typeof text !== "string" || !text.trim()) return [];
+              const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
+                ? [{ role: "user", content: message.precedingUserModelContent }]
+                : [];
+              return [...preceding, { role: message.role, content: text }];
+            })
+          : [];
+        const preserveOpenAIBoundaries = provider === "custom" && customProvider?.apiFormat === "openai";
+        const requestMessages = [{ role: "system", content: [thread?.cacheSystem, reminderSystem].filter(Boolean).join("\\n\\n") }];
+        for (const message of chatHistory) {
+          const previous = requestMessages.at(-1);
+          if (!preserveOpenAIBoundaries && previous?.role === message.role) previous.content = `${previous.content}\\n${message.content}`;
+          else requestMessages.push({ ...message });
+        }
+        const summary = thread?.contextSummary ? `<context_summary source="system">\\n${thread.contextSummary}\\n</context_summary>\\n\\n` : "";
+        const memoryQuery = [reminderUser.content, thread?.contextSummary, chatHistory.map((message) => message.content).join("\\n")].filter(Boolean).join("\\n");
+        const memories = thread ? await searchMemories(memoryQuery) : [];
+        const memoryBlock = memories.length ? `<retrieved_memories source="system">\\n${memories.map((memory) => `- ${memory}`).join("\\n")}\\n</retrieved_memories>\\n\\n` : "";
+        const reminderContent = `${summary}${memoryBlock}${reminderUser.content}`;
+        const previous = requestMessages.at(-1);
+        if (previous?.role === "user") previous.content = `${previous.content}\\n\\n${reminderContent}`;
+        else requestMessages.push({ role: "user", content: reminderContent });
         try {
           const content = await callModel({
-            messages,
+            messages: requestMessages,
             provider,
             model,
             customProvider,
