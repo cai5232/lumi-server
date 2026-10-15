@@ -161,9 +161,13 @@ async function saveMurmurRoute(threadId, provider, model, customProvider = null,
 }
 async function resolveMurmurRoute(threadId = "", thread = null) {
   const routes = await readMurmurRoutes();
-  const route = threadId
-    ? [routes[threadId], thread?.modelRoute].filter(Boolean).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0]
-    : Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const exactCustomRoute = [routes[threadId], thread?.modelRoute]
+    .filter((route) => route?.provider === "custom")
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+  const latestCustomRoute = Object.values(routes)
+    .filter((route) => route?.provider === "custom")
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0];
+  const route = threadId ? (exactCustomRoute || latestCustomRoute) : latestCustomRoute;
   if (!route) return null;
   if (route.customProvider) {
     try { return { provider: route.provider, model: route.model, customProvider: decryptMurmurProvider(route.customProvider) }; }
@@ -470,12 +474,17 @@ async function generateAutonomousMessage(thread, kind) {
   const prompt = kind === "dream"
     ? "你正在睡眠中做梦。根据最近的聊天记忆，写一段连续梦境片段，保持和上一段梦的意象连贯，100字以内。只输出梦境正文。"
     : `你是一个会主动关心用户的 AI。用户已经有一段时间没有说话，请按照这条主动消息设定自然地发起联系：${proactive.message || "结合你们的聊天上下文，自然地联系用户。"}。不要提到计时器、后台任务或系统。内容长短由你根据上下文和此刻真正想说的话决定，不设字数限制；不要套用固定的“我醒了”开场，也不要为了主动联系而硬凑内容。`;
+  const modelRoute = await resolveMurmurRoute(thread.id, thread);
+  if (modelRoute?.provider !== "custom" || !modelRoute.customProvider) throw new Error("frontend_custom_model_route_required");
   const content = await callModel({
     messages: [
       { role: "system", content: prompt },
       { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${recent || "还没有聊天记录。"}` }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
+    provider: "custom",
+    model: modelRoute.model,
+    customProvider: modelRoute.customProvider,
     ...(kind === "dream" ? { maxOutputTokens: 2048 } : { useMaximumModelOutput: true })
   });
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
@@ -1830,14 +1839,15 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "zenmux", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [] }) {
-  let selected = provider === "custom" && customProvider ? customProvider : providerConfig(provider, requestedModel);
-  selected = { ...selected, model: provider === "zenmux" ? selected.model : (requestedModel || selected.model) };
-  if (!selected.model && provider !== "zenmux") {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [] }) {
+  // Only a frontend-selected custom route may issue a model request.
+  if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
+  let selected = customProvider;
+  selected = { ...selected, model: requestedModel || selected.model };
+  if (!selected.model) {
     const discovered = await listProviderModels(selected);
     if (discovered[0]) selected = { ...selected, model: discovered[0] };
-  }
-  const configuredURL = selected.url;
+  }  const configuredURL = selected.url;
   const apiKey = selected.key;
   const model = selected.model;
   if (!configuredURL || !apiKey || !model) {
@@ -2494,7 +2504,13 @@ async function callProviderRoute(input, thread) {
 
 async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
   await refreshMurmurState(thread?.id || "default", { online: !proactive });
-  provider = provider || thread?.cacheProvider || "zenmux";
+  const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
+  if (!customProvider && savedModelRoute?.provider === "custom") {
+    customProvider = savedModelRoute.customProvider;
+    model = model || savedModelRoute.model || "";
+  }
+  if (!customProvider) throw new Error("frontend_custom_model_route_required");
+  provider = "custom";
   // Do not make a standalone summary request. It would have a different prompt
   // prefix, miss Claude's cache, and force the following reply to start cold.
   // Instead, let the cacheable user reply emit a private summary at its end.
@@ -2905,9 +2921,11 @@ async function checkCacheKeepalive() {
   try {
     const threads = await readThreads();
     const thread = threads[id];
-    const cacheProvider = thread?.cacheProvider || "zenmux";
-    const configuredCache = thread ? providerConfig(cacheProvider, thread.cacheModel || "") : null;
-    const cacheModel = thread?.cacheModel || configuredCache?.model || "";
+    const modelRoute = thread ? await resolveMurmurRoute(id, thread) : null;
+    if (modelRoute?.provider !== "custom" || !modelRoute.customProvider) return { attempted: false, reason: "custom_model_route_unavailable" };
+    const cacheProvider = "custom";
+    const configuredCache = null;
+    const cacheModel = modelRoute.model || thread?.cacheModel || "";
     if (!thread?.cacheSystem || !cacheModel || !/anthropic|claude/i.test(cacheModel)) {
       return { attempted: false, reason: "no_matching_chat_cache" };
     }
@@ -2956,8 +2974,9 @@ async function checkCacheKeepalive() {
       maxOutputTokens: 16,
       temperature: 0,
       cacheCurrentUser: false,
-      provider: cacheProvider,
+      provider: "custom",
       model: cacheModel,
+      customProvider: modelRoute.customProvider,
       onUsage: (usage) => { keepaliveUsage = usage; }
     });
     const { read: readTokens, created: writeTokens } = cacheUsage(keepaliveUsage);
@@ -3496,21 +3515,13 @@ const server = createServer(async (req, res) => {
         const threads = await readThreads();
         const thread = threads[id];
         const route = await resolveMurmurRoute(id, thread);
-        if (thread?.lastChatProvider === "custom" && route?.provider !== "custom") {
-          console.warn("[promise-alarm] custom route unresolved session=" + id + " threadFound=" + Boolean(thread) + " threadProvider=" + (thread?.lastChatProvider || "none") + " embeddedRoute=" + Boolean(thread?.modelRoute) + " resolvedProvider=" + (route?.provider || "none"));
+        if (route?.provider !== "custom" || !route.customProvider || !route.model) {
+          console.warn("[promise-alarm] frontend custom route unavailable session=" + id + " threadFound=" + Boolean(thread) + " threadProvider=" + (thread?.lastChatProvider || "none") + " embeddedRoute=" + Boolean(thread?.modelRoute) + " routeProvider=" + (route?.provider || "none") + " credentials=" + Boolean(route?.customProvider) + " model=" + Boolean(route?.model));
           return send(res, 409, { error: "custom_model_route_unavailable" });
         }
-        const provider = route?.provider || thread?.lastChatProvider || "zenmux";
-        if (provider === "custom" && route?.provider !== "custom") {
-          console.warn("[promise-alarm] custom route unresolved session=" + id + " threadFound=" + Boolean(thread) + " threadProvider=" + (thread?.lastChatProvider || "none"));
-          return send(res, 409, { error: "custom_model_route_unavailable" });
-        }
-        const model = route?.model || thread?.lastChatModel || "";
-        const customProvider = route?.customProvider || null;
-        if (provider === "custom" && (!customProvider || !model)) {
-          console.warn("[promise-alarm] custom route incomplete session=" + id + " credentials=" + Boolean(customProvider) + " model=" + Boolean(model) + " encryptedRoute=" + Boolean(route?.customProvider));
-          return send(res, 409, { error: "custom_model_route_unavailable" });
-        }
+        const provider = "custom";
+        const model = route.model;
+        const customProvider = route.customProvider;
         const reminderSystem = messages.find((message) => message.role === "system")?.content || "";
         const reminderUser = [...messages].reverse().find((message) => message.role === "user");
         if (!reminderUser?.content) return send(res, 400, { error: "messages_required" });
@@ -4627,7 +4638,8 @@ const server = createServer(async (req, res) => {
       const selectedProvider = input.customProvider && typeof input.customProvider === "object"
         ? "custom"
         : requestedProvider;
-      // Zenmux model is owned by Zeabur, never by a stale frontend preset.
+      if (selectedProvider !== "custom") return send(res, 400, { error: "frontend_custom_model_required" });
+      // The model and endpoint are owned by the frontend custom preset.
       const selectedModel = selectedProvider === "zenmux" ? "" : (typeof input.model === "string" ? input.model : "");
       let customProvider = null;
       if (selectedProvider === "custom") {
@@ -4655,8 +4667,7 @@ const server = createServer(async (req, res) => {
         await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider, threads[id]);
       } catch (error) {
         console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
-        if (selectedProvider !== "custom") throw error;
-        threads[id].lastChatProvider = "custom";
+        throw error;
       }
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
