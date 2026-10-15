@@ -3513,19 +3513,19 @@ const server = createServer(async (req, res) => {
             })
           : [];
         const preserveOpenAIBoundaries = provider === "custom" && customProvider?.apiFormat === "openai";
-        const requestMessages = [{ role: "system", content: [thread?.cacheSystem, reminderSystem].filter(Boolean).join("\\n\\n") }];
+        const requestMessages = [{ role: "system", content: [thread?.cacheSystem, reminderSystem].filter(Boolean).join("\n\n") }];
         for (const message of chatHistory) {
           const previous = requestMessages.at(-1);
-          if (!preserveOpenAIBoundaries && previous?.role === message.role) previous.content = `${previous.content}\\n${message.content}`;
+          if (!preserveOpenAIBoundaries && previous?.role === message.role) previous.content = `${previous.content}\n${message.content}`;
           else requestMessages.push({ ...message });
         }
-        const summary = thread?.contextSummary ? `<context_summary source="system">\\n${thread.contextSummary}\\n</context_summary>\\n\\n` : "";
-        const memoryQuery = [reminderUser.content, thread?.contextSummary, chatHistory.map((message) => message.content).join("\\n")].filter(Boolean).join("\\n");
+        const summary = thread?.contextSummary ? `<context_summary source="system">\n${thread.contextSummary}\n</context_summary>\n\n` : "";
+        const memoryQuery = [reminderUser.content, thread?.contextSummary, chatHistory.map((message) => message.content).join("\n")].filter(Boolean).join("\n");
         const memories = thread ? await searchMemories(memoryQuery) : [];
-        const memoryBlock = memories.length ? `<retrieved_memories source="system">\\n${memories.map((memory) => `- ${memory}`).join("\\n")}\\n</retrieved_memories>\\n\\n` : "";
+        const memoryBlock = memories.length ? `<retrieved_memories source="system">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>\n\n` : "";
         const reminderContent = `${summary}${memoryBlock}${reminderUser.content}`;
         const previous = requestMessages.at(-1);
-        if (previous?.role === "user") previous.content = `${previous.content}\\n\\n${reminderContent}`;
+        if (previous?.role === "user") previous.content = `${previous.content}\n\n${reminderContent}`;
         else requestMessages.push({ role: "user", content: reminderContent });
         try {
           const content = await callModel({
