@@ -3464,9 +3464,42 @@ const server = createServer(async (req, res) => {
       if (isPromiseAlarmAPI && !pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       return proxyPromiseAlarm(req, res, pathname, url.search);
     }
-    if (req.method === "POST" && ["/v1/internal/promise-alarm/fire", "/v1/internal/promise-alarm/usage"].includes(url.pathname)) {
+    if (req.method === "POST" && ["/v1/internal/promise-alarm/fire", "/v1/internal/promise-alarm/usage", "/v1/internal/promise-alarm/generate"].includes(url.pathname)) {
       if (!promiseAlarmAuthorized(req.headers.authorization)) return send(res, 401, { error: "unauthorized" });
       const input = await body(req);
+      if (url.pathname === "/v1/internal/promise-alarm/generate") {
+        const id = String(input.session_id || "default").slice(0, 80);
+        const messages = Array.isArray(input.messages) ? input.messages
+          .filter((message) => message && ["system", "user", "assistant"].includes(message.role))
+          .slice(-8)
+          .map((message) => ({ role: message.role, content: String(message.content || "").slice(0, 12000) })) : [];
+        if (!messages.length) return send(res, 400, { error: "messages_required" });
+        const threads = await readThreads();
+        const thread = threads[id];
+        const route = await resolveMurmurRoute(id);
+        if (!route && thread?.lastChatProvider === "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
+        const provider = route?.provider || thread?.lastChatProvider || "zenmux";
+        const model = route?.model || thread?.lastChatModel || "";
+        const customProvider = route?.customProvider || null;
+        if (provider === "custom" && (!customProvider || !model)) return send(res, 409, { error: "custom_model_route_unavailable" });
+        try {
+          const content = await callModel({
+            messages,
+            provider,
+            model,
+            customProvider,
+            maxOutputTokens: Math.min(800, Math.max(64, Number(input.max_tokens) || 400)),
+            cacheCurrentUser: false,
+            mcpThreadId: "",
+            mailThreadId: "",
+            autonomous: true
+          });
+          return send(res, 200, { content, provider, model });
+        } catch (error) {
+          console.warn(`[promise-alarm] scheduled generation failed provider=${provider} model=${model}: ${String(error.message || error).slice(0, 240)}`);
+          return send(res, 502, { error: "scheduled_generation_failed", detail: String(error.message || error).slice(0, 300) });
+        }
+      }
       if (url.pathname === "/v1/internal/promise-alarm/usage") {
         const record = input.record && typeof input.record === "object" ? input.record : {};
         if (!record.model || !Number.isFinite(Number(record.status))) return send(res, 400, { error: "invalid_promise_alarm_usage" });
