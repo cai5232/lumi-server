@@ -2459,6 +2459,9 @@ async function callProviderRoute(input, thread) {
   }
 
   const saved = await resolveMurmurRoute(thread?.id || "");
+  if (thread?.lastChatProvider === "custom" && saved?.provider !== "custom") {
+    throw new Error("call_custom_provider_route_unavailable");
+  }
   if (saved?.provider === "custom") {
     if (!saved.customProvider || !saved.model) throw new Error("call_custom_provider_or_model_required");
     return saved;
@@ -3478,7 +3481,7 @@ const server = createServer(async (req, res) => {
         const threads = await readThreads();
         const thread = threads[id];
         const route = await resolveMurmurRoute(id);
-        if (!route && thread?.lastChatProvider === "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
+        if (thread?.lastChatProvider === "custom" && route?.provider !== "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
         const provider = route?.provider || thread?.lastChatProvider || "zenmux";
         if (provider === "custom" && route?.provider !== "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
         const model = route?.model || thread?.lastChatModel || "";
