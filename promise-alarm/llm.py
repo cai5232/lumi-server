@@ -161,6 +161,41 @@ def chat(messages: list[dict], max_tokens: int = 600, temperature: float = 0.7, 
         raise LLMError("模型接口返回的格式不对。") from error
 
 
+def chat_via_lumi(session_id: str, messages: list[dict], max_tokens: int = 400) -> str:
+    """Generate scheduled reminder text through Lumi's per-chat model route."""
+    settings = config.load()
+    webhook_url = str(settings.get("webhook_url") or "")
+    if not webhook_url.endswith("/v1/internal/promise-alarm/fire"):
+        raise LLMError("Lumi model gateway is not configured.")
+    endpoint = webhook_url[:-len("/fire")] + "/generate"
+    payload = json.dumps({
+        "session_id": str(session_id or "default")[:80],
+        "messages": messages,
+        "max_tokens": max_tokens,
+    }, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        endpoint,
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {settings.get('webhook_token') or ''}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=100) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace").strip()
+        raise LLMError(f"Lumi model gateway returned {error.code}: {detail[:300]}") from error
+    except (URLError, TimeoutError) as error:
+        raise LLMError("Cannot reach Lumi model gateway.") from error
+    content = str(result.get("content") or "").strip()
+    if not content:
+        raise LLMError("Lumi model gateway returned an empty response.")
+    return content
+
+
 def chat_json(messages: list[dict], max_tokens: int = 300) -> dict:
     text = chat(messages, max_tokens=max_tokens, temperature=0.1, json_mode=True)
     fence = chr(96) * 3
