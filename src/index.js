@@ -118,8 +118,10 @@ function murmurEncryptionKeyCandidates() {
   }
   // Read routes encrypted before the optional dedicated key was configured.
   // Keep the existing server-secret-derived key as a decryption fallback.
-  const existingSecret = String(process.env.LUMI_PUSH_API_TOKEN || process.env.LUMI_MODEL_API_KEY || "");
-  if (existingSecret) candidates.push(createHash("sha256").update("lumi-murmur-route-v1\\0").update(existingSecret).digest());
+  for (const existingSecret of [process.env.LUMI_PUSH_API_TOKEN, process.env.LUMI_MODEL_API_KEY].filter(Boolean).map(String)) {
+    const key = createHash("sha256").update("lumi-murmur-route-v1\\0").update(existingSecret).digest();
+    if (!candidates.some((candidate) => candidate.equals(key))) candidates.push(key);
+  }
   if (!candidates.length) throw new Error("No server secret is available to encrypt the custom provider route");
   return candidates;
 }
@@ -146,20 +148,23 @@ function decryptMurmurProvider(value) {
   }
   throw lastError || new Error("Unable to decrypt custom provider route");
 }
-async function saveMurmurRoute(threadId, provider, model, customProvider = null) {
+async function saveMurmurRoute(threadId, provider, model, customProvider = null, thread = null) {
   const routes = await readMurmurRoutes();
-  routes[threadId] = { provider, model, updatedAt: Date.now(), ...(customProvider ? { customProvider: encryptMurmurProvider(customProvider) } : {}) };
+  const route = { provider, model, updatedAt: Date.now(), ...(customProvider ? { customProvider: encryptMurmurProvider(customProvider) } : {}) };
+  routes[threadId] = route;
+  // Keep an encrypted copy in the thread record so missing sidecars do not silently fall back.
+  if (thread && typeof thread === "object") thread.modelRoute = route;
   await mkdir(dataDir, { recursive: true });
   const temporaryPath = `${murmurRoutePath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(routes));
   await rename(temporaryPath, murmurRoutePath);
 }
-async function resolveMurmurRoute(threadId = "") {
+async function resolveMurmurRoute(threadId = "", thread = null) {
   const routes = await readMurmurRoutes();
-  const route = threadId ? routes[threadId] : Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+  const route = threadId
+    ? [routes[threadId], thread?.modelRoute].filter(Boolean).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0))[0]
+    : Object.values(routes).sort((a, b) => b.updatedAt - a.updatedAt)[0];
   if (!route) return null;
-  // An absent, malformed or rotated encryption key must not crash normal chat.
-  // Do not expose encrypted credentials or silently fall back to Zenmux for custom routes.
   if (route.customProvider) {
     try { return { provider: route.provider, model: route.model, customProvider: decryptMurmurProvider(route.customProvider) }; }
     catch (error) {
@@ -395,7 +400,7 @@ function finishUserConversation(thread, content) {
 
 async function generateEmotionMurmur(thread, current) {
   const state = sharedEmotionState;
-  const murmurRoute = await resolveMurmurRoute(thread.id).catch(error => { console.warn(`Murmur route unavailable: ${error.message}`); return null; });
+  const murmurRoute = await resolveMurmurRoute(thread.id, thread).catch(error => { console.warn(`Murmur route unavailable: ${error.message}`); return null; });
   const recent = (thread.messages || []).slice(-12).map((message) => `${message.role === "user" ? "用户" : "沈屿"}：${message.content}`).join("\n");
   const output = await callModel({
     temperature: 0.85,
@@ -489,7 +494,7 @@ async function generateSentinelWake(thread) {
   // Background wakes have no frontend payload: use the persisted, encrypted
   // conversation route rather than the cache provider (custom chats store
   // "zenmux" there for cache compatibility).
-  const savedRoute = await resolveMurmurRoute(thread.id);
+  const savedRoute = await resolveMurmurRoute(thread.id, thread);
   const route = savedRoute || {
     provider: thread.lastChatProvider || thread.cacheProvider || "zenmux",
     model: thread.lastChatModel || thread.cacheModel || ""
@@ -737,7 +742,7 @@ function formatSleepMemories(memories, limit = 12) {
 async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   await refreshMurmurState(thread.id);
   const prompt = SLEEP_STAGE_PROMPTS[stage];
-  const savedRoute = await resolveMurmurRoute(thread.id);
+  const savedRoute = await resolveMurmurRoute(thread.id, thread);
   const route = savedRoute || { provider: thread.lastChatProvider || thread.cacheProvider || "zenmux", model: thread.lastChatModel || thread.cacheModel || "" };
   if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
@@ -2468,7 +2473,7 @@ async function callProviderRoute(input, thread) {
     return { provider: "custom", model, customProvider: explicitCustom };
   }
 
-  const saved = await resolveMurmurRoute(thread?.id || "");
+  const saved = await resolveMurmurRoute(thread?.id || "", thread);
   if (thread?.lastChatProvider === "custom" && saved?.provider !== "custom") {
     throw new Error("call_custom_provider_route_unavailable");
   }
@@ -3490,13 +3495,22 @@ const server = createServer(async (req, res) => {
         if (!messages.length) return send(res, 400, { error: "messages_required" });
         const threads = await readThreads();
         const thread = threads[id];
-        const route = await resolveMurmurRoute(id);
-        if (thread?.lastChatProvider === "custom" && route?.provider !== "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
+        const route = await resolveMurmurRoute(id, thread);
+        if (thread?.lastChatProvider === "custom" && route?.provider !== "custom") {
+          console.warn("[promise-alarm] custom route unresolved session=" + id + " threadFound=" + Boolean(thread) + " threadProvider=" + (thread?.lastChatProvider || "none") + " embeddedRoute=" + Boolean(thread?.modelRoute) + " resolvedProvider=" + (route?.provider || "none"));
+          return send(res, 409, { error: "custom_model_route_unavailable" });
+        }
         const provider = route?.provider || thread?.lastChatProvider || "zenmux";
-        if (provider === "custom" && route?.provider !== "custom") return send(res, 409, { error: "custom_model_route_unavailable" });
+        if (provider === "custom" && route?.provider !== "custom") {
+          console.warn("[promise-alarm] custom route unresolved session=" + id + " threadFound=" + Boolean(thread) + " threadProvider=" + (thread?.lastChatProvider || "none"));
+          return send(res, 409, { error: "custom_model_route_unavailable" });
+        }
         const model = route?.model || thread?.lastChatModel || "";
         const customProvider = route?.customProvider || null;
-        if (provider === "custom" && (!customProvider || !model)) return send(res, 409, { error: "custom_model_route_unavailable" });
+        if (provider === "custom" && (!customProvider || !model)) {
+          console.warn("[promise-alarm] custom route incomplete session=" + id + " credentials=" + Boolean(customProvider) + " model=" + Boolean(model) + " encryptedRoute=" + Boolean(route?.customProvider));
+          return send(res, 409, { error: "custom_model_route_unavailable" });
+        }
         const reminderSystem = messages.find((message) => message.role === "system")?.content || "";
         const reminderUser = [...messages].reverse().find((message) => message.role === "user");
         if (!reminderUser?.content) return send(res, 400, { error: "messages_required" });
@@ -3761,7 +3775,10 @@ const server = createServer(async (req, res) => {
       if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
       try {
         const input = await body(req);
-        const route = await resolveMurmurRoute(String(input.threadId || ""));
+        const threadID = String(input.threadId || "");
+        const threads = await readThreads();
+        const thread = threads[threadID];
+        const route = await resolveMurmurRoute(threadID, thread);
         if (!route) return send(res, 409, { error: "model_route_unavailable" });
         const messages = Array.isArray(input.messages) ? input.messages.slice(-20).filter(item => item && ["system", "user", "assistant"].includes(item.role) && typeof item.content === "string").map(item => ({ role: item.role, content: item.content.slice(0, 12000) })) : [];
         if (!messages.length) return send(res, 400, { error: "messages_required" });
@@ -4635,7 +4652,7 @@ const server = createServer(async (req, res) => {
       // Missing encryption configuration must not turn an otherwise successful chat into HTTP 500.
       // Never persist custom API credentials unencrypted or silently route background jobs to Zenmux.
       try {
-        await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider);
+        await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider, threads[id]);
       } catch (error) {
         console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
         if (selectedProvider !== "custom") throw error;
