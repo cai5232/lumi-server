@@ -2754,7 +2754,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const speechTagsEnabled = allowSpeech && speechProvider === "elevenlabs" && ["eleven_v4", "eleven_v4_turbo"].includes(speechModel);
   const speechStyleContext = speechTagsEnabled
-    ? `<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs ${speechModel}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>`
+    ? `<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs ${speechModel}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。同一句或同一段里可以按语气变化使用多个标签，不设每句话或每段的标签数量上限。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>`
     : `<speech_style support_audio_tags="false">当前朗读服务不支持 ElevenLabs v4 音频标签。<speech> 中只写普通朗读文本，不要输出方括号音频标签。</speech_style>`;
   const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
