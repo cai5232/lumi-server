@@ -111,11 +111,12 @@ function normalizeCustomProvider(input) {
 
 function murmurEncryptionKeyCandidates() {
   const candidates = [];
-  const explicit = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "");
-  if (explicit) {
-    if (!/^[a-f0-9]{64}$/i.test(explicit)) throw new Error("LUMI_MURMUR_KEY_ENCRYPTION_KEY must be 32-byte hex");
-    candidates.push(Buffer.from(explicit, "hex"));
-  }
+  const explicit = String(process.env.LUMI_MURMUR_KEY_ENCRYPTION_KEY || "").trim();
+  // Treat this optional override as a 32-byte hex key only when valid. A stale
+  // or accidentally malformed variable must not break successful custom chats;
+  // the configured server secret remains the encryption fallback.
+  if (/^[a-f0-9]{64}$/i.test(explicit)) candidates.push(Buffer.from(explicit, "hex"));
+  else if (explicit) console.warn("[Murmur route] invalid optional encryption key ignored; using server-secret fallback");
   // Read routes encrypted before the optional dedicated key was configured.
   // Keep the existing server-secret-derived key as a decryption fallback.
   for (const existingSecret of [process.env.LUMI_PUSH_API_TOKEN, process.env.LUMI_MODEL_API_KEY].filter(Boolean).map(String)) {
