@@ -19,9 +19,7 @@ Zeabur 环境变量：
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
 - `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
-- `LUMI_CONTEXT_LIMIT`：可选，单个聊天窗口的估算 Token 上限，默认 `200000`
-- `LUMI_COMPACT_AT`：可选，达到上限的比例后触发压缩，默认 `0.86`
-- `LUMI_COMPACT_TAIL_TOKENS`：可选，压缩后保留的最近对话量，默认 `20000`
+- 上下文压缩：活跃对话累计约 `200000` Token 时触发；压缩时保留最近 `25` 轮用户/助手对话原文。触发阈值和保留轮数由后端代码固定。
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：可选，记忆库 API Key
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
