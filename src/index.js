@@ -44,11 +44,10 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-200k-25-turns";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
-const contextLimit = Number(process.env.LUMI_CONTEXT_LIMIT || 200000);
-const compactAtTokens = Math.min(Number(process.env.LUMI_COMPACT_AT_TOKENS || 50000), Math.floor(contextLimit * 0.35));
-const tailTokens = Number(process.env.LUMI_COMPACT_TAIL_TOKENS || 20000);
+const compactAtTokens = 200000;
+const preservedTailTurns = 25;
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/integrations/nook/recall";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
@@ -2416,26 +2415,23 @@ function compactionPlan(thread, pendingInput = "") {
   // history repeatedly and destroy an otherwise reusable prompt prefix.
   if (messageTokens(messages) + pendingTokens < compactAtTokens) return null;
 
-  // Preserve whole user/assistant turns in the recent cache-friendly tail.
-  let tail = [];
-  let tailCount = 0;
-  for (let index = messages.length - 1; index >= 0;) {
+  // Keep the latest complete user/assistant turns verbatim, independent of their token size.
+  const tailTurns = [];
+  for (let index = messages.length - 1; index >= 0 && tailTurns.length < preservedTailTurns;) {
     let start = index;
     if (messages[index].role === "assistant" && index > 0 && messages[index - 1].role === "user") start = index - 1;
     const turn = messages.slice(start, index + 1);
-    const cost = messageTokens(turn);
-    if (tail.length && tailCount + cost > Math.min(tailTokens, Math.floor(compactAtTokens * 0.5))) break;
-    tail.unshift(...turn);
-    tailCount += cost;
+    tailTurns.unshift(turn);
     index = start - 1;
   }
+  const tail = tailTurns.flat();
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return null;
-  return { tailMessageCount: tail.length, throughMessageId: older[older.length - 1].id };
+  return { tailMessageCount: tail.length, tailTurnCount: tailTurns.length, throughMessageId: older[older.length - 1].id };
 }
 
 function compactionDirective(plan) {
-  return `\n\n<internal_context_compaction>\n这是一次仅供系统保存的上下文维护。正常回复用户后，在回复最后额外输出一份完整的 <context_summary> XML。把当前对话历史中除最近 ${plan.tailMessageCount} 条消息外的所有内容压缩进去；若本轮系统上下文已有旧摘要，必须合并其中仍然有效的事实。摘要必须保留用户画像、关系动态、已确认事实和未完成事项，保持事实准确、不要编造。<context_summary> 必须是回复的最后内容，绝不能向用户解释或提及。\n</internal_context_compaction>`;
+  return `\n\n<internal_context_compaction>\n这是一次仅供系统保存的上下文维护。正常回复用户后，在回复最后额外输出一份完整的 <context_summary> XML。把当前对话历史中除最近 ${plan.tailTurnCount} 轮原文外的所有内容压缩进去；若本轮系统上下文已有旧摘要，必须合并其中仍然有效的事实。摘要必须保留用户画像、关系动态、已确认事实和未完成事项，保持事实准确、不要编造。<context_summary> 必须是回复的最后内容，绝不能向用户解释或提及。\n</internal_context_compaction>`;
 }
 
 function chooseEmojiFromMood(mood, faces, reply) {
@@ -4114,7 +4110,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTokens: tailTokens },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTurns },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
