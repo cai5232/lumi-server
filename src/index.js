@@ -44,7 +44,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-200k-25-turns";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-200k-25-turns-upstream-trigger";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const compactAtTokens = 200000;
 const preservedTailTurns = 25;
@@ -2406,7 +2406,7 @@ async function writeMemory(content, threadId) {
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
-function compactionPlan(thread, pendingInput = "") {
+function compactionPlan(thread) {
   const messages = contextMessages(thread);
   // Trigger from the upstream-reported input size of the previous request.
   // That is the same token count shown by the provider dashboard and includes
@@ -2513,7 +2513,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Instead, let the cacheable user reply emit a private summary at its end.
   // Phone turns should stay fast and must not trigger a separate context-compression
   // request or a memory lookup. The normal chat cache remains the stable prefix.
-  const pendingCompaction = proactive || callMode ? null : compactionPlan(thread, input);
+  const pendingCompaction = proactive || callMode ? null : compactionPlan(thread);
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
