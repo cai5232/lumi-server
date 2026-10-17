@@ -2546,7 +2546,6 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     try { compactionApplied = await compactContext(thread, compaction, { model, customProvider }); }
     catch (error) { console.warn("context compaction failed; continuing with existing context: " + String(error.message || error).slice(0, 300)); }
   }
-  const pendingCompaction = null;
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
@@ -2905,7 +2904,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   let raw = await callModel({
     // Calls use the same model output settings as ordinary chats; do not add a
     // separate call-specific token ceiling.
-    maxOutputTokens: proactive ? undefined : undefined,
+    maxOutputTokens: undefined,
     // Voice calls may tell long stories; do not inherit the ordinary chat 8192-token default.
     useMaximumModelOutput: proactive || callMode,
     messages: cacheRequestMessages,
