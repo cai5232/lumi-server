@@ -57,10 +57,30 @@ test('settings endpoint validates values and uses persisted response', async () 
     assert.equal(saved.status, 200);
     assert.equal(saved.value.triggerTokensEstimate, 120000);
     assert.equal((await context.endpoint({ method: 'GET' })).value.triggerRatio, 0.6);
+    assert.equal((await context.endpoint({ method: 'PUT', input: { triggerTokens: 9000 } })).status, 400);
+    const exact = await context.endpoint({ method: 'PUT', input: { triggerTokens: 45001 } });
+    assert.equal(exact.status, 200);
+    assert.equal(exact.value.triggerTokensEstimate, 45001);
     assert.equal((await context.endpoint({ method: 'DELETE' })).status, 405);
     const auth = source.slice(source.indexOf('    const callRoute ='), source.indexOf('    if (url.pathname === "/v1/internal/murmur/generate")'));
     vm.runInContext(`function authorize(req) { ${auth} return { status: 200 }; }`, context);
     context.pushRequestAuthorized = () => false;
     assert.equal(context.authorize({}).status, 401);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('exact token thresholds below 50 percent persist without rounding', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'lumi-token-threshold-'));
+  try {
+    const options = { path: join(directory, 'settings.json'), contextLimitTokens: 200000, defaultTriggerRatio: 0.85 };
+    await writeFile(options.path, JSON.stringify({ triggerRatio: 0.75 }));
+    const store = await openCompressionSettings(options);
+    assert.equal(store.snapshot.triggerTokensEstimate, 150000);
+    await store.saveTokens(45001);
+    const restored = await openCompressionSettings(options);
+    assert.equal(restored.snapshot.triggerTokensEstimate, 45001);
+    assert.equal(restored.snapshot.triggerRatio, 45001 / 200000);
+    for (const invalid of [9999,190001,45000.5,'45000',null]) await assert.rejects(store.saveTokens(invalid));
+    assert.equal(store.snapshot.triggerTokensEstimate, 45001);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

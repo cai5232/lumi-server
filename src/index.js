@@ -4138,6 +4138,10 @@ const server = createServer(async (req, res) => {
       if (req.method === "GET") return send(res, 200, compressionSettings.snapshot);
       if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
       const input = await body(req);
+      if (Object.hasOwn(input, "triggerTokens")) {
+        if (!compressionSettings.validTokens(input.triggerTokens)) return send(res, 400, { error: `压缩触发用量需在 ${compressionSettings.snapshot.minimumTriggerTokens} 到 ${compressionSettings.snapshot.maximumTriggerTokens} tokens 之间。` });
+        return send(res, 200, await compressionSettings.saveTokens(input.triggerTokens));
+      }
       if (!validCompressionRatio(input.triggerRatio)) return send(res, 400, { error: "压缩触发比例需在 50% 到 95% 之间。" });
       return send(res, 200, await compressionSettings.save(input.triggerRatio));
     }

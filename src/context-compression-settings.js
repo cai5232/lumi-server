@@ -7,24 +7,34 @@ export function validCompressionRatio(value) {
 }
 
 export async function openCompressionSettings({ path, contextLimitTokens, defaultTriggerRatio }) {
-  let triggerRatio = defaultTriggerRatio;
+  const minimumTriggerTokens = Math.min(10000, Math.floor(contextLimitTokens * 0.5));
+  const maximumTriggerTokens = Math.floor(contextLimitTokens * 0.95);
+  const validTokens = value => Number.isInteger(value) && value >= minimumTriggerTokens && value <= maximumTriggerTokens;
+  let triggerTokens = Math.floor(contextLimitTokens * defaultTriggerRatio);
   try {
     const saved = JSON.parse(await readFile(path, 'utf8'));
-    if (validCompressionRatio(saved.triggerRatio)) triggerRatio = saved.triggerRatio;
+    if (validTokens(saved.triggerTokens)) triggerTokens = saved.triggerTokens;
+    else if (validCompressionRatio(saved.triggerRatio)) triggerTokens = Math.floor(contextLimitTokens * saved.triggerRatio);
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('Context compression settings could not be loaded; using the configured default.');
   }
-  const snapshot = () => ({ triggerRatio, defaultTriggerRatio, contextLimitTokens, triggerTokensEstimate: Math.floor(contextLimitTokens * triggerRatio) });
+  const snapshot = () => ({ triggerRatio: triggerTokens / contextLimitTokens, defaultTriggerRatio, contextLimitTokens, triggerTokensEstimate: triggerTokens, minimumTriggerTokens, maximumTriggerTokens });
+  async function saveTokens(value) {
+    if (!validTokens(value)) throw new Error('invalid_compression_tokens');
+    await mkdir(dirname(path), { recursive: true });
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    await writeFile(temporary, JSON.stringify({ triggerTokens: value }), { mode: 0o600 });
+    await rename(temporary, path);
+    triggerTokens = value;
+    return snapshot();
+  }
   return {
     get snapshot() { return snapshot(); },
+    validTokens,
+    saveTokens,
     async save(value) {
       if (!validCompressionRatio(value)) throw new Error('invalid_compression_ratio');
-      await mkdir(dirname(path), { recursive: true });
-      const temporary = `${path}.${randomUUID()}.tmp`;
-      await writeFile(temporary, JSON.stringify({ triggerRatio: value }), { mode: 0o600 });
-      await rename(temporary, path);
-      triggerRatio = value;
-      return snapshot();
+      return saveTokens(Math.floor(contextLimitTokens * value));
     }
   };
 }
