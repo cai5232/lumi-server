@@ -1,3 +1,4 @@
+import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
@@ -51,8 +52,8 @@ const screenPeekTriggerAt = new Map();
 const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
-const compactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
-const compactAtTokens = Math.floor(contextLimitTokens * compactAtRatio);
+const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
+const compressionSettings = await openCompressionSettings({ path: join(dataDir, "context-compression.json"), contextLimitTokens, defaultTriggerRatio: defaultCompactAtRatio });
 const preservedTailMinTurns = 10;
 const preservedTailMaxTurns = 15;
 const preservedTailTargetTokens = 20_000;
@@ -2417,7 +2418,7 @@ async function writeMemory(content, threadId) {
 function compactionPlan(thread) {
   const messages = contextMessages(thread);
   const upstreamInputTokens = Number(thread.lastMeasuredInputTokens || 0);
-  if (upstreamInputTokens < compactAtTokens) return null;
+  if (upstreamInputTokens < compressionSettings.snapshot.triggerTokensEstimate) return null;
   const tailTurns = [];
   let tailTokenCount = 0;
   for (let index = messages.length - 1; index >= 0 && tailTurns.length < preservedTailMaxTurns;) {
@@ -4017,7 +4018,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, await checkCacheKeepalive());
     }
     const callRoute = /^\/v1\/chats\/[^/]+\/calls(?:\/[^/]+(?:\/(?:answer|messages|end))?)?$/.test(url.pathname);
-    if ((["/v1/settings/proactive", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
+    if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
 
@@ -4132,6 +4133,13 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/subscription/usage" && req.method === "GET") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       return send(res, 200, await zenMuxSubscriptionUsage());
+    }
+    if (url.pathname === "/v1/settings/context-compression") {
+      if (req.method === "GET") return send(res, 200, compressionSettings.snapshot);
+      if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+      const input = await body(req);
+      if (!validCompressionRatio(input.triggerRatio)) return send(res, 400, { error: "压缩触发比例需在 50% 到 95% 之间。" });
+      return send(res, 200, await compressionSettings.save(input.triggerRatio));
     }
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
     if (url.pathname === "/v1/push/status" && req.method === "GET") {
@@ -4288,7 +4296,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, contextLimitTokens, triggerRatio: compactAtRatio, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
