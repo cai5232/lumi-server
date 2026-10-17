@@ -57,7 +57,7 @@ test('settings endpoint validates values and uses persisted response', async () 
     assert.equal(saved.status, 200);
     assert.equal(saved.value.triggerTokensEstimate, 120000);
     assert.equal((await context.endpoint({ method: 'GET' })).value.triggerRatio, 0.6);
-    assert.equal((await context.endpoint({ method: 'PUT', input: { triggerTokens: 9000 } })).status, 400);
+    assert.equal((await context.endpoint({ method: 'PUT', input: { triggerTokens: 0 } })).status, 400);
     const exact = await context.endpoint({ method: 'PUT', input: { triggerTokens: 45001 } });
     assert.equal(exact.status, 200);
     assert.equal(exact.value.triggerTokensEstimate, 45001);
@@ -80,7 +80,11 @@ test('exact token thresholds below 50 percent persist without rounding', async (
     const restored = await openCompressionSettings(options);
     assert.equal(restored.snapshot.triggerTokensEstimate, 45001);
     assert.equal(restored.snapshot.triggerRatio, 45001 / 200000);
-    for (const invalid of [9999,190001,45000.5,'45000',null]) await assert.rejects(store.saveTokens(invalid));
+    for (const invalid of [0,-1,Number.MAX_SAFE_INTEGER + 1,45000.5,'45000',null]) await assert.rejects(store.saveTokens(invalid));
     assert.equal(store.snapshot.triggerTokensEstimate, 45001);
+    for (const threshold of [300000, 500000]) {
+      await store.saveTokens(threshold);
+      assert.equal((await openCompressionSettings(options)).snapshot.triggerTokensEstimate, threshold);
+    }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

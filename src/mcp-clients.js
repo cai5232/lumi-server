@@ -101,6 +101,25 @@ export class McpClientStore {
     });
     this.queue = action.catch(() => {}); return action;
   }
+  async mergeDiscovery(discovered) {
+    const action = this.queue.then(async () => {
+      const current = await this.read();
+      let changed = false;
+      const servers = current.servers.map(server => {
+        const result = discovered.find(item => item.id === server.id && item.url === server.url && JSON.stringify(item.headers || {}) === JSON.stringify(server.headers || {}));
+        if (!server.enabled || !result) return server;
+        changed = true;
+        return { ...server, tools: result.tools, connectedAt: result.connectedAt, error: "" };
+      });
+      if (!changed) return current;
+      const next = { ...current, servers, revision: current.revision + 1 };
+      await mkdir(dirname(this.path), { recursive: true });
+      const temporary = `${this.path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify(next, null, 2)); await rename(temporary, this.path);
+      return next;
+    });
+    this.queue = action.catch(() => {}); return action;
+  }
   async setMailEnabled(enabled) {
     const action = this.queue.then(async () => {
       const current = await this.read();

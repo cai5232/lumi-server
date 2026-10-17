@@ -74,3 +74,17 @@ test("Engawa model calls receive only public read tools while settings retain th
   assert.deepEqual(modelToolsForServer({ id: ENGAWA_SERVER_ID, tools }).map((tool) => tool.name), ENGAWA_READ_ONLY_TOOLS);
   assert.equal(modelToolsForServer({ id: "other", tools }).length, tools.length);
 });
+
+test('background tool discovery cannot restore a server disabled or edited during connection', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'lumi-mcp-discovery-'));
+  try {
+    const store = new McpClientStore(join(directory, 'clients.json'));
+    const original = {id:'custom-discovery',name:'Original',url:'https://example.com/mcp',enabled:true,headers:{},tools:[]};
+    await store.save({servers:[original]});
+    await store.save({servers:[{...original,enabled:false,name:'Disabled'}]});
+    await store.mergeDiscovery([{...original,tools:[{name:'new_tool'}],connectedAt:new Date().toISOString()}]);
+    const current = await store.read();
+    const server = current.servers.find(item=>item.id===original.id);
+    assert.equal(server.enabled,false);assert.equal(server.name,'Disabled');assert.equal(server.tools.length,0);
+  } finally { await rm(directory,{recursive:true,force:true}); }
+});

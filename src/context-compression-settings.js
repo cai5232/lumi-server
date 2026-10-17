@@ -7,9 +7,9 @@ export function validCompressionRatio(value) {
 }
 
 export async function openCompressionSettings({ path, contextLimitTokens, defaultTriggerRatio }) {
-  const minimumTriggerTokens = Math.min(10000, Math.floor(contextLimitTokens * 0.5));
-  const maximumTriggerTokens = Math.floor(contextLimitTokens * 0.95);
-  const validTokens = value => Number.isInteger(value) && value >= minimumTriggerTokens && value <= maximumTriggerTokens;
+  const minimumTriggerTokens = 1;
+  const maximumTriggerTokens = Number.MAX_SAFE_INTEGER;
+  const validTokens = value => Number.isSafeInteger(value) && value >= minimumTriggerTokens && value <= maximumTriggerTokens;
   let triggerTokens = Math.floor(contextLimitTokens * defaultTriggerRatio);
   try {
     const saved = JSON.parse(await readFile(path, 'utf8'));

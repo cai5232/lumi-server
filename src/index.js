@@ -1,3 +1,6 @@
+import { createModelRequestStore } from "./model-request-store.js";
+import { relayEndpoint, requestRelay } from "./relay-transport.js";
+import { responseThinking } from "./response-thinking.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
@@ -33,7 +36,7 @@ const threadPath = join(dataDir, "threads.json");
 const emotionStatePath = join(dataDir, "emotion-state.json");
 const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
-const modelRequestLogsPath = join(dataDir, "model-request-logs.json");
+const modelRequestStore = createModelRequestStore(dataDir);
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const sentinelActivityPath = join(dataDir, "sentinel-activity.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
@@ -49,7 +52,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -72,6 +75,8 @@ const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS |
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
 let backgroundPulseInFlight = false;
+// Process-local locks recover automatically after a restart; persisted running flags do not.
+const sleepDreamsInFlight = new Set();
 const proactiveDiagnostics = { lastCheckAt: null, lastReason: "not_checked", lastAttemptAt: null, lastSuccessAt: null, lastError: null, checks: 0, attempts: 0 };
 let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
@@ -214,7 +219,7 @@ async function connectPendingMcpServers(settings) {
       return false;
     }
   }));
-  return results.some(Boolean) ? mcpClientStore.save(settings) : settings;
+  return results.some(Boolean) ? mcpClientStore.mergeDiscovery(pending.filter((_, index) => results[index])) : settings;
 }
 
 async function mcpSettingsResponse() {
@@ -238,7 +243,7 @@ async function mcpSettingsResponse() {
 async function listProviderModels(config) {
   try {
     const baseURL = String(config.url).replace(/\/chat\/completions\/?$/i, "").replace(/\/$/, "");
-    const response = await fetch(`${baseURL}/models`, { headers: { authorization: `Bearer ${config.key}` } });
+    const response = await fetch(relayEndpoint(baseURL, "/models"), { headers: { authorization: `Bearer ${config.key}`, ...(config.apiFormat === "anthropic" ? { "x-api-key": config.key, "anthropic-version": "2023-06-01" } : {}) }, signal: AbortSignal.timeout(15000) });
     const data = await response.json().catch(() => ({}));
     const models = Array.isArray(data?.data) ? data.data.map((item) => item.id).filter(Boolean) : [];
     return models;
@@ -720,8 +725,7 @@ async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
       const validChanges = Object.fromEntries(Object.entries(changes).filter(([drive, delta]) => Object.hasOwn(EMOTION_DRIVES, drive) && Number.isFinite(Number(delta))).map(([drive, delta]) => [drive, Math.max(-0.2, Math.min(0.2, Number(delta)))]));
       (sharedEmotionState.pendingMurmurUpdates ||= []).push({ threadID, payload: { event_id: randomUUID(), initial_drives: initialDrives, changes: validChanges, ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}) } });
       await saveEmotionState();
-      try { await flushMurmurUpdates(); }
-      catch (error) { console.warn(`Murmur emotion update queued for retry: ${error.message}`); }
+      void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
     }
     return parsed;
   } catch {
@@ -780,7 +784,8 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
 
 async function runSleepDreamSegment(thread, activity, now) {
   const sleep = thread.sleep;
-  if (sleep.running) return;
+  if (sleepDreamsInFlight.has(thread.id)) return;
+  sleepDreamsInFlight.add(thread.id);
   sleep.running = true;
   try {
     const context = await buildAutonomousContext(thread);
@@ -814,6 +819,8 @@ async function runSleepDreamSegment(thread, activity, now) {
       retrievedMemories: context.memories.join("；")
     }, seedIds);
     sleep.dreamArc = rem.content;
+    activity.lastDreamAt = new Date(now).toISOString();
+    activity.lastSleepError = null;
     void archiveDreamInNocturne(thread, rem);
     recordActivityEvent(thread, "dream", "做梦", rem.content, new Date(now));
     activity.dreamCycle = cycle + 1;
@@ -841,6 +848,7 @@ async function runSleepDreamSegment(thread, activity, now) {
     return null;
   } finally {
     sleep.running = false;
+    sleepDreamsInFlight.delete(thread.id);
   }
 }
 
@@ -954,16 +962,18 @@ async function runBackgroundPulse() {
           proactive.nextDueAt = activity.nextWakeAt;
         } catch (error) {
           console.warn(`sleep reflection failed: ${error.message}`);
+          activity.lastSleepError = String(error.message).slice(0, 500);
           activity.sleepUntil = new Date(now + 5 * 60_000).toISOString();
           activity.sleepStage = "reflection_retry";
         }
         changed = true;
-      } else if (activity.nextDreamAt && Date.parse(activity.nextDreamAt) <= now && !thread.sleep?.running) {
+      } else if (activity.nextDreamAt && Date.parse(activity.nextDreamAt) <= now && !sleepDreamsInFlight.has(thread.id)) {
         try {
           const nightmarePush = await runSleepDreamSegment(thread, activity, now);
           if (nightmarePush) pendingPushes.push({ threadId: thread.id, ...nightmarePush });
         } catch (error) {
           console.warn(`sleep dream segment failed: ${error.message}`);
+          activity.lastSleepError = String(error.message).slice(0, 500);
           activity.nextDreamAt = new Date(now + 5 * 60_000).toISOString();
           activity.sleepStage = "dream_retry";
         }
@@ -1246,22 +1256,8 @@ async function saveCacheStats() {
   await rename(temporaryPath, cacheStatsPath);
 }
 
-let modelRequestLogsWriteQueue = Promise.resolve();
-
 async function recordModelRequest(record) {
-  modelRequestLogsWriteQueue = modelRequestLogsWriteQueue.catch(() => {}).then(async () => {
-    await mkdir(dataDir, { recursive: true });
-    let requests = [];
-    try { requests = JSON.parse(await readFile(modelRequestLogsPath, "utf8")).requests || []; }
-    catch (error) { if (error?.code !== "ENOENT") console.warn(`model request logs unavailable: ${error.message}`); }
-    const cutoff = Date.now() - 100 * 24 * 60 * 60 * 1000;
-    requests.push(record);
-    requests = requests.filter((item) => Date.parse(item.createdAt) >= cutoff).slice(-20_000);
-    const temporaryPath = `${modelRequestLogsPath}.${randomUUID()}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify({ requests }), { mode: 0o600 });
-    await rename(temporaryPath, modelRequestLogsPath);
-  });
-  return modelRequestLogsWriteQueue;
+  return modelRequestStore.append(record);
 }
 
 function modelRequestLogJSON(value) {
@@ -1451,8 +1447,13 @@ function stripPrivateReasoning(value) {
 }
 
 function extractThinkingText(value) {
-  const match = String(value || "").match(/<thinking\b[^>]*>([\s\S]*?)<\/thinking>/i);
-  return match?.[1]?.trim() || null;
+  return [...String(value || "").matchAll(/<(thinking|think|analysis|reasoning)\b[^>]*>([\s\S]*?)<\/\1>/gi)].map(match => match[2].trim()).filter(Boolean).join("\n\n") || null;
+}
+
+function publicChatMessage(value) {
+  const { modelContent, requestId, ...message } = value;
+  if (message.role === "assistant" && !message.thinking && modelContent) message.thinking = extractThinkingText(modelContent);
+  return message;
 }
 
 function stripInternalContextMarkup(value) {
@@ -1868,23 +1869,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeAnthropic = customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
-  const apiURL = nativeAnthropic
-    ? customProvider
-      ? normalizedBaseURL + (customProvider.chatPath || "/messages")
-      : directAnthropicAPI
-      ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
-      : /\/api\/v1$/i.test(normalizedBaseURL)
-        ? normalizedBaseURL.replace(/\/api\/v1$/i, "/api/anthropic/v1/messages")
-        : /\/messages$/i.test(normalizedBaseURL)
-          ? normalizedBaseURL
-          : new URL(normalizedBaseURL).hostname.toLowerCase() === "api.treegpt.cc"
-            ? normalizedBaseURL.replace(/\/v1$/i, "") + "/v1/messages"
-            : normalizedBaseURL + "/messages"
-    : customProvider
-      ? normalizedBaseURL + (customProvider.chatPath || "/chat/completions")
-      : /\/chat\/completions$/i.test(normalizedBaseURL)
-      ? normalizedBaseURL
-      : normalizedBaseURL + "/chat/completions";
+  const apiURL = relayEndpoint(normalizedBaseURL, customProvider.chatPath || (nativeAnthropic ? "/messages" : "/chat/completions"));
   const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
   const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
 
@@ -1914,7 +1899,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const preparedMessages = customProvider && !nativeAnthropic
     ? providerMessages
     : cacheMessages(providerMessages, model, cacheCurrentUser);
-  const mcpSettings = mcpThreadId ? await connectPendingMcpServers(await mcpClientStore.read()) : { servers: [] };
+  const mcpSettings = mcpThreadId ? mailSettings : { servers: [] };
   const mcpServers = mcpSettings.servers.filter(server => server.enabled);
   // Keep Anthropic's remote MCP connector for server-configured providers.
   // Custom Anthropic relays instead receive ordinary Anthropic tool schemas;
@@ -1993,7 +1978,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Reserve at least 1024 tokens for the visible answer; small-output tasks
   // such as calendar extraction should not send an unusable thinking budget.
   const nativeThinkingBudget = Math.min(configuredThinkingBudget, outputTokenLimit - 1024);
-  const requestBody = nativeAnthropic
+  let requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
@@ -2025,21 +2010,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
 
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const startedAt = Date.now();
-  const response = await fetch(apiURL, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(nativeAnthropic && (provider === "zenmux" || directAnthropicAPI || customProvider?.apiFormat === "anthropic") ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` }),
-      ...(nativeAnthropic ? {
-        "anthropic-version": "2023-06-01",
-        ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {})
-      } : {})
-    },
-    body: JSON.stringify(requestBody)
-  });
-  const raw = await response.text();
-  let data = {};
-  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { error: raw }; }
+  const relay = await requestRelay({ url: apiURL, body: requestBody, headers: {
+    "content-type": "application/json",
+    ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
+    ...(nativeAnthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {}) } : {})
+  } });
+  const { response, data } = relay;
+  requestBody = relay.requestBody;
   const providerUsage = data?.usage || {};
   const cachedTokens = cacheUsage(providerUsage).read;
   await recordModelRequest({
@@ -2055,7 +2032,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     requestJSON: modelRequestLogJSON(requestBody),
     responseJSON: modelRequestLogJSON(data)
   }).catch((error) => console.warn(`model request log save skipped: ${error.message}`));
-  if (!response.ok) {
+  if (!response.ok || data?.error) {
     const rawProviderError = data?.error?.message || data?.error || data?.message || `模型服务返回 ${response.status}`;
     const providerError = typeof rawProviderError === "string" ? rawProviderError : JSON.stringify(rawProviderError);
     const upstreamRequestId = response.headers.get("request-id") || response.headers.get("x-request-id") || response.headers.get("anthropic-request-id") || "";
@@ -2071,7 +2048,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
       }
     }
-    throw new Error(providerError);
+    throw new Error(`模型线路 HTTP ${response.ok ? 502 : response.status}：${providerError}`);
   }
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
@@ -2165,7 +2142,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       ?? data?.choices?.[0]?.text
       ?? data?.output_text
       ?? data?.content;
-  const nativeThinking = nativeAnthropic ? (data?.content || []).filter((block) => block.type === "thinking").map((block) => block.thinking || "").filter(Boolean).join("\n") : "";
+  const nativeThinking = responseThinking(data);
   const content = Array.isArray(rawContent)
     ? rawContent
       .filter((block) => typeof block === "string" || !/^(thinking|reasoning|analysis)$/i.test(String(block?.type || block?.role || "")))
@@ -2867,7 +2844,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       thread.cacheKeepaliveMessages.at(-1)?.content === previousUserContent) &&
     thread.cacheSystem === cacheSystem &&
     (!model || model === thread.cacheModel) &&
-    (!thread.cacheProvider || provider === thread.cacheProvider)
+    (!thread.cacheProvider || provider === thread.cacheProvider) &&
+    thread.cacheRouteSignature === createHash("sha256").update(JSON.stringify([customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, model])).digest("hex")
     ? [
         ...thread.cacheKeepaliveMessages,
         { role: "assistant", content: thread.cacheKeepaliveAssistantContent }
@@ -3693,9 +3671,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (req.method === "GET" && url.pathname === "/v1/usage/requests") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
-      let requests = [];
-      try { requests = JSON.parse(await readFile(modelRequestLogsPath, "utf8")).requests || []; }
-      catch (error) { if (error?.code !== "ENOENT") console.warn(`model request logs unavailable: ${error.message}`); }
+      const requests = await modelRequestStore.read();
       const now = new Date();
       const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
       const dayKey = (date) => date.toISOString().slice(0, 10);
@@ -4847,14 +4823,9 @@ const server = createServer(async (req, res) => {
       const before = new Date(url.searchParams.get("before") || "").valueOf();
       const all = Array.isArray(threads[id].messages) ? threads[id].messages : [];
       const eligible = Number.isFinite(before) ? all.filter((message) => new Date(message.createdAt).valueOf() < before) : all;
-      const messages = eligible.slice(-limit).map((message) => ({
-        ...message,
-        ...(message.role === "assistant" && !message.thinking && message.modelContent
-          ? { thinking: extractThinkingText(message.modelContent) }
-          : {})
-      }));
+      const messages = eligible.slice(-limit).map(publicChatMessage);
       const hasMore = eligible.length > messages.length;
-      return send(res, 200, { ...threads[id], messages, hasMore, nextBefore: hasMore ? messages[0]?.createdAt || null : null });
+      return send(res, 200, { id: threads[id].id, title: threads[id].title, messages, hasMore, nextBefore: hasMore ? messages[0]?.createdAt || null : null });
     }
     if (req.method === "POST" && match[2] === "/calls") {
       const input = await body(req);
@@ -4981,19 +4952,14 @@ const server = createServer(async (req, res) => {
       threads[id].cacheRequestedSystemPrompt = typeof input.systemPrompt === "string" ? input.systemPrompt : "";
       const selectedConfig = selectedProvider === "custom" ? null : providerConfig(selectedProvider, selectedModel);
       threads[id].cacheModel = selectedModel || selectedConfig?.model || process.env.LUMI_MODEL_NAME || "";
-      threads[id].cacheProvider = selectedProvider === "custom" ? "zenmux" : selectedProvider;
+      threads[id].cacheProvider = selectedProvider;
+      threads[id].cacheRouteSignature = createHash("sha256").update(JSON.stringify([customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, selectedModel])).digest("hex");
       threads[id].lastChatProvider = selectedProvider;
       threads[id].lastChatModel = selectedModel || selectedConfig?.model || "";
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
       threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
       // A successful compaction removes old messages from the active context; never retain the pre-compaction cache snapshot.
       if (generated.compactionApplied) {
-        threads[id].cacheKeepaliveMessages = null;
-        threads[id].cacheKeepaliveAssistantContent = "";
-        threads[id].cacheKeepaliveSnapshotKind = "";
-        threads[id].cacheKeepalivePrefixHash = "";
-        threads[id].cacheKeepaliveAt = 0;
-      } else if (selectedProvider === "custom") {
         threads[id].cacheKeepaliveMessages = null;
         threads[id].cacheKeepaliveAssistantContent = "";
         threads[id].cacheKeepaliveSnapshotKind = "";
@@ -5085,8 +5051,8 @@ const server = createServer(async (req, res) => {
       // Normal replies can finish while the iOS app is suspended. Reuse the
       // registered APNs destination so the user is notified when the reply is ready.
       if (invite) await sendIncomingCallPush(id, invite);
-      else await sendProactivePush(id, visibleContent);
-      return { userMessage: storedUserMessage, assistantMessage, updatedOptionMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, aiRemark: threads[id].aiRemark || "", speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
+      else void sendProactivePush(id, visibleContent).catch(error => console.warn(`reply push failed: ${error.message}`));
+      return { userMessage: publicChatMessage(storedUserMessage), assistantMessage: publicChatMessage(assistantMessage), updatedOptionMessage, galleryItems, galleryMessages, memorySaved: generated.memorySaved, aiRemark: threads[id].aiRemark || "", speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? speechText : null, speechError };
       })();
       recentMessageRequests.set(key, { fingerprint, result, expiresAt: Infinity });
       try {
@@ -5168,3 +5134,15 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 setInterval(() => { void checkCacheKeepalive(); }, 60_000);
 setInterval(() => { runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, backgroundPulseIntervalMs);
+
+// Discover unavailable tool servers in the background rather than adding their timeout to every chat.
+let mcpDiscoveryInFlight = false;
+async function refreshMcpConnections() {
+  if (mcpDiscoveryInFlight) return;
+  mcpDiscoveryInFlight = true;
+  try { await connectPendingMcpServers(await mcpClientStore.read()); }
+  catch (error) { console.warn(`MCP background discovery failed: ${error.message}`); }
+  finally { mcpDiscoveryInFlight = false; }
+}
+setTimeout(() => { void refreshMcpConnections(); }, 0).unref();
+setInterval(() => { void refreshMcpConnections(); }, 5 * 60_000).unref();

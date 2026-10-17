@@ -1,0 +1,21 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import vm from 'node:vm';
+const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
+test('stale persisted dream running flag recovers; live generation still locks and clears on error',async()=>{
+ const start=source.indexOf('async function runSleepDreamSegment(');
+ const fn=source.slice(start,source.indexOf('\n\nfunction sleepRecallShards',start));
+ let release, calls=0;
+ const context={Set,Date,Math,sleepDreamsInFlight:new Set(),sleepDreamIntervalMinutes:120,buildAutonomousContext:async()=>({raw:[],summary:'',memories:[]}),sleepMemories:()=>[],salience:()=>0,formatSleepMemories:()=>'',runSleepStage:async()=>{calls++;await new Promise(r=>{release=r});return {content:'一段新梦境'}},archiveDreamInNocturne:async()=>{},recordActivityEvent:()=>{},shouldTriggerNightmare:()=>false,sleepNightmareProbability:0};
+ vm.createContext(context);vm.runInContext(fn,context);
+ const thread={id:'default',sleep:{running:true,semantic:[],dreamArc:''}},activity={dreamCycle:0,lastSleepError:'old error'};
+ const running=context.runSleepDreamSegment(thread,activity,Date.now());
+ while(!release)await new Promise(r=>setImmediate(r));
+ await context.runSleepDreamSegment(thread,activity,Date.now());assert.equal(calls,1);
+ release();await running;
+ assert.equal(activity.dreamCycle,1);assert.equal(activity.lastSleepError,null);assert.ok(activity.lastDreamAt);assert.equal(thread.sleep.running,false);assert.equal(context.sleepDreamsInFlight.size,0);
+ context.runSleepStage=async()=>{throw new Error('quota exhausted')};
+ await assert.rejects(context.runSleepDreamSegment(thread,activity,Date.now()),/quota exhausted/);
+ assert.equal(context.sleepDreamsInFlight.size,0);assert.equal(thread.sleep.running,false);
+});
