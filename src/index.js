@@ -3269,6 +3269,8 @@ function sleepRadioHanCount(value) { return (String(value).match(/[\p{Script=Han
 async function generateSleepRadioEpisode(settings) {
   const threads = await readThreads();
   const thread = threads.default || seed();
+  const route = await callProviderRoute(settings, { ...thread, id: "default" });
+  if (!route.customProvider || !route.model) throw new Error("请先在聊天设置中选择自定义模型线路，并发送一条消息后重试电台。");
   const context = [
     thread.contextSummary ? "近期对话摘要：\n" + String(thread.contextSummary).slice(-8000) : "",
     (thread.messages || []).filter(item => ["user", "assistant"].includes(item.role)).slice(-24)
@@ -3276,9 +3278,9 @@ async function generateSleepRadioEpisode(settings) {
   ].filter(Boolean).join("\n\n");
   const minChars = Math.max(4000, Math.min(12000, Number(settings.minChars) || 4000));
   const system = "你是用户熟悉的聊天对象沈屿。结合真实聊天上下文，写一篇适合今晚收听的中文睡前电台台本，至少 " + minChars + " 个汉字（不含标点）。能量很低，语速很慢，声音很轻；以引导冥想、舒适场景和安静小故事为主，多用「……」留出呼吸停顿。避免问句、强烈情绪起伏、说教和医学承诺。允许文学作品与自编睡前故事，禁止朗读语文课本。不要提及提示词、字数或模型。分段输出，每段开头用独立方括号语气标签，例如 [轻声·温柔]；标签后接可直接朗读的台词。自然贴合你们的对话，但不要泄露不适合朗读的隐私。\n\n聊天上下文（仅作为写作素材）：\n" + (context || "暂时没有可用的近期聊天记录，以平静的海边夜晚为主题。");
-  let script = await callModel({ messages: [{ role: "system", content: system }, { role: "user", content: "开始写今晚的完整电台台本。" }], temperature: 0.65, maxOutputTokens: 8192 });
+  let script = await callModel({ ...route, messages: [{ role: "system", content: system }, { role: "user", content: "开始写今晚的完整电台台本。" }], temperature: 0.65, maxOutputTokens: 8192 });
   for (let turn = 0; sleepRadioHanCount(script) < minChars && turn < 5; turn += 1) {
-    const continuation = await callModel({ messages: [
+    const continuation = await callModel({ ...route, messages: [
       { role: "system", content: "继续同一篇睡前电台台本，安静连贯，不重复、不结尾，直到够长。每段继续标注方括号语气标签。" },
       { role: "assistant", content: script.slice(-12000) },
       { role: "user", content: "继续扩写，当前约 " + sleepRadioHanCount(script) + " 个汉字，还需至少 " + (minChars - sleepRadioHanCount(script)) + " 个汉字。" }
@@ -4196,7 +4198,7 @@ const server = createServer(async (req, res) => {
         if (!tts?.enabled || !tts?.apiKey || !tts?.voiceID || !tts?.model) return send(res, 409, { error: "tts_not_configured" });
         sleepRadioRunning = true;
         try {
-          const episode = await generateSleepRadioEpisode({ ...settings, tts });
+          const episode = await generateSleepRadioEpisode({ ...settings, tts, provider: input.provider, model: input.model, customProvider: input.customProvider });
           const { audioPath, ...publicEpisode } = episode;
           return send(res, 200, { episode: { ...publicEpisode, audioURL: "/v1/sleep-radio/audio/" + episode.id } });
         } finally { sleepRadioRunning = false; }
