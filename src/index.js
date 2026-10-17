@@ -37,6 +37,9 @@ const sentinelActivityPath = join(dataDir, "sentinel-activity.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const voipTokensPath = join(dataDir, "voip-tokens.json");
 const galleryDir = join(dataDir, "gallery");
+const sleepRadioSettingsPath = join(dataDir, "sleep-radio.json");
+const sleepRadioEpisodesPath = join(dataDir, "sleep-radio-episodes.json");
+const sleepRadioAudioDir = join(dataDir, "sleep-radio-audio");
 const diaryPath = join(dataDir, "diaries.json");
 const drawerItemsPath = join(dataDir, "drawer-items.json");
 const screenShareDir = join(dataDir, "screen-share");
@@ -44,7 +47,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const compactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -3227,6 +3230,85 @@ async function synthesizeSpeech(text, settings) {
   return { audioBase64: Buffer.from(audioHex, "hex").toString("base64"), duration: Number(result?.extra_info?.audio_length || 0) / 1000 };
 }
 
+async function readSleepRadioSettings() {
+  try { return JSON.parse(await readFile(sleepRadioSettingsPath, "utf8")); }
+  catch (error) { if (error?.code !== "ENOENT") throw error; return { enabled: false, time: "21:30", timeZone: "UTC", minChars: 4000, tts: null, lastRunDate: null, lastError: null }; }
+}
+async function saveSleepRadioSettings(settings) {
+  await mkdir(dataDir, { recursive: true });
+  const temporary = sleepRadioSettingsPath + "." + randomUUID() + ".tmp";
+  await writeFile(temporary, JSON.stringify(settings, null, 2), { mode: 0o600 });
+  await rename(temporary, sleepRadioSettingsPath);
+}
+async function readSleepRadioEpisodes() {
+  try { const data = JSON.parse(await readFile(sleepRadioEpisodesPath, "utf8")); return Array.isArray(data) ? data : []; }
+  catch (error) { if (error?.code !== "ENOENT") throw error; return []; }
+}
+async function saveSleepRadioEpisodes(episodes) {
+  await mkdir(dataDir, { recursive: true });
+  const temporary = sleepRadioEpisodesPath + "." + randomUUID() + ".tmp";
+  await writeFile(temporary, JSON.stringify(episodes, null, 2), { mode: 0o600 });
+  await rename(temporary, sleepRadioEpisodesPath);
+}
+function sleepRadioTimeZone(value) {
+  const candidate = String(value || "UTC");
+  try { new Intl.DateTimeFormat("en-US", { timeZone: candidate }); return candidate; } catch { return "UTC"; }
+}
+function sleepRadioLocalDate(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: sleepRadioTimeZone(timeZone), year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+  return parts.find(item => item.type === "year")?.value + "-" + parts.find(item => item.type === "month")?.value + "-" + parts.find(item => item.type === "day")?.value;
+}
+function sleepRadioDue(settings, now = new Date()) {
+  if (!settings.enabled || !/^([01]\d|2[0-3]):[0-5]\d$/.test(settings.time || "")) return false;
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: sleepRadioTimeZone(settings.timeZone), hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  const current = Number(parts.find(item => item.type === "hour")?.value || 0) * 60 + Number(parts.find(item => item.type === "minute")?.value || 0);
+  const [hour, minute] = settings.time.split(":").map(Number);
+  return current >= hour * 60 + minute && settings.lastRunDate !== sleepRadioLocalDate(now, settings.timeZone);
+}
+function sleepRadioHanCount(value) { return (String(value).match(/[\p{Script=Han}]/gu) || []).length; }
+async function generateSleepRadioEpisode(settings) {
+  const threads = await readThreads();
+  const thread = threads.default || seed();
+  const context = [
+    thread.contextSummary ? "近期对话摘要：\n" + String(thread.contextSummary).slice(-8000) : "",
+    (thread.messages || []).filter(item => ["user", "assistant"].includes(item.role)).slice(-24)
+      .map(item => (item.role === "user" ? "用户" : "沈屿") + "：" + String(item.content || "").slice(0, 1200)).join("\n")
+  ].filter(Boolean).join("\n\n");
+  const minChars = Math.max(4000, Math.min(12000, Number(settings.minChars) || 4000));
+  const system = "你是用户熟悉的聊天对象沈屿。结合真实聊天上下文，写一篇适合今晚收听的中文睡前电台台本，至少 " + minChars + " 个汉字（不含标点）。能量很低，语速很慢，声音很轻；以引导冥想、舒适场景和安静小故事为主，多用「……」留出呼吸停顿。避免问句、强烈情绪起伏、说教和医学承诺。允许文学作品与自编睡前故事，禁止朗读语文课本。不要提及提示词、字数或模型。分段输出，每段开头用独立方括号语气标签，例如 [轻声·温柔]；标签后接可直接朗读的台词。自然贴合你们的对话，但不要泄露不适合朗读的隐私。\n\n聊天上下文（仅作为写作素材）：\n" + (context || "暂时没有可用的近期聊天记录，以平静的海边夜晚为主题。");
+  let script = await callModel({ messages: [{ role: "system", content: system }, { role: "user", content: "开始写今晚的完整电台台本。" }], temperature: 0.65, maxOutputTokens: 8192 });
+  for (let turn = 0; sleepRadioHanCount(script) < minChars && turn < 5; turn += 1) {
+    const continuation = await callModel({ messages: [
+      { role: "system", content: "继续同一篇睡前电台台本，安静连贯，不重复、不结尾，直到够长。每段继续标注方括号语气标签。" },
+      { role: "assistant", content: script.slice(-12000) },
+      { role: "user", content: "继续扩写，当前约 " + sleepRadioHanCount(script) + " 个汉字，还需至少 " + (minChars - sleepRadioHanCount(script)) + " 个汉字。" }
+    ], temperature: 0.55, maxOutputTokens: 8192 });
+    script = script + "\n\n" + continuation;
+  }
+  if (sleepRadioHanCount(script) < minChars) throw new Error("台本未达到要求的 " + minChars + " 字，已停止生成音频");
+  const spoken = script.replace(/^\s*\[[^\]]{1,40}\]\s*$/gm, "").trim();
+  const chunks = [];
+  const chars = Array.from(spoken);
+  for (let offset = 0; offset < chars.length; offset += 1500) chunks.push(chars.slice(offset, offset + 1500).join(""));
+  const audioParts = [];
+  for (const chunk of chunks) {
+    const speech = await synthesizeSpeech(chunk, { ...settings.tts, softVoice: true });
+    if (!speech?.audioBase64) throw new Error("电台语音生成失败：请检查全局 TTS 设置");
+    audioParts.push(Buffer.from(speech.audioBase64, "base64"));
+  }
+  const id = randomUUID();
+  await mkdir(sleepRadioAudioDir, { recursive: true });
+  const audioPath = join(sleepRadioAudioDir, id + ".mp3");
+  await writeFile(audioPath, Buffer.concat(audioParts), { mode: 0o600 });
+  const title = "晚风电台 · " + new Intl.DateTimeFormat("zh-CN", { timeZone: sleepRadioTimeZone(settings.timeZone), month: "long", day: "numeric" }).format(new Date());
+  const episode = { id, title, createdAt: new Date().toISOString(), script, audioPath, duration: null, position: 0, favorite: false };
+  const episodes = await readSleepRadioEpisodes();
+  episodes.unshift(episode);
+  await saveSleepRadioEpisodes(episodes.slice(0, 100));
+  await sendProactivePush("default", "今晚的睡前电台已经准备好了。", { kind: "sleep_radio_ready", episodeID: id });
+  return episode;
+}
+
 function send(res, status, body) {
   // A request may fail after streaming/proxying has already sent headers.
   // Never attempt a second response: ERR_HTTP_HEADERS_SENT would otherwise
@@ -4090,6 +4172,57 @@ const server = createServer(async (req, res) => {
       await saveThreads(threads);
       await saveProactiveSettings();
       return send(res, 200, proactiveSettings);
+    }
+    if (url.pathname.startsWith("/v1/sleep-radio/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (url.pathname === "/v1/sleep-radio/subscription") {
+        const settings = await readSleepRadioSettings();
+        if (req.method === "GET") return send(res, 200, { enabled: settings.enabled, time: settings.time, timeZone: settings.timeZone, minChars: settings.minChars, configured: Boolean(settings.tts?.apiKey && settings.tts?.voiceID), lastError: settings.lastError || null });
+        if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+        const input = await body(req);
+        const time = String(input.time || "");
+        if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) return send(res, 400, { error: "invalid_time" });
+        const tts = input.tts?.apiKey ? input.tts : settings.tts;
+        if (input.enabled && (!tts?.enabled || !tts?.apiKey || !tts?.voiceID || !tts?.model)) return send(res, 400, { error: "tts_not_configured" });
+        const next = { enabled: Boolean(input.enabled), time, timeZone: sleepRadioTimeZone(input.timeZone), minChars: Math.max(4000, Math.min(12000, Number(input.minChars) || 4000)), tts: input.clearTTS === true ? null : tts, lastRunDate: settings.time === time && settings.timeZone === input.timeZone ? settings.lastRunDate : null, lastError: null };
+        await saveSleepRadioSettings(next);
+        return send(res, 200, { enabled: next.enabled, time: next.time, timeZone: next.timeZone, minChars: next.minChars, configured: Boolean(next.tts?.apiKey && next.tts?.voiceID), lastError: null });
+      }
+      if (url.pathname === "/v1/sleep-radio/generate" && req.method === "POST") {
+        if (sleepRadioRunning) return send(res, 409, { error: "generation_in_progress" });
+        const input = await body(req);
+        const settings = await readSleepRadioSettings();
+        const tts = input.tts?.apiKey ? input.tts : settings.tts;
+        if (!tts?.enabled || !tts?.apiKey || !tts?.voiceID || !tts?.model) return send(res, 409, { error: "tts_not_configured" });
+        sleepRadioRunning = true;
+        try {
+          const episode = await generateSleepRadioEpisode({ ...settings, tts });
+          const { audioPath, ...publicEpisode } = episode;
+          return send(res, 200, { episode: { ...publicEpisode, audioURL: "/v1/sleep-radio/audio/" + episode.id } });
+        } finally { sleepRadioRunning = false; }
+      }
+      if (url.pathname === "/v1/sleep-radio/episodes" && req.method === "GET") {
+        const episodes = await readSleepRadioEpisodes();
+        return send(res, 200, { episodes: episodes.map(({ audioPath, ...episode }) => ({ ...episode, audioURL: "/v1/sleep-radio/audio/" + episode.id })) });
+      }
+      const audioMatch = url.pathname.match(/^\/v1\/sleep-radio\/audio\/([\w-]+)$/);
+      if (audioMatch && req.method === "GET") {
+        const episode = (await readSleepRadioEpisodes()).find(item => item.id === audioMatch[1]);
+        if (!episode?.audioPath) return send(res, 404, { error: "episode_not_found" });
+        return sendBinary(res, 200, await readFile(episode.audioPath), "audio/mpeg");
+      }
+      const episodeMatch = url.pathname.match(/^\/v1\/sleep-radio\/episodes\/([\w-]+)$/);
+      if (episodeMatch && req.method === "PATCH") {
+        const input = await body(req);
+        const episodes = await readSleepRadioEpisodes();
+        const episode = episodes.find(item => item.id === episodeMatch[1]);
+        if (!episode) return send(res, 404, { error: "episode_not_found" });
+        if (typeof input.favorite === "boolean") episode.favorite = input.favorite;
+        if (Number.isFinite(Number(input.position))) episode.position = Math.max(0, Number(input.position));
+        await saveSleepRadioEpisodes(episodes);
+        return send(res, 200, { ok: true });
+      }
+      return send(res, 404, { error: "not_found" });
     }
     if (url.pathname === "/v1/watch/analysis-config") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -4963,6 +5096,24 @@ await loadPushTokens();
 await loadEmotionState();
 await refreshMurmurState(proactiveSettings.threadId || "default");
 startPromiseAlarm();
+let sleepRadioRunning = false;
+setInterval(async () => {
+  if (sleepRadioRunning) return;
+  try {
+    const settings = await readSleepRadioSettings();
+    if (!sleepRadioDue(settings)) return;
+    sleepRadioRunning = true;
+    settings.lastRunDate = sleepRadioLocalDate(new Date(), settings.timeZone);
+    settings.lastError = null;
+    await saveSleepRadioSettings(settings);
+    try { await generateSleepRadioEpisode(settings); }
+    catch (error) {
+      settings.lastError = String(error.message || error).slice(0, 300);
+      await saveSleepRadioSettings(settings);
+      console.warn("sleep radio generation failed: " + settings.lastError);
+    } finally { sleepRadioRunning = false; }
+  } catch (error) { console.warn("sleep radio scheduler failed: " + String(error.message || error)); }
+}, 20_000);
 server.listen(port, () => console.log(`Lumi server listening on :${port}`));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
