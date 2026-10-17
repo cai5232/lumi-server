@@ -19,7 +19,7 @@ Zeabur 环境变量：
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
 - `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
-- 上下文压缩：以上游返回的上一条请求实际输入 Token 数为触发依据，达到 `1000000` 后，在下一条普通聊天请求中执行压缩；压缩时保留最近 `80` 轮用户/助手对话原文。电话和主动提醒请求不触发压缩。
+- 上下文压缩：以上游上一条请求实际输入 Token 数为依据，达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 后，在下一条普通聊天请求中单独调用摘要模型压缩较早历史；默认窗口 `1000000`、触发比例 `0.85`（约 850k）。保留最近至少 `10` 轮、最多 `15` 轮完整对话，并以约 `20000` token 为尾部目标；摘要模型默认使用当前聊天模型，也可通过 `LUMI_COMPACTION_MODEL` 单独指定。电话和主动提醒请求不触发压缩。
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：可选，记忆库 API Key
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
@@ -154,8 +154,7 @@ Promise Alarm 上游代码及网页完整保存在 `promise-alarm/`，其原有 
 
 此实现参考 [Murmur-50Feet](https://github.com/Nixie0/Murmur-50Feet)，保留其 MIT 许可，见 `THIRD_PARTY_NOTICES.md`。
 
-当窗口估算 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会自动把较早历史蒸馏为
-`<context_summary>`（用户画像、关系动态、关键事实、当前话题），保留最近对话继续发送给模型；摘要会在后续压缩时增量合并。
+当上游上一条请求实际输入 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会在普通聊天回复前通过一条独立摘要请求，把较早历史蒸馏为 `<context_summary>`，然后用「系统提示词 + 滚动摘要 + 最近原文」替换旧上下文。默认 `LUMI_CONTEXT_LIMIT=1000000`、`LUMI_COMPACT_AT=0.85`，即约 850k 触发；最近完整对话至少保留 10 轮、最多 15 轮，目标约 20k token。摘要会在后续压缩时与旧摘要增量合并，不修改或删除存档聊天记录。摘要调用沿用当前前端自定义 API 路线；默认使用聊天模型，`LUMI_COMPACTION_MODEL` 可选填单独的摘要模型名，`LUMI_COMPACT_SUMMARY_TOKENS` 可选调整摘要最大输出，默认 25000。
 
 每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会移除该标记并在客户端显示“-------沈屿记下了这一刻-------”。
 
