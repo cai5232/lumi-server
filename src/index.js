@@ -44,10 +44,14 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-1m-80-turns-upstream-trigger";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
-const compactAtTokens = 1000000;
-const preservedTailTurns = 80;
+const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 1_000_000));
+const compactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
+const compactAtTokens = Math.floor(contextLimitTokens * compactAtRatio);
+const preservedTailMinTurns = 10;
+const preservedTailMaxTurns = 15;
+const preservedTailTargetTokens = 20_000;
 const memoryAPI = (process.env.LUMI_MEMORY_API_URL || "https://memorycore.zeabur.app").replace(/\/$/, "");
 const memorySearchPath = process.env.LUMI_MEMORY_SEARCH_PATH || "/api/integrations/nook/recall";
 const memoryWritePath = process.env.LUMI_MEMORY_WRITE_PATH || "/api/integrations/nook/memories";
@@ -2408,29 +2412,57 @@ async function writeMemory(content, threadId) {
 
 function compactionPlan(thread) {
   const messages = contextMessages(thread);
-  // Trigger from the upstream-reported input size of the previous request.
-  // That is the same token count shown by the provider dashboard and includes
-  // system prompt/cache accounting; local character estimates are diagnostic only.
   const upstreamInputTokens = Number(thread.lastMeasuredInputTokens || 0);
   if (upstreamInputTokens < compactAtTokens) return null;
-
-  // Keep the latest complete user/assistant turns verbatim, independent of their token size.
   const tailTurns = [];
-  for (let index = messages.length - 1; index >= 0 && tailTurns.length < preservedTailTurns;) {
+  let tailTokenCount = 0;
+  for (let index = messages.length - 1; index >= 0 && tailTurns.length < preservedTailMaxTurns;) {
     let start = index;
     if (messages[index].role === "assistant" && index > 0 && messages[index - 1].role === "user") start = index - 1;
     const turn = messages.slice(start, index + 1);
     tailTurns.unshift(turn);
+    tailTokenCount += messageTokens(turn);
     index = start - 1;
+    if (tailTurns.length >= preservedTailMinTurns && tailTokenCount >= preservedTailTargetTokens) break;
   }
   const tail = tailTurns.flat();
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return null;
-  return { tailMessageCount: tail.length, tailTurnCount: tailTurns.length, throughMessageId: older[older.length - 1].id };
+  return { tailMessageCount: tail.length, tailTurnCount: tailTurns.length, tailTokenCount, olderMessages: older, throughMessageId: older[older.length - 1].id };
 }
 
-function compactionDirective(plan) {
-  return `\n\n<internal_context_compaction>\n这是一次仅供系统保存的上下文维护。正常回复用户后，在回复最后额外输出一份完整的 <context_summary> XML。把当前对话历史中除最近 ${plan.tailTurnCount} 轮原文外的所有内容压缩进去；若本轮系统上下文已有旧摘要，必须合并其中仍然有效的事实。摘要必须保留用户画像、关系动态、已确认事实和未完成事项，保持事实准确、不要编造。<context_summary> 必须是回复的最后内容，绝不能向用户解释或提及。\n</internal_context_compaction>`;
+async function compactContext(thread, plan, { model, customProvider }) {
+  const priorSummary = String(thread.contextSummary || "").trim();
+  const transcript = plan.olderMessages.map((message) => {
+    const body = String(message.modelContent || message.content || "").trim();
+    return body ? "<" + message.role + ">\n" + body + "\n</" + message.role + ">" : "";
+  }).filter(Boolean).join("\n\n");
+  const raw = await callModel({
+    messages: [
+      { role: "system", content: "你是对长期聊天上下文做保真蒸馏的后台模型。只输出一个完整的 <context_summary>...</context_summary>，不要输出寒暄、分析或 Markdown。准确合并旧摘要与新增历史，优先保留用户画像、关系动态、偏好与边界、重要事实、承诺和约定、未完成事项、近期话题及其来龙去脉。区分已确认事实和推测；保留时间、人物和因果；不要编造，也不要把重要细节泛化。摘要应足够完整，供后续聊天自然承接。" },
+      { role: "user", content: "已有滚动摘要（需要保留并更新）：\n" + (priorSummary || "（无）") + "\n\n本次新增的较早对话：\n" + transcript }
+    ],
+    provider: "custom",
+    model: process.env.LUMI_COMPACTION_MODEL || model,
+    customProvider,
+    maxOutputTokens: Math.max(1024, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000)),
+    temperature: 0.2,
+    cacheCurrentUser: false
+  });
+  const match = raw.match(/<context_summary[^>]*>([\s\S]*?)<\/context_summary>/i);
+  const summary = (match ? match[1] : raw).trim();
+  if (!summary) throw new Error("distiller returned an empty context summary");
+  thread.contextSummary = summary;
+  thread.compactionCount = (thread.compactionCount || 0) + 1;
+  thread.compactedAt = new Date().toISOString();
+  thread.compactedThroughMessageId = plan.throughMessageId;
+  thread.lastMeasuredInputTokens = 0;
+  thread.cacheKeepaliveMessages = null;
+  thread.cacheKeepaliveAssistantContent = "";
+  thread.cacheKeepaliveSnapshotKind = "";
+  thread.cacheKeepalivePrefixHash = "";
+  thread.cacheKeepaliveAt = 0;
+  return true;
 }
 
 function chooseEmojiFromMood(mood, faces, reply) {
@@ -2508,12 +2540,13 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   if (!customProvider) throw new Error("frontend_custom_model_route_required");
   provider = "custom";
-  // Do not make a standalone summary request. It would have a different prompt
-  // prefix, miss Claude's cache, and force the following reply to start cold.
-  // Instead, let the cacheable user reply emit a private summary at its end.
-  // Phone turns should stay fast and must not trigger a separate context-compression
-  // request or a memory lookup. The normal chat cache remains the stable prefix.
-  const pendingCompaction = proactive || callMode ? null : compactionPlan(thread);
+  let compactionApplied = false;
+  const compaction = proactive || callMode ? null : compactionPlan(thread);
+  if (compaction) {
+    try { compactionApplied = await compactContext(thread, compaction, { model, customProvider }); }
+    catch (error) { console.warn("context compaction failed; continuing with existing context: " + String(error.message || error).slice(0, 300)); }
+  }
+  const pendingCompaction = null;
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
@@ -2797,7 +2830,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}${pendingCompaction ? compactionDirective(pendingCompaction) : ""}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
   let cacheSystem = system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -2872,9 +2905,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   let raw = await callModel({
     // Calls use the same model output settings as ordinary chats; do not add a
     // separate call-specific token ceiling.
-    maxOutputTokens: proactive ? undefined : pendingCompaction
-      ? Math.max(Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192), Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000))
-      : undefined,
+    maxOutputTokens: proactive ? undefined : undefined,
     // Voice calls may tell long stories; do not inherit the ordinary chat 8192-token default.
     useMaximumModelOutput: proactive || callMode,
     messages: cacheRequestMessages,
@@ -2945,18 +2976,6 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     raw = (raw.slice(0, traceStart) + raw.slice(traceEnd + 18)).trim();
   }
   if (toolCalls.some((call) => /^food_(?:takeout|note|taste|book|dice|rate|page)/i.test(String(call?.name || "")))) foodToolUsed = true;
-  const compactedSummary = pendingCompaction
-    ? raw.match(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/i)?.[0]?.trim()
-    : null;
-  if (pendingCompaction && compactedSummary) {
-    thread.contextSummary = compactedSummary;
-    thread.compactionCount = (thread.compactionCount || 0) + 1;
-    thread.compactedAt = new Date().toISOString();
-    thread.compactedThroughMessageId = pendingCompaction.throughMessageId;
-    thread.lastMeasuredInputTokens = 0;
-  } else if (pendingCompaction) {
-    console.warn("context compaction deferred: model response contained no context_summary");
-  }
   const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
   if (emotionUpdate) await saveEmotionState();
   let cleanedRaw = (callMode
@@ -3020,7 +3039,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied: Boolean(pendingCompaction && compactedSummary), compactionDirectivePresent: Boolean(pendingCompaction) };
+  return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -4109,7 +4128,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, preservedTailTurns, triggerSource: "upstream_input_tokens" },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, triggerTokensEstimate: compactAtTokens, contextLimitTokens, triggerRatio: compactAtRatio, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
@@ -4794,10 +4813,8 @@ const server = createServer(async (req, res) => {
       threads[id].lastChatProvider = selectedProvider;
       threads[id].lastChatModel = selectedModel || selectedConfig?.model || "";
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
-      threads[id].lastMeasuredInputTokens = generated.compactionApplied ? 0 : generated.measuredInputTokens;
-      // A successful compaction removes old messages from the active context.
-      // Never retain the pre-compaction cache snapshot, or keepalive would
-      // resurrect the full history and undo the 68,888-token boundary.
+      threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
+      // A successful compaction removes old messages from the active context; never retain the pre-compaction cache snapshot.
       if (generated.compactionApplied) {
         threads[id].cacheKeepaliveMessages = null;
         threads[id].cacheKeepaliveAssistantContent = "";
