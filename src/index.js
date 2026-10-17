@@ -1,3 +1,4 @@
+import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -3169,24 +3170,28 @@ async function synthesizeSpeech(text, settings) {
     const chunks = splitCallSpeech(speechText);
     const audioParts = [];
     let duration = 0;
+    const subtitles = [];
+    let completeSubtitles = true;
     // Bounded parallelism keeps long stories from overwhelming the TTS provider.
     for (let i = 0; i < chunks.length; i += 3) {
       const batch = await Promise.all(chunks.slice(i, i + 3).map(chunk => synthesizeSpeech(chunk, { ...settings, singleChunk: true })));
       for (const item of batch) {
         if (!item?.audioBase64) throw new Error("TTS segment returned no audio");
         audioParts.push(Buffer.from(item.audioBase64, "base64"));
+        if (!item.subtitles?.length) completeSubtitles = false;
+        for (const cue of item.subtitles || []) subtitles.push({ ...cue, start: cue.start + duration, end: cue.end + duration });
         duration += Number(item.duration || 0);
       }
     }
     // Both providers request MP3; concatenated MP3 frames remain playable as one response.
-    return { audioBase64: Buffer.concat(audioParts).toString("base64"), duration };
+    return { audioBase64: Buffer.concat(audioParts).toString("base64"), duration, ...(settings.includeSubtitles ? { subtitles: completeSubtitles ? subtitles : [] } : {}) };
   }
   if (settings.provider === "elevenlabs") {
     if (!elevenLabsModels.includes(settings.model)) throw new Error("ElevenLabs 语音模型不受支持");
-    const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(settings.voiceID)}?output_format=mp3_44100_128`;
+    const endpoint = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(settings.voiceID)}${settings.includeSubtitles ? "/with-timestamps" : ""}?output_format=mp3_44100_128`;
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "xi-api-key": settings.apiKey, "content-type": "application/json", accept: "audio/mpeg" },
+      headers: { "xi-api-key": settings.apiKey, "content-type": "application/json", accept: settings.includeSubtitles ? "application/json" : "audio/mpeg" },
       body: JSON.stringify({
         text: speechText,
         model_id: settings.model,
@@ -3205,9 +3210,11 @@ async function synthesizeSpeech(text, settings) {
       } catch {}
       throw new Error(message || `ElevenLabs TTS 返回 ${response.status}`);
     }
-    const audio = Buffer.from(await response.arrayBuffer());
+    const timed = settings.includeSubtitles ? await response.json() : null;
+    const audio = timed ? Buffer.from(timed.audio_base64 || "", "base64") : Buffer.from(await response.arrayBuffer());
     if (!audio.length) throw new Error("ElevenLabs 没有返回音频");
-    return { audioBase64: audio.toString("base64"), duration: Math.max(1, Math.round([...speechText].length / 4.5)) };
+    const subtitles = timed ? elevenLabsCaptions(timed.normalized_alignment || timed.alignment) : [];
+    return { audioBase64: audio.toString("base64"), duration: (settings.includeSubtitles ? mp3Duration(audio) || subtitles.at(-1)?.end : 0) || Math.max(1, Math.round([...speechText].length / 4.5)), ...(settings.includeSubtitles ? { subtitles } : {}) };
   }
   if (!ttsModels.includes(settings.model)) throw new Error("MiniMax 语音模型不受支持");
   const minimaxHost = settings.baseURL === "https://api.minimax.io" ? settings.baseURL : "https://api.minimaxi.com";
@@ -3218,6 +3225,7 @@ async function synthesizeSpeech(text, settings) {
       model: settings.model,
       text: speechText,
       stream: false,
+      ...(settings.includeSubtitles ? { subtitle_enable: true, subtitle_type: "sentence" } : {}),
       voice_setting: { voice_id: settings.voiceID, speed: settings.softVoice ? 0.86 : 1, vol: settings.softVoice ? 0.68 : 1, pitch: 0 },
       audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
     }),
@@ -3227,7 +3235,18 @@ async function synthesizeSpeech(text, settings) {
   if (!response.ok || result?.base_resp?.status_code) throw new Error(result?.base_resp?.status_msg || `MiniMax TTS 返回 ${response.status}`);
   const audioHex = result?.data?.audio;
   if (typeof audioHex !== "string" || !audioHex.length) throw new Error("MiniMax 没有返回音频");
-  return { audioBase64: Buffer.from(audioHex, "hex").toString("base64"), duration: Number(result?.extra_info?.audio_length || 0) / 1000 };
+  const audio = Buffer.from(audioHex, "hex");
+  let subtitles = [];
+  if (settings.includeSubtitles && result?.data?.subtitle_file) {
+    try {
+      const subtitleURL = new URL(result.data.subtitle_file);
+      if (subtitleURL.protocol !== "https:") throw new Error("invalid subtitle URL");
+      const response = await fetch(subtitleURL, { signal: AbortSignal.timeout(15000) });
+      if (!response.ok) throw new Error(`subtitle HTTP ${response.status}`);
+      subtitles = miniMaxCaptions(await response.json());
+    } catch (error) { console.warn(`sleep radio subtitles unavailable: ${error.message}`); }
+  }
+  return { audioBase64: audio.toString("base64"), duration: (settings.includeSubtitles ? mp3Duration(audio) : 0) || Number(result?.extra_info?.audio_length || 0) / 1000, ...(settings.includeSubtitles ? { subtitles } : {}) };
 }
 
 async function readSleepRadioSettings() {
@@ -3276,8 +3295,9 @@ async function generateSleepRadioEpisode(settings) {
     (thread.messages || []).filter(item => ["user", "assistant"].includes(item.role)).slice(-24)
       .map(item => (item.role === "user" ? "用户" : "沈屿") + "：" + String(item.content || "").slice(0, 1200)).join("\n")
   ].filter(Boolean).join("\n\n");
+  const topic = String(settings.topic || "").trim().slice(0, 500);
   const minChars = Math.max(4000, Math.min(12000, Number(settings.minChars) || 4000));
-  const system = "你是用户熟悉的聊天对象沈屿。结合真实聊天上下文，写一篇适合今晚收听的中文睡前电台台本，至少 " + minChars + " 个汉字（不含标点）。能量很低，语速很慢，声音很轻；以引导冥想、舒适场景和安静小故事为主，多用「……」留出呼吸停顿。避免问句、强烈情绪起伏、说教和医学承诺。允许文学作品与自编睡前故事，禁止朗读语文课本。不要提及提示词、字数或模型。分段输出，每段开头用独立方括号语气标签，例如 [轻声·温柔]；标签后接可直接朗读的台词。自然贴合你们的对话，但不要泄露不适合朗读的隐私。\n\n聊天上下文（仅作为写作素材）：\n" + (context || "暂时没有可用的近期聊天记录，以平静的海边夜晚为主题。");
+  const system = "你是用户熟悉的聊天对象沈屿。结合真实聊天上下文，写一篇适合今晚收听的中文睡前电台台本，至少 " + minChars + " 个汉字（不含标点）。能量很低，语速很慢，声音很轻；以引导冥想、舒适场景和安静小故事为主，多用「……」留出呼吸停顿。避免问句、强烈情绪起伏、说教和医学承诺。允许文学作品与自编睡前故事，禁止朗读语文课本。不要提及提示词、字数或模型。分段输出，每段开头用独立方括号语气标签，例如 [轻声·温柔]；标签后接可直接朗读的台词。自然贴合你们的对话，但不要泄露不适合朗读的隐私。\n\n本期收听方向：" + (topic || "结合近期聊天，自选一个新的安静主题。") + "。围绕这个方向写完整的一期，不延续上一期台本。\n\n聊天上下文（仅作为写作素材）：\n" + (context || "暂时没有可用的近期聊天记录，以平静的海边夜晚为主题。");
   let script = await callModel({ ...route, messages: [{ role: "system", content: system }, { role: "user", content: "开始写今晚的完整电台台本。" }], temperature: 0.65, maxOutputTokens: 8192 });
   for (let turn = 0; sleepRadioHanCount(script) < minChars && turn < 5; turn += 1) {
     const continuation = await callModel({ ...route, messages: [
@@ -3293,17 +3313,23 @@ async function generateSleepRadioEpisode(settings) {
   const chars = Array.from(spoken);
   for (let offset = 0; offset < chars.length; offset += 1500) chunks.push(chars.slice(offset, offset + 1500).join(""));
   const audioParts = [];
+  const subtitles = [];
+  let duration = 0;
+  let completeSubtitles = true;
   for (const chunk of chunks) {
-    const speech = await synthesizeSpeech(chunk, { ...settings.tts, softVoice: true });
+    const speech = await synthesizeSpeech(chunk, { ...settings.tts, softVoice: true, includeSubtitles: true });
     if (!speech?.audioBase64) throw new Error("电台语音生成失败：请检查全局 TTS 设置");
     audioParts.push(Buffer.from(speech.audioBase64, "base64"));
+    if (!speech.subtitles?.length) completeSubtitles = false;
+    for (const cue of speech.subtitles || []) subtitles.push({ ...cue, start: cue.start + duration, end: cue.end + duration });
+    duration += Number(speech.duration || 0);
   }
   const id = randomUUID();
   await mkdir(sleepRadioAudioDir, { recursive: true });
   const audioPath = join(sleepRadioAudioDir, id + ".mp3");
   await writeFile(audioPath, Buffer.concat(audioParts), { mode: 0o600 });
   const title = "晚风电台 · " + new Intl.DateTimeFormat("zh-CN", { timeZone: sleepRadioTimeZone(settings.timeZone), month: "long", day: "numeric" }).format(new Date());
-  const episode = { id, title, createdAt: new Date().toISOString(), script, audioPath, duration: null, position: 0, favorite: false };
+  const episode = { id, title, createdAt: new Date().toISOString(), script, topic, audioPath, duration, subtitles: completeSubtitles ? subtitles : [], position: 0, favorite: false };
   const episodes = await readSleepRadioEpisodes();
   episodes.unshift(episode);
   await saveSleepRadioEpisodes(episodes.slice(0, 100));
@@ -4198,7 +4224,7 @@ const server = createServer(async (req, res) => {
         if (!tts?.enabled || !tts?.apiKey || !tts?.voiceID || !tts?.model) return send(res, 409, { error: "tts_not_configured" });
         sleepRadioRunning = true;
         try {
-          const episode = await generateSleepRadioEpisode({ ...settings, tts, provider: input.provider, model: input.model, customProvider: input.customProvider });
+          const episode = await generateSleepRadioEpisode({ ...settings, tts, topic: input.topic, provider: input.provider, model: input.model, customProvider: input.customProvider });
           const { audioPath, ...publicEpisode } = episode;
           return send(res, 200, { episode: { ...publicEpisode, audioURL: "/v1/sleep-radio/audio/" + episode.id } });
         } finally { sleepRadioRunning = false; }

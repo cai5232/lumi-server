@@ -19,7 +19,7 @@ for (const explicit of [true, false]) {
       readThreads: async () => ({ default: { messages: [], lastChatProvider: 'custom' } }),
       callModel: async options => { calls.push(options); return '静'.repeat(calls.length === 1 ? 1000 : 3000); },
       sleepRadioHanCount: text => (text.match(/\p{Script=Han}/gu) || []).length,
-      synthesizeSpeech: async () => ({ audioBase64: Buffer.from('audio').toString('base64') }),
+      synthesizeSpeech: async () => ({ audioBase64: Buffer.from('audio').toString('base64'), duration: 10, subtitles: [{ text: '读到这里。', start: 0, end: 10 }] }),
       randomUUID: () => 'test-episode', mkdir: async () => {}, writeFile: async () => {},
       join: (...parts) => parts.join('/'), sleepRadioAudioDir: '/test',
       readSleepRadioEpisodes: async () => [], saveSleepRadioEpisodes: async () => {},
@@ -28,7 +28,11 @@ for (const explicit of [true, false]) {
     };
     vm.createContext(context);
     vm.runInContext(routeSource + '\n' + source.slice(start, end), context);
-    await context.generateSleepRadioEpisode({ ...(explicit ? route : {}), minChars: 4000, timeZone: 'UTC', tts: {} });
+    const episode = await context.generateSleepRadioEpisode({ ...(explicit ? route : {}), topic: '山间小屋的故事', minChars: 4000, timeZone: 'UTC', tts: {} });
+    assert.ok(calls[0].messages[0].content.includes('山间小屋的故事'));
+    assert.equal(episode.topic, '山间小屋的故事');
+    assert.equal(episode.duration, 30);
+    assert.deepEqual(Array.from(episode.subtitles, cue => cue.start), [0,10,20]);
     assert.equal(calls.length, 2);
     for (const call of calls) {
       assert.equal(call.provider, 'custom');
