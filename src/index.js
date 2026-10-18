@@ -52,7 +52,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -5117,9 +5117,8 @@ const server = createServer(async (req, res) => {
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
-      generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
-      // A custom preset must be durably saved before we report a successful reply;
-      // otherwise background wakes can unknowingly use the old Zenmux route.
+      // Save the frontend-selected route before generation, including failed turns.
+      // Otherwise a new relay timing out leaves background jobs on the old route.
       // Missing encryption configuration must not turn an otherwise successful chat into HTTP 500.
       // Never persist custom API credentials unencrypted or silently route background jobs to Zenmux.
       try {
@@ -5128,6 +5127,7 @@ const server = createServer(async (req, res) => {
         console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
         throw error;
       }
+      generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);

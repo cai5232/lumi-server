@@ -61,6 +61,10 @@ globalThis.fetch=async(url,options={})=>{
     const failed=await chat('故障模型测试','disabled-model');
     assert.equal(failed.status,503);
     assert.match((await failed.json()).error,/上游渠道不可用/);
+    const routes=JSON.parse(await readFile(join(directory,'murmur-routes.enc.json'),'utf8'));
+    assert.equal(routes.default.model,'disabled-model','failed turns must save the newly selected route');
+    assert.ok(routes.default.customProvider.data);
+    assert.ok(!JSON.stringify(routes).includes('fake-key'),'saved credentials stay encrypted');
   }finally{
     const stopped=new Promise(resolve=>backend.once('exit',resolve));backend.kill();if(backend.exitCode===null)await stopped;
     await rm(directory,{recursive:true,force:true});
