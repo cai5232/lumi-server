@@ -92,7 +92,7 @@ function streamError(raw) {
 }
 const capabilities = new Map();
 // timeoutMS is an idle timeout (no new bytes), so long but live streams are never cut; maxMS is the hard cap.
-export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000 }) {
+export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000, signal }) {
   const key = url + '\n' + body.model;
   const requestBody = structuredClone(body);
   for (const patch of capabilities.get(key) || []) applyPatch(requestBody, patch);
@@ -102,6 +102,9 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
     const timing = { headersMs: null, firstChunkMs: null, bytes: 0, endedBy: null };
     const controller = new AbortController();
     const abort = why => { if (!reason) { reason = why; controller.abort(); } };
+    const cancel = () => abort('cancelled');
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
     const kick = () => { clearTimeout(idle); idle = setTimeout(() => abort('idle'), timeoutMS); };
     const cap = setTimeout(() => abort('max'), Math.max(0, maxMS - (Date.now() - startedAt)));
     kick();
@@ -124,11 +127,12 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
       } else { raw = await response.text(); timing.endedBy = 'close'; }
     } catch (error) {
       timing.totalMs = Date.now() - startedAt;
+      if (reason === 'cancelled') throw Object.assign(new Error('后台生成已让位给手动聊天。'), { name: 'AbortError', statusCode: 499, timing });
       const stage = timing.firstChunkMs !== null ? `已收到 ${timing.bytes} 字节后中断` : timing.headersMs !== null ? '已连上但一直没有内容' : '一直没有响应';
       if (reason === 'idle') throw Object.assign(new Error(`模型服务 ${Math.ceil(timeoutMS / 1000)} 秒没有新数据（${stage}）。请稍后重试或切换线路。`), { statusCode: 504, timing });
       if (reason === 'max') throw Object.assign(new Error(`模型服务总耗时超过 ${Math.ceil(maxMS / 1000)} 秒（${stage}）。请稍后重试或切换线路。`), { statusCode: 504, timing });
       throw Object.assign(new Error(`连接模型服务失败：${error.cause?.code || error.message}`), { statusCode: 502, timing });
-    } finally { clearTimeout(idle); clearTimeout(cap); }
+    } finally { clearTimeout(idle); clearTimeout(cap); signal?.removeEventListener('abort', cancel); }
     timing.totalMs = Date.now() - startedAt;
     const data = decodeRelayResponse(raw);
     const errorText = data?.error?.message || data?.error || data?.message || raw;

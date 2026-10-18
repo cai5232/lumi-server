@@ -54,7 +54,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -92,6 +92,7 @@ const nativeCallPushes = new Set();
 const callAlertFallbacks = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
+const sentinelGenerationControllers = new Map();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
 let sharedEmotionState = createEmotionState();
@@ -997,6 +998,7 @@ async function runBackgroundPulse() {
       }
       if (activeChatThreads.has(thread.id)) continue;
       activeChatThreads.add(thread.id);
+      sentinelGenerationControllers.set(thread.id, new AbortController());
       try {
         proactiveDiagnostics.lastReason = "generating";
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
@@ -1116,6 +1118,7 @@ async function runBackgroundPulse() {
         proactive.nextDueAt = activity.nextWakeAt;
         changed = true;
       } finally {
+        sentinelGenerationControllers.delete(thread.id);
         activeChatThreads.delete(thread.id);
       }
     }
@@ -2055,7 +2058,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   console.info("[model-request-shape] " + JSON.stringify(safeRequestMetrics));
   let relay;
   try {
-    relay = await requestRelay({ url: apiURL, body: requestBody, headers: {
+    relay = await requestRelay({ url: apiURL, body: requestBody, signal: proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined, headers: {
     "content-type": "application/json",
     accept: "text/event-stream",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -5027,6 +5030,9 @@ const server = createServer(async (req, res) => {
     // Let an already running probe finish before reading history. Reserve the
     // chat before any asynchronous work so a new probe cannot overtake it.
     if (isChatPost) {
+      // A slow autonomous wake must not keep a user message queued for minutes.
+      // Its existing finally block releases the conversation before we read it.
+      sentinelGenerationControllers.get(id)?.abort();
       if (id === "default" && keepaliveInFlight) await keepaliveDone;
       while (activeChatThreads.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
       activeChatThreads.add(id);

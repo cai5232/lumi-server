@@ -94,3 +94,13 @@ test('heartbeat comments followed by a bare JSON error terminate an open stream 
 test('bare native JSON after heartbeat comments preserves a successful response',()=>{
  assert.equal(decodeRelayResponse(': PING\n\n'+JSON.stringify({type:'message',content:[{type:'text',text:'真回复'}]})).content[0].text,'真回复');
 });
+test('a foreground request can cancel a background model call immediately',async()=>{
+ const controller=new AbortController();
+ let called;
+ const started=new Promise(resolve=>{called=resolve});
+ const pending=requestRelay({url:'https://cancel.test/v1/messages',headers:{},body:{model:'background'},signal:controller.signal,fetchImpl:async(_,options)=>{
+  called();return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(new Error('aborted')),{once:true}));
+ }});
+ await started;controller.abort();
+ await assert.rejects(pending,error=>error.name==='AbortError'&&error.statusCode===499);
+});
