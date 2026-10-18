@@ -41,6 +41,8 @@ const cacheStatsPath = join(dataDir, "cache-stats.json");
 const modelRequestStore = createModelRequestStore(dataDir);
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const sentinelActivityPath = join(dataDir, "sentinel-activity.json");
+const soloSettingsPath = join(dataDir, "solo-settings.json");
+const soloMetricsPath = join(dataDir, "_solo_metrics.json");
 const pushTokensPath = join(dataDir, "push-tokens.json");
 const voipTokensPath = join(dataDir, "voip-tokens.json");
 const galleryDir = join(dataDir, "gallery");
@@ -54,7 +56,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -85,6 +87,10 @@ let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+const soloSettings = { enabled: true, mode: "mix", desireThreshold: 0.78, idleMinutes: 30, touchDecayMinutes: 30 };
+let soloMetrics = [];
+const activeSoloRuns = new Map();
+const soloNextEligibleAt = new Map();
 let pushTokens = [];
 let voipTokens = [];
 const foregroundThreads = new Map();
@@ -370,6 +376,7 @@ function canPlaceProactiveCall(thread) {
 }
 
 function markUserActivity(thread, content) {
+  cancelSoloRun(thread.id);
   const activity = ensureActivity(thread);
   const proactive = ensureProactive(thread);
   const now = new Date();
@@ -397,6 +404,7 @@ function markUserActivity(thread, content) {
 }
 
 function finishUserConversation(thread, content) {
+  cancelSoloRun(thread.id);
   const activity = ensureActivity(thread);
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const now = Date.now();
@@ -917,6 +925,57 @@ async function finishSleepCycle(thread, activity, now) {
   activity.nextWakeSource = proactive.enabled ? "sleep_wake" : null;
 }
 
+function cancelSoloRun(threadId) {
+  const run = activeSoloRuns.get(threadId);
+  if (run) { run.cancelled = true; run.controller.abort(); }
+}
+
+async function startSoloRun(thread, desire) {
+  const run = { cancelled: false, startedAt: Date.now(), controller: new AbortController() };
+  activeSoloRuns.set(thread.id, run);
+  const mode = ["recall", "fantasy", "mix"].includes(soloSettings.mode) ? soloSettings.mode : "mix";
+  const chord = topEmotion(sharedEmotionState);
+  const lastTouch = Date.parse(ensureActivity(thread).lastUserActivityAt || 0);
+  const decayMs = Math.max(5, Number(soloSettings.touchDecayMinutes) || 30) * 60_000;
+  const touchInfluence = lastTouch ? Number(Math.exp(-Math.max(0, Date.now() - lastTouch) / decayMs).toFixed(3)) : 0;
+  try {
+    const route = await resolveMurmurRoute(thread.id, thread);
+    if (!route?.customProvider || !route.model) throw new Error("custom_model_route_unavailable");
+    const recent = (thread.messages || []).filter((message) => ["user", "assistant"].includes(message.role) && typeof message.content === "string").slice(-12)
+      .map((message) => ({ role: message.role, content: String(message.content).slice(0, 2000) }));
+    const modeGuide = mode === "recall"
+      ? "Recall: privately reflect on emotional patterns and meaningful shared memories."
+      : mode === "fantasy" ? "Fantasy: create a gentle, clearly imagined inner scene, without claiming it happened."
+      : "Mix: blend a brief memory reflection with a clearly imagined scene.";
+    await callModel({
+      messages: [
+        { role: "system", content: `You are Lumi in a private Solo session. This is internal state only: never address the user, never produce a chat reply, and do not use tools. ${modeGuide} Use desire=${desire.toFixed(3)}. Emotional chord: ${chord.drive} (${chord.label}); let it color the tone. Recent user-touch influence is ${touchInfluence} on a 0–1 scale and decays exponentially over ${soloSettings.touchDecayMinutes} minutes. Return only a short JSON object with keys inner_activity and duration_seconds. Keep the private activity under 180 words.` },
+        ...recent,
+        { role: "user", content: "Run one private Solo session now." }
+      ],
+      provider: route.provider,
+      model: route.model,
+      customProvider: route.customProvider,
+      temperature: 0.85,
+      maxOutputTokens: 500,
+      cacheCurrentUser: false,
+      autonomous: true,
+      signal: run.controller.signal
+    });
+    if (run.cancelled) return;
+    const elapsed = Math.max(1, Math.round((Date.now() - run.startedAt) / 1000));
+    const completedAt = new Date().toISOString();
+    soloMetrics.push({ id: randomUUID(), threadId: thread.id, mode, trigger: "desire_threshold_idle", desire: Number(desire.toFixed(3)), chord: chord.drive, touchInfluence, durationSeconds: elapsed, completedAt, interrupted: false });
+    soloMetrics = soloMetrics.slice(-50);
+    await saveSoloMetrics();
+    console.info(`[solo] private session completed for ${thread.id}; inner activity discarded`);
+  } catch (error) {
+    if (!run.cancelled) console.warn(`[solo] session failed: ${error.message}`);
+  } finally {
+    if (activeSoloRuns.get(thread.id) === run) activeSoloRuns.delete(thread.id);
+  }
+}
+
 async function runBackgroundPulse() {
   if (backgroundPulseInFlight) return;
   backgroundPulseInFlight = true;
@@ -938,6 +997,15 @@ async function runBackgroundPulse() {
       proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : activeChatThreads.has(thread.id) ? "chat_in_progress" : "wake_due";
     }
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
+    const desire = Number(sharedEmotionState?.drives?.desire || 0);
+    const idleMs = Math.max(5, Number(soloSettings.idleMinutes) || 30) * 60_000;
+    if (thread.id === "default" && soloSettings.enabled && desire >= Number(soloSettings.desireThreshold || 0.78) &&
+        activity.mode === "sentinel" && !activity.sleepPendingAt && lastUserAt && now - lastUserAt >= idleMs &&
+        !(soloNextEligibleAt.get(thread.id) > now) && !activeChatThreads.has(thread.id) && !activeSoloRuns.has(thread.id) &&
+        !(foregroundThreads.get(thread.id) > now)) {
+      soloNextEligibleAt.set(thread.id, now + Math.max(idleMs, 60 * 60_000));
+      void startSoloRun(thread, desire);
+    }
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
       // Explicit bedtime is authoritative; do not turn a random insomnia roll
       // into an autonomous wake-up.
@@ -1299,6 +1367,38 @@ async function saveProactiveSettings() {
   const temporaryPath = `${proactiveSettingsPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(proactiveSettings, null, 2));
   await rename(temporaryPath, proactiveSettingsPath);
+}
+
+async function loadSoloData() {
+  await mkdir(dataDir, { recursive: true });
+  try {
+    Object.assign(soloSettings, JSON.parse(await readFile(soloSettingsPath, "utf8")));
+  } catch (error) { if (error?.code !== "ENOENT") console.warn(`solo settings unavailable: ${error.message}`); }
+  try {
+    const saved = JSON.parse(await readFile(soloMetricsPath, "utf8"));
+    soloMetrics = Array.isArray(saved) ? saved.slice(-50) : [];
+    for (const item of soloMetrics) {
+      const completedAt = Date.parse(item.completedAt || "");
+      if (item.threadId && Number.isFinite(completedAt)) soloNextEligibleAt.set(item.threadId, Math.max(soloNextEligibleAt.get(item.threadId) || 0, completedAt + 60 * 60_000));
+    }
+  } catch (error) { if (error?.code !== "ENOENT") console.warn(`solo metrics unavailable: ${error.message}`); }
+  soloSettings.enabled = soloSettings.enabled !== false;
+  soloSettings.mode = ["recall", "fantasy", "mix"].includes(soloSettings.mode) ? soloSettings.mode : "mix";
+  soloSettings.desireThreshold = Math.min(0.98, Math.max(0.5, Number(soloSettings.desireThreshold) || 0.78));
+  soloSettings.idleMinutes = Math.min(1440, Math.max(5, Number(soloSettings.idleMinutes) || 30));
+  soloSettings.touchDecayMinutes = Math.min(180, Math.max(5, Number(soloSettings.touchDecayMinutes) || 30));
+}
+
+async function saveSoloSettings() {
+  const temp = `${soloSettingsPath}.${randomUUID()}.tmp`;
+  await writeFile(temp, JSON.stringify(soloSettings, null, 2), { mode: 0o600 });
+  await rename(temp, soloSettingsPath);
+}
+
+async function saveSoloMetrics() {
+  const temp = `${soloMetricsPath}.${randomUUID()}.tmp`;
+  await writeFile(temp, JSON.stringify(soloMetrics.slice(-50), null, 2), { mode: 0o600 });
+  await rename(temp, soloMetricsPath);
 }
 
 async function loadPushTokens() {
@@ -1878,7 +1978,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [] }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2058,7 +2158,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   console.info("[model-request-shape] " + JSON.stringify(safeRequestMetrics));
   let relay;
   try {
-    relay = await requestRelay({ url: apiURL, body: requestBody, signal: proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined, headers: {
+    relay = await requestRelay({ url: apiURL, body: requestBody, signal: signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined), headers: {
     "content-type": "application/json",
     accept: "text/event-stream",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -4187,7 +4287,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, await checkCacheKeepalive());
     }
     const callRoute = /^\/v1\/chats\/[^/]+\/calls(?:\/[^/]+(?:\/(?:answer|messages|end))?)?$/.test(url.pathname);
-    if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
+    if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/settings/solo", "/v1/solo/metrics", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
 
@@ -4315,6 +4415,27 @@ const server = createServer(async (req, res) => {
       return send(res, 200, await compressionSettings.save(input.triggerRatio));
     }
     if (url.pathname === "/v1/settings/proactive" && req.method === "GET") return send(res, 200, proactiveSettings);
+    if (url.pathname === "/v1/settings/solo" && req.method === "GET") return send(res, 200, { ...soloSettings, running: activeSoloRuns.size > 0 });
+    if (url.pathname === "/v1/settings/solo" && req.method === "PUT") {
+      const input = await body(req);
+      const threshold = Number(input.desireThreshold);
+      const idleMinutes = Number(input.idleMinutes);
+      const touchDecayMinutes = Number(input.touchDecayMinutes);
+      if (typeof input.enabled !== "boolean" || !["recall", "fantasy", "mix"].includes(input.mode) ||
+          !Number.isFinite(threshold) || threshold < 0.5 || threshold > 0.98 ||
+          !Number.isInteger(idleMinutes) || idleMinutes < 5 || idleMinutes > 1440 ||
+          !Number.isInteger(touchDecayMinutes) || touchDecayMinutes < 5 || touchDecayMinutes > 180) {
+        return send(res, 400, { error: "invalid_solo_settings" });
+      }
+      Object.assign(soloSettings, { enabled: input.enabled, mode: input.mode, desireThreshold: threshold, idleMinutes, touchDecayMinutes });
+      if (!soloSettings.enabled) for (const threadId of activeSoloRuns.keys()) cancelSoloRun(threadId);
+      await saveSoloSettings();
+      return send(res, 200, { ...soloSettings, running: activeSoloRuns.size > 0 });
+    }
+    if (url.pathname === "/v1/solo/metrics" && req.method === "GET") {
+      const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit") || 50)));
+      return send(res, 200, soloMetrics.slice(-limit));
+    }
     if (url.pathname === "/v1/push/status" && req.method === "GET") {
       return send(res, 200, { apnsConfigured: apnsConfigured(), registeredDevices: pushTokens.length, registeredVoIPDevices: voipTokens.length });
     }
@@ -5331,6 +5452,7 @@ server.on("upgrade", (req, socket, head) => {
 
 await loadCacheStats();
 await loadProactiveSettings();
+await loadSoloData();
 await loadPushTokens();
 await loadEmotionState();
 await refreshMurmurState(proactiveSettings.threadId || "default");
