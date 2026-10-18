@@ -38,6 +38,9 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
   vm.runInContext(source.slice(source.indexOf('async function compactContext('), source.indexOf('\nconst backgroundCompactionJobs')), context);
   assert.ok(context.messageTokens(messages) < 100);
+  const hidden = {role:'assistant',content:'回复',precedingUserModelContent:messages[0].modelContent};
+  assert.ok(context.messageTokens([hidden]) > context.messageTokens([{role:'assistant',content:'回复'}]));
+  assert.ok(context.messageTokens([hidden]) < 150, 'hidden history is counted after summary deduplication');
   const thread = {contextSummary:'当前摘要',messages};
   await context.compactContext(thread, {olderMessages:messages,throughMessageId:'a'}, {model:'test',customProvider:{}});
   assert.equal(calls.length, 1);

@@ -16,7 +16,7 @@ test('real chat sends the summary once, reuses its prefix, keeps stored history,
   const legacy = `<system_context timezone="Asia/Shanghai"><context_summary source="system">${summary}</context_summary></system_context>历史用户原文`;
   await writeFile(join(directory,'threads.json'),JSON.stringify({default:{id:'default',title:'test',contextSummary:summary,messages:[
     {id:'old-user',role:'user',content:'历史用户原文',modelContent:legacy},
-    {id:'old-assistant',role:'assistant',content:'历史回复'}
+    {id:'old-assistant',role:'assistant',content:'历史回复',precedingUserModelContent:legacy+'<internal_proactive_nudge>主动问候</internal_proactive_nudge>'}
   ]}}));
   const capture = join(directory, 'captured.jsonl');
   const preload = join(directory,'mock-fetch.mjs');
@@ -26,7 +26,7 @@ globalThis.fetch=async(url,options={})=>{
  if(String(url).startsWith('https://model.test/')){
   const body=JSON.parse(options.body);await appendFile(${JSON.stringify(capture)},JSON.stringify(body)+'\\n');
   if(body.model==='disabled-model')return new Response(JSON.stringify({error:{message:'auth_unavailable: no auth available'}}),{status:503});
-  return new Response(JSON.stringify({choices:[{message:{content:'测试回复'}}],usage:{prompt_tokens:200,completion_tokens:3}}));
+  return new Response('data: '+JSON.stringify({choices:[{delta:{content:'测试回复'}}]})+'\\n\\ndata: '+JSON.stringify({choices:[],usage:{prompt_tokens:200,completion_tokens:3}})+'\\n\\ndata: [DONE]\\n\\n',{headers:{'content-type':'text/event-stream'}});
  }
  if(String(url).startsWith('http://127.0.0.1:1/')||!String(url).startsWith('http://127.0.0.1:'))return new Response('{}');
  return realFetch(url,options);
@@ -45,12 +45,23 @@ globalThis.fetch=async(url,options={})=>{
     for(const content of ['第一轮新消息','第二轮新消息']){
       const response=await chat(content);assert.equal(response.status,200,await response.clone().text());
       assert.equal((await response.json()).assistantMessage.content,'测试回复');
+      if(content==='第一轮新消息'){
+        // Simulate a legacy cache snapshot whose earlier hidden predecessor
+        // still embeds the summary. The last user block and cache key match.
+        const path=join(directory,'threads.json');
+        const threads=JSON.parse(await readFile(path,'utf8'));
+        const cached=threads.default.cacheKeepaliveMessages;
+        const user=cached.find(m=>m.role==='user'&&m.content.startsWith('<system_context'));
+        user.content=user.content.replace('</system_context>',`<context_summary source="system">${summary}</context_summary></system_context>`);
+        await writeFile(path,JSON.stringify(threads));
+      }
     }
     const requests=(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.messages?.some(m=>String(m.content).includes('第一轮新消息')));
     const first=requests.find(x=>x.messages.at(-1).content.includes('第一轮新消息'));
     const second=requests.find(x=>x.messages.at(-1).content.includes('第二轮新消息'));
     for(const request of [first,second]){
       assert.ok(request);
+      assert.equal(request.stream,true);
       assert.equal(JSON.stringify(request).split(summary).length-1,1);
       assert.ok(request.messages[0].content.includes(summary));
       assert.ok(request.messages.some(m=>m.content.includes('历史用户原文')));

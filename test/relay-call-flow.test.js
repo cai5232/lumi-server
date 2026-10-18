@@ -19,7 +19,7 @@ for(const format of ['openai','anthropic'])test(`real callModel ${format} route 
   }})};
  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
  const content=await context.callModel({provider:'custom',model:'claude-test',customProvider:{url:format==='anthropic'?'https://custom.test/v1/messages':'https://custom.test/v1/chat/completions',key:'test-key',apiFormat:format,chatPath:format==='anthropic'?'/messages':'/chat/completions'},messages:[{role:'system',content:'设定'},{role:'user',content:'你好'}],mcpThreadId:'default',onUsage:value=>{usage=value}});
- assert.equal(content,'<thinking>实际返回的心声</thinking>\n你好');assert.ok(usage);assert.equal(captured.headers.authorization,'Bearer test-key');
+ assert.equal(content,'<thinking>实际返回的心声</thinking>\n你好');assert.ok(usage);assert.equal(captured.headers.authorization,'Bearer test-key');assert.equal(captured.headers.accept,'text/event-stream');assert.equal(captured.body.stream,true);
  assert.equal(captured.url,format==='anthropic'?'https://custom.test/v1/messages':'https://custom.test/v1/chat/completions');
  if(format==='anthropic'){assert.equal(captured.headers['x-api-key'],'test-key');assert.equal(captured.body.messages[0].role,'user');assert.equal(captured.body.system[0].text,'设定')}
  else assert.equal(captured.body.messages[0].role,'system');

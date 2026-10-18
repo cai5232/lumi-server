@@ -52,7 +52,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -1788,7 +1788,7 @@ function contextMessages(thread) {
   }
   return messages.slice(boundaryIndex + 1);
 }
-function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(historicalModelContent(message.modelContent) || message.content) + 8, 0); }
+function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(historicalModelContent(message.modelContent) || message.content) + 8 + (message.role === "assistant" && message.precedingUserModelContent ? estimateTokens(historicalModelContent(message.precedingUserModelContent)) + 8 : 0), 0); }
 function cacheUsage(usage = {}) {
   const read = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
   const created = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || usage.cache_creation?.ephemeral_1h_input_tokens || usage.cache_creation?.ephemeral_5m_input_tokens || 0);
@@ -2032,6 +2032,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       }
     : { model, messages: preparedMessages, ...(mcpTools.length && mcpRound < 4 ? { tools: mcpTools, tool_choice: "auto" } : {}), ...(!/claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
+  // Match streaming clients: collect SSE text/reasoning locally for the existing JSON API.
+  requestBody.stream = true;
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const startedAt = Date.now();
   const safeRequestMetrics = {
@@ -2053,6 +2055,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   try {
     relay = await requestRelay({ url: apiURL, body: requestBody, headers: {
     "content-type": "application/json",
+    accept: "text/event-stream",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
     ...(nativeAnthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {}) } : {})
     } });
@@ -2883,7 +2886,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // absent from the visible timeline. It is nevertheless part of the
       // provider prefix and must precede the stored assistant reply exactly.
       const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
-        ? [{ role: "user", content: message.precedingUserModelContent }]
+        ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
         : [];
       return [...preceding, { role: message.role, content }];
     });
@@ -2895,9 +2898,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // spoken turn. Persist it invisibly, then replay its raw assistant
       // response so the first caller message shares that exact prefix.
       if (turn.role === "assistant" && typeof turn.requestModelContent === "string" && turn.requestModelContent.trim()) {
-        phoneHistory.push({ role: "user", content: turn.requestModelContent });
+        phoneHistory.push({ role: "user", content: historicalModelContent(turn.requestModelContent) });
       }
-      phoneHistory.push({ role: turn.role, content: turn.modelContent || turn.content });
+      phoneHistory.push({ role: turn.role, content: historicalModelContent(turn.modelContent) || turn.content });
     }
   }
   // A normal chat turn usually ends with an assistant message, and an accepted
@@ -3016,7 +3019,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? (historicalModelContent(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
   const cachedPrefixHasStaleCompaction = Array.isArray(thread?.cacheKeepaliveMessages) &&
-    thread.cacheKeepaliveMessages.some(message => /<internal_context_compaction\b/i.test(String(message.content || "")));
+    thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   const exactCachedPrefix = !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
@@ -3934,7 +3937,7 @@ const server = createServer(async (req, res) => {
               const text = withoutStaleCompactionDirective(message.modelContent) || message.content;
               if (typeof text !== "string" || !text.trim()) return [];
               const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
-                ? [{ role: "user", content: message.precedingUserModelContent }]
+                ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
                 : [];
               return [...preceding, { role: message.role, content: text }];
             })

@@ -64,6 +64,7 @@ export function relayCompatibilityPatch(body, message) {
   const limit = error.match(/max_tokens\s*:\s*\d+\s*>\s*(\d+)/) || error.match(/max_tokens.{0,60}(?:less than or equal to|at most|maximum(?: is)?|<=)\s*(\d+)/);
   if (limit && Number.isFinite(body.max_tokens) && Number(limit[1]) > 0 && Number(limit[1]) < body.max_tokens) return { limit: Number(limit[1]) };
   if (!/unsupported|not support|not allowed|not permitted|unrecognized|unknown|extra inputs|extra fields|unexpected|不支持|不允许/.test(error)) return null;
+  if (/\bstream(?:ing)?\b/.test(error) && body.stream === true) return { remove: ['stream'] };
   if (/cache_control|cache control|\bttl\b/.test(error)) return /\bttl\b/.test(error) ? { removeDeep: 'ttl' } : { removeDeep: 'cache_control' };
   if (/\btools?\b|tool_choice|function calling|工具/.test(error) && body.tools) return { remove: ['tools', 'tool_choice', 'mcp_servers'] };
   if (/\bthinking\b/.test(error) && body.thinking) return { remove: ['thinking'] };
@@ -78,7 +79,7 @@ function applyPatch(body, patch) {
   if (patch.rename && Object.hasOwn(body,patch.rename[0])) { body[patch.rename[1]] = body[patch.rename[0]]; delete body[patch.rename[0]]; }
 }
 const capabilities = new Map();
-export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 150000 }) {
+export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 300000 }) {
   const key = url + '\n' + body.model;
   const requestBody = structuredClone(body);
   for (const patch of capabilities.get(key) || []) applyPatch(requestBody, patch);

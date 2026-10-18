@@ -58,3 +58,12 @@ test('network failures and timeouts carry gateway status instead of internal-ser
   options.signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('aborted'))},{once:true});
  })}),error=>error.statusCode===504&&error.message.includes('1 秒'));
 });
+test('explicit stream rejection retries once as JSON without changing model, messages or auth',async()=>{
+ const attempts=[];
+ const result=await requestRelay({url:'https://json-only.test/v1/messages',headers:{authorization:'Bearer fake'},body:{model:'json-only',stream:true,messages:[{role:'user',content:'完整原文'}]},fetchImpl:async(_,request)=>{
+  const body=JSON.parse(request.body);attempts.push(body);assert.equal(request.headers.authorization,'Bearer fake');
+  return body.stream?new Response('{"error":{"message":"stream is not supported"}}',{status:400}):new Response('{"content":[{"type":"text","text":"OK"}]}');
+ }});
+ assert.equal(attempts.length,2);assert.equal(result.data.content[0].text,'OK');
+ assert.equal(attempts[1].model,'json-only');assert.deepEqual(attempts[1].messages,attempts[0].messages);
+});
