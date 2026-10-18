@@ -2024,11 +2024,40 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
 
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const startedAt = Date.now();
-  const relay = await requestRelay({ url: apiURL, body: requestBody, headers: {
+  const safeRequestMetrics = {
+    provider,
+    format: nativeAnthropic ? "anthropic" : "openai-chat",
+    model,
+    messages: nativeAnthropic ? requestBody.messages?.length || 0 : requestBody.messages?.length || 0,
+    systemChars: nativeAnthropic
+      ? JSON.stringify(requestBody.system || []).length
+      : (requestBody.messages || []).filter(item => item.role === "system").reduce((n, item) => n + JSON.stringify(item.content || "").length, 0),
+    historyChars: (requestBody.messages || []).reduce((n, item) => n + JSON.stringify(item.content || "").length, 0),
+    tools: requestBody.tools?.length || 0,
+    maxOutputTokens: requestBody.max_tokens ?? requestBody.max_completion_tokens ?? null,
+    thinkingEnabled: requestBody.thinking?.type === "enabled",
+    stream: requestBody.stream === true
+  };
+  console.info("[model-request-shape] " + JSON.stringify(safeRequestMetrics));
+  let relay;
+  try {
+    relay = await requestRelay({ url: apiURL, body: requestBody, headers: {
     "content-type": "application/json",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
     ...(nativeAnthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {}) } : {})
-  } });
+    } });
+  } catch (error) {
+    console.warn("[model-request-failed] " + JSON.stringify({
+      ...safeRequestMetrics,
+      durationMs: Date.now() - startedAt,
+      error: String(error.message || error).slice(0, 240)
+    }));
+    throw error;
+  }
+  console.info("[model-request-result] " + JSON.stringify({
+    ...safeRequestMetrics, durationMs: Date.now() - startedAt,
+    httpStatus: relay.response.status
+  }));
   const { response, data } = relay;
   requestBody = relay.requestBody;
   const providerUsage = data?.usage || {};
