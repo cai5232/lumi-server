@@ -2136,11 +2136,20 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   cacheStats.cacheReadTokens += cache.read;
   cacheStats.cacheWriteTokens += cache.created;
   await saveCacheStats().catch((error) => console.warn(`cache stats save skipped: ${error.message}`));
+  // Some OpenAI-compatible relays return Responses API output instead of
+  // Chat Completions choices, even when called through /chat/completions.
+  const responseOutput = Array.isArray(data?.output) ? data.output : [];
+  const responseText = responseOutput.flatMap(item => {
+    if (item?.type !== "message" || !Array.isArray(item.content)) return [];
+    return item.content.filter(part => part?.type === "output_text" || part?.type === "text")
+      .map(part => typeof part.text === "string" ? part.text : "");
+  }).join("");
   const rawContent = nativeAnthropic
     ? (Array.isArray(data?.content) ? data.content.filter((block) => block?.type === "text").map((block) => block.text || "").join("") : typeof data?.content === "string" ? data.content : data?.output_text || data?.choices?.[0]?.message?.content || "")
     : data?.choices?.[0]?.message?.content
       ?? data?.choices?.[0]?.text
       ?? data?.output_text
+      ?? (responseText || null)
       ?? data?.content;
   const nativeThinking = responseThinking(data);
   const content = Array.isArray(rawContent)
@@ -2155,7 +2164,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
-    const blockTypes = Array.isArray(data?.content) ? data.content.map((block) => String(block?.type || "unknown")).join(",") : typeof data?.content;
+    const blockTypes = Array.isArray(data?.output) ? data.output.map(item => String(item?.type || "unknown")).join(",") : Array.isArray(data?.content) ? data.content.map((block) => String(block?.type || "unknown")).join(",") : typeof data?.content;
+    if (responseOutput.some(item => item?.type === "function_call")) {
+      throw new Error("上游返回 Responses function_call，但当前线路使用 Chat Completions 工具协议；请检查中转站 API 格式与接口路径");
+    }
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${finishReason} contentTypes=${blockTypes} thinkingPresent=${Boolean(nativeThinking)}`);
     throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
   }
