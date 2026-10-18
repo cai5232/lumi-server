@@ -2443,28 +2443,47 @@ function compactionPlan(thread) {
 const compactionRetryAfter = new Map();
 
 async function compactContext(thread, plan, { model, customProvider }) {
-  // Split on message boundaries. Do not silently discard older messages.
-  const maxChunkChars = Math.max(12000, Math.min(60000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 30000)));
+  // Bound *every* distillation request, including a single enormous message.
+  // Keep all source text; chunk long messages instead of dropping any content.
+  const maxChunkChars = Math.max(4000, Math.min(12000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 8000)));
   const chunks = [];
   let chunk = "";
-  for (const message of plan.olderMessages) {
-    const body = String(message.modelContent || message.content || "").trim();
-    if (!body) continue;
-    const entry = "<" + message.role + ">\n" + body + "\n</" + message.role + ">";
-    if (chunk && chunk.length + entry.length + 2 > maxChunkChars) {
+  const append = (part) => {
+    if (chunk && chunk.length + part.length + 2 > maxChunkChars) {
       chunks.push(chunk);
       chunk = "";
     }
-    // A single very long message remains intact to preserve its meaning.
-    chunk += (chunk ? "\n\n" : "") + entry;
+    chunk += (chunk ? "\n\n" : "") + part;
+  };
+  for (const message of plan.olderMessages) {
+    const body = String(message.modelContent || message.content || "").trim();
+    if (!body) continue;
+    const prefix = "<" + message.role + ">\n";
+    const suffix = "\n</" + message.role + ">";
+    const maxBodyLength = Math.max(512, maxChunkChars - prefix.length - suffix.length - 120);
+    if (body.length <= maxBodyLength) {
+      append(prefix + body + suffix);
+      continue;
+    }
+    for (let offset = 0, part = 1; offset < body.length; offset += maxBodyLength, part++) {
+      append(prefix + "[连续长消息片段 " + part + "]\n" +
+        body.slice(offset, offset + maxBodyLength) + suffix);
+    }
   }
   if (chunk) chunks.push(chunk);
   if (!chunks.length) return false;
 
   let summary = String(thread.contextSummary || "").trim();
-  const summaryLimit = Math.max(1024, Math.min(8192, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 4096)));
+  // Keep the distiller's maximum below the native extended-thinking budget
+  // threshold: the compacting task needs a concise summary, not long reasoning.
+  const summaryLimit = Math.max(1024, Math.min(1792, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 1400)));
   for (let i = 0; i < chunks.length; i++) {
-    const raw = await callModel({
+    const batchStartedAt = Date.now();
+    console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
+      " chars=" + chunks[i].length + " summaryChars=" + summary.length);
+    let raw;
+    try {
+      raw = await callModel({
       messages: [
         { role: "system", content: "你是长期聊天上下文的保真蒸馏器。只输出 <context_summary>...</context_summary>。将已有摘要与新增对话合并，保留重要事实、关系变化、承诺、偏好、时间与未完成事项。不得编造。" },
         { role: "user", content: "已有滚动摘要：\n" + (summary || "（无）") + "\n\n新增历史（第 " + (i + 1) + "/" + chunks.length + " 批）：\n" + chunks[i] }
@@ -2475,7 +2494,13 @@ async function compactContext(thread, plan, { model, customProvider }) {
       maxOutputTokens: summaryLimit,
       temperature: 0.2,
       cacheCurrentUser: false
-    });
+      });
+    } catch (error) {
+      throw new Error("batch " + (i + 1) + "/" + chunks.length + " after " +
+        Math.round((Date.now() - batchStartedAt) / 1000) + "s: " + String(error.message || error));
+    }
+    console.info("[compaction] batch " + (i + 1) + "/" + chunks.length +
+      " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s");
     const match = raw.match(/<context_summary[^>]*>([\s\S]*?)<\/context_summary>/i);
     const next = (match ? match[1] : raw).trim();
     if (!next) throw new Error("distiller returned an empty context summary at chunk " + (i + 1));
