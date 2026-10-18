@@ -1208,6 +1208,20 @@ async function persistChatThread(id, snapshot) {
     const messages = Array.from(messagesByID.values()).sort((a, b) => new Date(a.createdAt).valueOf() - new Date(b.createdAt).valueOf());
     const diaries = mergeDiaryEntries(stored.diaries || [], snapshot.diaries || []);
     all[id] = { ...stored, ...snapshot, messages, diaries };
+    // A chat started before asynchronous compaction may finish afterwards.
+    // Preserve the newer on-disk summary instead of undoing that compaction.
+    if (Date.parse(stored.compactedAt || "") > Date.parse(snapshot.compactedAt || "") ||
+        (stored.compactedAt && !snapshot.compactedAt)) {
+      for (const field of ["contextSummary", "compactionCount", "compactedAt", "compactedThroughMessageId"]) {
+        all[id][field] = stored[field];
+      }
+      all[id].lastMeasuredInputTokens = 0;
+      all[id].cacheKeepaliveMessages = null;
+      all[id].cacheKeepaliveAssistantContent = "";
+      all[id].cacheKeepaliveSnapshotKind = "";
+      all[id].cacheKeepalivePrefixHash = "";
+      all[id].cacheKeepaliveAt = 0;
+    }
     await saveThreads(all);
     return all[id];
   });
@@ -2481,6 +2495,75 @@ async function compactContext(thread, plan, { model, customProvider }) {
   return true;
 }
 
+const backgroundCompactionJobs = new Set();
+
+// Apply a finished summary to the freshest stored thread, never to a stale
+// in-memory copy. Keep all original messages for the conversation UI.
+async function commitBackgroundCompaction(id, previousSummary, previousBoundary, snapshot) {
+  const previous = chatPersistenceQueues.get(id) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    // Do not compete with an active chat's persistence.
+    if (activeChatThreads.has(id)) return false;
+    const all = await readThreads();
+    const current = all[id];
+    if (!current || String(current.contextSummary || "") !== previousSummary ||
+        String(current.compactedThroughMessageId || "") !== previousBoundary ||
+        !current.messages?.some(message => message.id === snapshot.compactedThroughMessageId) ||
+        activeChatThreads.has(id)) return false;
+    current.contextSummary = snapshot.contextSummary;
+    current.compactionCount = snapshot.compactionCount;
+    current.compactedAt = snapshot.compactedAt;
+    current.compactedThroughMessageId = snapshot.compactedThroughMessageId;
+    current.lastMeasuredInputTokens = 0;
+    current.cacheKeepaliveMessages = null;
+    current.cacheKeepaliveAssistantContent = "";
+    current.cacheKeepaliveSnapshotKind = "";
+    current.cacheKeepalivePrefixHash = "";
+    current.cacheKeepaliveAt = 0;
+    await saveThreads(all);
+    return true;
+  });
+  const tail = operation.catch(() => {});
+  chatPersistenceQueues.set(id, tail);
+  try { return await operation; }
+  finally { if (chatPersistenceQueues.get(id) === tail) chatPersistenceQueues.delete(id); }
+}
+
+function scheduleBackgroundCompaction(id, model, customProvider) {
+  if (!id || !model || !customProvider || backgroundCompactionJobs.has(id) ||
+      Date.now() < (compactionRetryAfter.get(id) || 0)) return;
+  backgroundCompactionJobs.add(id);
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const threads = await readThreads();
+        const snapshot = threads[id];
+        if (!snapshot) return;
+        const plan = compactionPlan(snapshot);
+        if (!plan) return;
+        const oldSummary = String(snapshot.contextSummary || "");
+        const oldBoundary = String(snapshot.compactedThroughMessageId || "");
+        const completed = await compactContext(snapshot, plan, { model, customProvider });
+        if (!completed) return;
+        // If the user is chatting, wait for a later turn rather than writing
+        // over the chat's concurrently-updated thread snapshot.
+        if (activeChatThreads.has(id)) return;
+        const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, snapshot);
+        if (applied) {
+          compactionRetryAfter.delete(id);
+          console.info("[compaction] background summary committed thread=" + id);
+        } else console.info("[compaction] summary commit deferred because thread changed or is busy: " + id);
+      } catch (error) {
+        compactionRetryAfter.set(id, Date.now() + 10 * 60_000);
+        console.warn("[compaction] background attempt failed; will retry after cooldown: " +
+          String(error.message || error).slice(0, 300));
+      } finally {
+        backgroundCompactionJobs.delete(id);
+      }
+    })();
+  });
+}
+
 function chooseEmojiFromMood(mood, faces, reply) {
   const candidates = [...new Set(faces.filter((face) => typeof face === "string").map((face) => face.trim()).filter(Boolean))].slice(0, 40);
   if (!candidates.length) return "";
@@ -2556,17 +2639,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   if (!customProvider) throw new Error("frontend_custom_model_route_required");
   provider = "custom";
-  let compactionApplied = false;
-  const compaction = proactive || callMode ? null : compactionPlan(thread);
-  if (compaction && Date.now() >= (compactionRetryAfter.get(thread.id || "default") || 0)) {
-    try {
-      compactionApplied = await compactContext(thread, compaction, { model, customProvider });
-      if (compactionApplied) compactionRetryAfter.delete(thread.id || "default");
-    } catch (error) {
-      compactionRetryAfter.set(thread.id || "default", Date.now() + 10 * 60_000);
-      console.warn("context compaction failed; retry paused for 10 minutes, original context retained: " + String(error.message || error).slice(0, 300));
-    }
-  }
+  // Compaction is scheduled after the chat turn is persisted; never block
+  // the foreground HTTP request with multiple upstream distillation calls.
+  const compactionApplied = false;
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
@@ -5075,6 +5150,8 @@ const server = createServer(async (req, res) => {
       finishUserConversation(threads[id], messageText);
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
+      // Fire and forget: the current reply is not delayed by distillation.
+      scheduleBackgroundCompaction(id, selectedModel, customProvider);
       if (messageText && !images.length && !galleryImageIDs.length && generated.calendarEvents) {
         void applyCalendarMessage(messageText, userMessage.id, generated.calendarEvents).then(result => {
           if (result.applied?.length || result.skipped?.length) console.info(`[calendar-extract] message=${userMessage.id} applied=${result.applied?.length || 0} skipped=${result.skipped?.length || 0}`);
@@ -5101,6 +5178,8 @@ const server = createServer(async (req, res) => {
         return send(res, 200, response);
       } catch (error) {
         if (recentMessageRequests.get(key)?.result === result) recentMessageRequests.delete(key);
+        // Even a failed foreground turn can trigger recovery of an oversized context.
+        scheduleBackgroundCompaction(id, selectedModel, customProvider);
         throw error;
       }
     }
