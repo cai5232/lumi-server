@@ -51,3 +51,10 @@ test('explicit output limits adapt to the upstream maximum without limiting smal
  const long=await requestRelay({...base,body:{model:'limited-claude',max_tokens:128000}});assert.equal(long.requestBody.max_tokens,64000);assert.equal(calls,2);
  const short=await requestRelay({...base,body:{model:'limited-claude',max_tokens:96}});assert.equal(short.requestBody.max_tokens,96);assert.equal(calls,3);
 });
+test('network failures and timeouts carry gateway status instead of internal-server status',async()=>{
+ await assert.rejects(requestRelay({url:'https://unreachable.test/v1/messages',headers:{},body:{model:'test'},fetchImpl:async()=>{throw new Error('network down')}}),error=>error.statusCode===502);
+ await assert.rejects(requestRelay({url:'https://timeout.test/v1/messages',headers:{},body:{model:'test'},timeoutMS:10,fetchImpl:async(_,options)=>new Promise((resolve,reject)=>{
+  const timer=setTimeout(resolve,1000);
+  options.signal.addEventListener('abort',()=>{clearTimeout(timer);reject(new Error('aborted'))},{once:true});
+ })}),error=>error.statusCode===504&&error.message.includes('1 秒'));
+});

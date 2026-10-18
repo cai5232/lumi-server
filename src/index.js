@@ -52,7 +52,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -1765,6 +1765,16 @@ function withoutStaleCompactionDirective(value) {
     ? value.replace(/<internal_context_compaction\b[^>]*>[\s\S]*?<\/internal_context_compaction>/gi, "").trim()
     : value;
 }
+// Old turns embedded a full rolling summary in every system_context prefix.
+// The current summary is supplied once in the stable system prompt instead.
+// Only remove our generated prefix; quoted markup in the user's text survives.
+function historicalModelContent(value) {
+  const content = withoutStaleCompactionDirective(value);
+  return typeof content === "string"
+    ? content.replace(/^<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
+      prefix => prefix.replace(/<context_summary\s+source="system"\s*>[\s\S]*?<\/context_summary>\s*/gi, ""))
+    : content;
+}
 function contextMessages(thread) {
   const messages = thread.messages || [];
   const boundaryId = thread.compactedThroughMessageId;
@@ -1778,7 +1788,7 @@ function contextMessages(thread) {
   }
   return messages.slice(boundaryIndex + 1);
 }
-function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(message.modelContent || message.content) + 8, 0); }
+function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(historicalModelContent(message.modelContent) || message.content) + 8, 0); }
 function cacheUsage(usage = {}) {
   const read = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
   const created = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || usage.cache_creation?.ephemeral_1h_input_tokens || usage.cache_creation?.ephemeral_5m_input_tokens || 0);
@@ -2091,7 +2101,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
       }
     }
-    throw new Error(`模型线路 HTTP ${response.ok ? 502 : response.status}：${providerError}`);
+    const unavailable = /auth_unavailable|no auth available|service has been disabled|PERMISSION_DENIED/i.test(providerError);
+    const error = new Error(unavailable
+      ? `所选模型 ${model} 的上游渠道不可用（凭据不可用或服务被禁用），请切换可用模型或联系中转服务商。`
+      : `模型线路 HTTP ${response.ok ? 502 : response.status}：${providerError}`);
+    error.statusCode = unavailable ? 503 : response.status === 429 ? 429 : response.status >= 500 ? response.status : 502;
+    throw error;
   }
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
@@ -2485,7 +2500,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
     chunk += (chunk ? "\n\n" : "") + part;
   };
   for (const message of plan.olderMessages) {
-    const body = String(message.modelContent || message.content || "").trim();
+    const body = String(historicalModelContent(message.modelContent) || message.content || "").trim();
     if (!body) continue;
     const prefix = "<" + message.role + ">\n";
     const suffix = "\n</" + message.role + ">";
@@ -2862,7 +2877,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     .flatMap((message) => {
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
-      const content = withoutStaleCompactionDirective(message.modelContent) || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
+      const content = historicalModelContent(message.modelContent) || (message.imageAttachmentCount ? `${message.content}\n[系统记录：用户附带了${message.imageAttachmentCount}张图片]` : message.content);
       if (typeof content !== "string" || !content.trim()) return [];
       // An unsolicited nudge has an internal user request that is deliberately
       // absent from the visible timeline. It is nevertheless part of the
@@ -2943,7 +2958,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const speechStyleContext = speechTagsEnabled
     ? `<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs ${speechModel}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。同一句或同一段里可以按语气变化使用多个标签，不设每句话或每段的标签数量上限。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>`
     : `<speech_style support_audio_tags="false">当前朗读服务不支持 ElevenLabs v4 音频标签。<speech> 中只写普通朗读文本，不要输出方括号音频标签。</speech_style>`;
-  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}${summary ? `\n${summary}` : ""}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
@@ -2980,7 +2995,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
-  let cacheSystem = system;
+  let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
   // persisted display history can change hidden proactive markers, timestamps,
@@ -2998,7 +3013,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
   cacheSystem = injectedSystem[0].content;
   const previousUserContent = previousUser
-    ? (withoutStaleCompactionDirective(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
+    ? (historicalModelContent(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
   const cachedPrefixHasStaleCompaction = Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.cacheKeepaliveMessages.some(message => /<internal_context_compaction\b/i.test(String(message.content || "")));

@@ -30,3 +30,17 @@ test('public messages exclude persisted context while retaining actual saved thi
  const result=context.publicChatMessage({id:'1',role:'assistant',content:'正文',modelContent:'private context',requestId:'retry-key'});
  assert.equal(result.content,'正文');assert.equal(result.thinking,'保存的心声');assert.ok(!('modelContent'in result));assert.ok(!('requestId'in result));
 });
+test('real callModel identifies disabled upstream credentials and preserves upstream service status',async()=>{
+ for(const [status,message,expected] of [[503,'auth_unavailable: no auth available; service has been disabled',503],[429,'quota exhausted',429],[502,'upstream unavailable',502],[401,'invalid provider key',502]]){
+  const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},relayEndpoint,
+   mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
+   cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async()=>{},randomUUID:()=> 'test-id',modelRequestLogJSON:JSON.stringify,
+   cacheUsage:()=>({read:0,created:0}),requestRelay:async options=>({response:new Response('{}',{status}),data:{error:{message}},requestBody:options.body})};
+  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+  await assert.rejects(context.callModel({provider:'custom',model:'chosen-model',customProvider:{url:'https://relay.test/v1',key:'test-key',apiFormat:'openai'},messages:[{role:'user',content:'test'}]}),error=>{
+   assert.equal(error.statusCode,expected);
+   if(status===503){assert.ok(error.message.includes('chosen-model'));assert.ok(error.message.includes('上游渠道不可用'));}
+   return true;
+  });
+ }
+});

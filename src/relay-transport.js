@@ -89,8 +89,8 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
       response = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(requestBody), signal, redirect: 'error' });
       raw = await response.text();
     } catch (error) {
-      if (signal.aborted) throw new Error('模型服务等待超过 150 秒。请稍后重试或切换线路。');
-      throw new Error(`连接模型服务失败：${error.cause?.code || error.message}`);
+      if (signal.aborted) throw Object.assign(new Error(`模型服务等待超过 ${Math.ceil(timeoutMS / 1000)} 秒。请稍后重试或切换线路。`), { statusCode: 504 });
+      throw Object.assign(new Error(`连接模型服务失败：${error.cause?.code || error.message}`), { statusCode: 502 });
     }
     const data = decodeRelayResponse(raw);
     const errorText = data?.error?.message || data?.error || data?.message || raw;
