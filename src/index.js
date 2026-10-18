@@ -2025,7 +2025,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   });
   // Explicit Anthropic-format custom routes support native cache_control.
   // Do not add Anthropic markers to OpenAI-compatible custom routes.
-  const preparedMessages = customProvider && !nativeAnthropic
+  // Parsetree's OpenAI-compatible Claude endpoint reports Anthropic-style
+  // cache read/write usage. Opt in to explicit breakpoints only for this
+  // known gateway, not arbitrary OpenAI-compatible services.
+  const treeClaudeCache = Boolean(customProvider && !nativeAnthropic &&
+    /(^|\\.)treegpt\\.cc$/i.test(new URL(configuredURL).hostname) &&
+    /claude/i.test(model));
+  const preparedMessages = customProvider && !nativeAnthropic && !treeClaudeCache
     ? providerMessages
     : cacheMessages(providerMessages, model, cacheCurrentUser);
   const mcpSettings = mcpThreadId ? mailSettings : { servers: [] };
