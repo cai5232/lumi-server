@@ -2425,27 +2425,49 @@ function compactionPlan(thread) {
   return { tailMessageCount: tail.length, tailTurnCount: tailTurns.length, tailTokenCount, olderMessages: older, throughMessageId: older[older.length - 1].id };
 }
 
+// A failed compaction must not stall every subsequent chat message.
+const compactionRetryAfter = new Map();
+
 async function compactContext(thread, plan, { model, customProvider }) {
-  const priorSummary = String(thread.contextSummary || "").trim();
-  const transcript = plan.olderMessages.map((message) => {
+  // Split on message boundaries. Do not silently discard older messages.
+  const maxChunkChars = Math.max(12000, Math.min(60000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 30000)));
+  const chunks = [];
+  let chunk = "";
+  for (const message of plan.olderMessages) {
     const body = String(message.modelContent || message.content || "").trim();
-    return body ? "<" + message.role + ">\n" + body + "\n</" + message.role + ">" : "";
-  }).filter(Boolean).join("\n\n");
-  const raw = await callModel({
-    messages: [
-      { role: "system", content: "你是对长期聊天上下文做保真蒸馏的后台模型。只输出一个完整的 <context_summary>...</context_summary>，不要输出寒暄、分析或 Markdown。准确合并旧摘要与新增历史，优先保留用户画像、关系动态、偏好与边界、重要事实、承诺和约定、未完成事项、近期话题及其来龙去脉。区分已确认事实和推测；保留时间、人物和因果；不要编造，也不要把重要细节泛化。摘要应足够完整，供后续聊天自然承接。" },
-      { role: "user", content: "已有滚动摘要（需要保留并更新）：\n" + (priorSummary || "（无）") + "\n\n本次新增的较早对话：\n" + transcript }
-    ],
-    provider: "custom",
-    model: process.env.LUMI_COMPACTION_MODEL || model,
-    customProvider,
-    maxOutputTokens: Math.max(1024, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000)),
-    temperature: 0.2,
-    cacheCurrentUser: false
-  });
-  const match = raw.match(/<context_summary[^>]*>([\s\S]*?)<\/context_summary>/i);
-  const summary = (match ? match[1] : raw).trim();
-  if (!summary) throw new Error("distiller returned an empty context summary");
+    if (!body) continue;
+    const entry = "<" + message.role + ">\n" + body + "\n</" + message.role + ">";
+    if (chunk && chunk.length + entry.length + 2 > maxChunkChars) {
+      chunks.push(chunk);
+      chunk = "";
+    }
+    // A single very long message remains intact to preserve its meaning.
+    chunk += (chunk ? "\n\n" : "") + entry;
+  }
+  if (chunk) chunks.push(chunk);
+  if (!chunks.length) return false;
+
+  let summary = String(thread.contextSummary || "").trim();
+  const summaryLimit = Math.max(1024, Math.min(8192, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 4096)));
+  for (let i = 0; i < chunks.length; i++) {
+    const raw = await callModel({
+      messages: [
+        { role: "system", content: "你是长期聊天上下文的保真蒸馏器。只输出 <context_summary>...</context_summary>。将已有摘要与新增对话合并，保留重要事实、关系变化、承诺、偏好、时间与未完成事项。不得编造。" },
+        { role: "user", content: "已有滚动摘要：\n" + (summary || "（无）") + "\n\n新增历史（第 " + (i + 1) + "/" + chunks.length + " 批）：\n" + chunks[i] }
+      ],
+      provider: "custom",
+      model: process.env.LUMI_COMPACTION_MODEL || model,
+      customProvider,
+      maxOutputTokens: summaryLimit,
+      temperature: 0.2,
+      cacheCurrentUser: false
+    });
+    const match = raw.match(/<context_summary[^>]*>([\s\S]*?)<\/context_summary>/i);
+    const next = (match ? match[1] : raw).trim();
+    if (!next) throw new Error("distiller returned an empty context summary at chunk " + (i + 1));
+    summary = next;
+  }
+  // Commit atomically only after every chunk succeeds.
   thread.contextSummary = summary;
   thread.compactionCount = (thread.compactionCount || 0) + 1;
   thread.compactedAt = new Date().toISOString();
@@ -2536,9 +2558,14 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   provider = "custom";
   let compactionApplied = false;
   const compaction = proactive || callMode ? null : compactionPlan(thread);
-  if (compaction) {
-    try { compactionApplied = await compactContext(thread, compaction, { model, customProvider }); }
-    catch (error) { console.warn("context compaction failed; continuing with existing context: " + String(error.message || error).slice(0, 300)); }
+  if (compaction && Date.now() >= (compactionRetryAfter.get(thread.id || "default") || 0)) {
+    try {
+      compactionApplied = await compactContext(thread, compaction, { model, customProvider });
+      if (compactionApplied) compactionRetryAfter.delete(thread.id || "default");
+    } catch (error) {
+      compactionRetryAfter.set(thread.id || "default", Date.now() + 10 * 60_000);
+      console.warn("context compaction failed; retry paused for 10 minutes, original context retained: " + String(error.message || error).slice(0, 300));
+    }
   }
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
