@@ -4994,6 +4994,20 @@ const server = createServer(async (req, res) => {
     if (!match) return send(res, 404, { error: "not_found" });
     const id = decodeURIComponent(match[1]);
     const isChatPost = req.method === "POST" && Boolean(match[2]);
+    let messageInput;
+    if (req.method === "POST" && match[2] === "/messages") {
+      messageInput = await body(req);
+      const requestId = String(req.headers["idempotency-key"] || "");
+      const fingerprint = createHash("sha256").update(JSON.stringify(messageInput)).digest("hex");
+      const key = `${id}:${requestId || fingerprint}`;
+      const previous = recentMessageRequests.get(key);
+      // A phone retry must join the original result before waiting for the
+      // conversation lock, including when that original result is an error.
+      if (previous && previous.expiresAt > Date.now()) {
+        if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
+        return send(res, 200, await previous.result);
+      }
+    }
     // Let an already running probe finish before reading history. Reserve the
     // chat before any asynchronous work so a new probe cannot overtake it.
     if (isChatPost) {
@@ -5064,7 +5078,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { callId, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingSpeechText : null, speechError, memorySaved: generated.memorySaved });
     }
     if (req.method === "POST" && match[2]) {
-      const input = await body(req);
+      const input = messageInput ?? await body(req);
       const images = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : [];
       const galleryImageIDs = Array.isArray(input.galleryImageIDs)
         ? input.galleryImageIDs.filter((itemID) => typeof itemID === "string" && /^[a-f0-9]{64}$/i.test(itemID)).slice(0, 4)
@@ -5251,7 +5265,12 @@ const server = createServer(async (req, res) => {
         if (entry?.result === result) entry.expiresAt = Date.now() + (requestId ? 5 * 60_000 : legacyRetryWindowMs);
         return send(res, 200, response);
       } catch (error) {
-        if (recentMessageRequests.get(key)?.result === result) recentMessageRequests.delete(key);
+        if (recentMessageRequests.get(key)?.result === result) {
+          // Retain a failed idempotent result too. Replaying a failed request
+          // with the same key is not permission to start another paid call.
+          if (requestId) recentMessageRequests.get(key).expiresAt = Date.now() + 5 * 60_000;
+          else recentMessageRequests.delete(key);
+        }
         // Even a failed foreground turn can trigger recovery of an oversized context.
         scheduleBackgroundCompaction(id, selectedModel, customProvider);
         throw error;
