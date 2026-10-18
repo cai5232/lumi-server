@@ -67,3 +67,23 @@ test('explicit stream rejection retries once as JSON without changing model, mes
  assert.equal(attempts.length,2);assert.equal(result.data.content[0].text,'OK');
  assert.equal(attempts[1].model,'json-only');assert.deepEqual(attempts[1].messages,attempts[0].messages);
 });
+const sse=(chunks,{gapMS=0,close=true}={})=>new Response(new ReadableStream({async start(c){for(const s of chunks){if(gapMS)await new Promise(r=>setTimeout(r,gapMS));c.enqueue(new TextEncoder().encode(s));}if(close)c.close();}}));
+test('a slow but live stream is not cut by the idle timeout even when its total time exceeds it',async()=>{
+ const chunks=['你','好','呀','，','在','的'].map(t=>'data: '+JSON.stringify({choices:[{delta:{content:t}}]})+'\n\n');
+ const result=await requestRelay({url:'https://slow.test/v1/chat/completions',headers:{},body:{model:'slow',stream:true},timeoutMS:60,fetchImpl:async()=>sse(chunks,{gapMS:30})});
+ assert.equal(result.data.choices[0].message.content,'你好呀，在的');assert.ok(result.timing.totalMs>=60);assert.equal(result.timing.endedBy,'close');
+});
+test('a finished stream whose connection never closes ends at the protocol marker',async()=>{
+ const openai=await requestRelay({url:'https://open.test/v1/chat/completions',headers:{},body:{model:'open'},timeoutMS:500,fetchImpl:async()=>sse(['data: {"choices":[{"delta":{"content":"完"}}]}\n\n','data: [DONE]\n\n'],{close:false})});
+ assert.equal(openai.data.choices[0].message.content,'完');assert.equal(openai.timing.endedBy,'marker');
+ const native=await requestRelay({url:'https://open.test/v1/messages',headers:{},body:{model:'open'},timeoutMS:500,fetchImpl:async()=>sse(['event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n','event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"好"}}\n\n','event: message_stop\ndata: {"type":"message_stop"}\n\n'],{close:false})});
+ assert.equal(native.data.content[0].text,'好');assert.equal(native.timing.endedBy,'marker');
+});
+test('a stream that stalls midway fails as a gateway timeout and reports how far it got',async()=>{
+ await assert.rejects(requestRelay({url:'https://stall.test/v1/chat/completions',headers:{},body:{model:'stall'},timeoutMS:50,fetchImpl:async(_,options)=>new Response(new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"半"}}]}\n\n'));options.signal.addEventListener('abort',()=>c.error(new Error('aborted')),{once:true});}}))}),
+  error=>error.statusCode===504&&error.timing.bytes>0&&error.timing.firstChunkMs!==null&&error.message.includes('字节后中断'));
+});
+test('the hard cap still ends a stream that keeps trickling forever',async()=>{
+ await assert.rejects(requestRelay({url:'https://drip.test/v1/chat/completions',headers:{},body:{model:'drip'},timeoutMS:200,maxMS:80,fetchImpl:async(_,options)=>new Response(new ReadableStream({start(c){const t=setInterval(()=>c.enqueue(new TextEncoder().encode(': ping\n\n')),10);options.signal.addEventListener('abort',()=>{clearInterval(t);c.error(new Error('aborted'))},{once:true});}}))}),
+  error=>error.statusCode===504&&error.message.includes('总耗时'));
+});

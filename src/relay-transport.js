@@ -78,21 +78,48 @@ function applyPatch(body, patch) {
   if (patch.removeDeep) removeField(body, patch.removeDeep);
   if (patch.rename && Object.hasOwn(body,patch.rename[0])) { body[patch.rename[1]] = body[patch.rename[0]]; delete body[patch.rename[0]]; }
 }
+// A finished stream may stay open on some relays; stop reading at the protocol's own end marker.
+const STREAM_END = /(?:^|\n)(?:data:\s*\[DONE\]|event:\s*message_stop|data:\s*\{\s*"type"\s*:\s*"message_stop")/;
 const capabilities = new Map();
-export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 300000 }) {
+// timeoutMS is an idle timeout (no new bytes), so long but live streams are never cut; maxMS is the hard cap.
+export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000 }) {
   const key = url + '\n' + body.model;
   const requestBody = structuredClone(body);
   for (const patch of capabilities.get(key) || []) applyPatch(requestBody, patch);
-  const signal = AbortSignal.timeout(timeoutMS);
+  const startedAt = Date.now();
   for (let attempt=0; attempt<4; attempt++) {
-    let response, raw;
+    let response, raw = '', reason = null, idle;
+    const timing = { headersMs: null, firstChunkMs: null, bytes: 0, endedBy: null };
+    const controller = new AbortController();
+    const abort = why => { if (!reason) { reason = why; controller.abort(); } };
+    const kick = () => { clearTimeout(idle); idle = setTimeout(() => abort('idle'), timeoutMS); };
+    const cap = setTimeout(() => abort('max'), Math.max(0, maxMS - (Date.now() - startedAt)));
+    kick();
     try {
-      response = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(requestBody), signal, redirect: 'error' });
-      raw = await response.text();
+      response = await fetchImpl(url, { method: 'POST', headers, body: JSON.stringify(requestBody), signal: controller.signal, redirect: 'error' });
+      timing.headersMs = Date.now() - startedAt;
+      kick();
+      if (response.body) {
+        const reader = response.body.getReader(), decoder = new TextDecoder();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) { timing.endedBy = 'close'; break; }
+          kick();
+          if (timing.firstChunkMs === null) timing.firstChunkMs = Date.now() - startedAt;
+          timing.bytes += value.byteLength;
+          raw += decoder.decode(value, { stream: true });
+          if (STREAM_END.test(raw.slice(-400))) { timing.endedBy = 'marker'; reader.cancel().catch(() => {}); break; }
+        }
+        raw += decoder.decode();
+      } else { raw = await response.text(); timing.endedBy = 'close'; }
     } catch (error) {
-      if (signal.aborted) throw Object.assign(new Error(`模型服务等待超过 ${Math.ceil(timeoutMS / 1000)} 秒。请稍后重试或切换线路。`), { statusCode: 504 });
-      throw Object.assign(new Error(`连接模型服务失败：${error.cause?.code || error.message}`), { statusCode: 502 });
-    }
+      timing.totalMs = Date.now() - startedAt;
+      const stage = timing.firstChunkMs !== null ? `已收到 ${timing.bytes} 字节后中断` : timing.headersMs !== null ? '已连上但一直没有内容' : '一直没有响应';
+      if (reason === 'idle') throw Object.assign(new Error(`模型服务 ${Math.ceil(timeoutMS / 1000)} 秒没有新数据（${stage}）。请稍后重试或切换线路。`), { statusCode: 504, timing });
+      if (reason === 'max') throw Object.assign(new Error(`模型服务总耗时超过 ${Math.ceil(maxMS / 1000)} 秒（${stage}）。请稍后重试或切换线路。`), { statusCode: 504, timing });
+      throw Object.assign(new Error(`连接模型服务失败：${error.cause?.code || error.message}`), { statusCode: 502, timing });
+    } finally { clearTimeout(idle); clearTimeout(cap); }
+    timing.totalMs = Date.now() - startedAt;
     const data = decodeRelayResponse(raw);
     const errorText = data?.error?.message || data?.error || data?.message || raw;
     const patch = [400,422].includes(response.status) && attempt < 3 ? relayCompatibilityPatch(requestBody, typeof errorText === 'string' ? errorText : JSON.stringify(errorText)) : null;
@@ -105,6 +132,6 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
         continue;
       }
     }
-    return { response, data, requestBody };
+    return { response, data, requestBody, timing };
   }
 }

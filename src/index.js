@@ -2063,13 +2063,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     console.warn("[model-request-failed] " + JSON.stringify({
       ...safeRequestMetrics,
       durationMs: Date.now() - startedAt,
+      timing: error.timing || null,
       error: String(error.message || error).slice(0, 240)
     }));
     throw error;
   }
   console.info("[model-request-result] " + JSON.stringify({
     ...safeRequestMetrics, durationMs: Date.now() - startedAt,
-    httpStatus: relay.response.status
+    httpStatus: relay.response.status,
+    timing: relay.timing || null
   }));
   const { response, data } = relay;
   requestBody = relay.requestBody;
