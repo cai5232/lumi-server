@@ -17,7 +17,10 @@ export function relayEndpoint(base, path) {
 
 export function decodeRelayResponse(raw) {
   try { return JSON.parse(raw); } catch {}
-  const frames = raw.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).filter(line => line && line !== '[DONE]').map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
+  // Some relays send SSE heartbeat comments followed by a plain JSON result.
+  const withoutHeartbeats = raw.split(/\r?\n/).filter(line => !line.trim().startsWith(':')).join('\n').trim();
+  try { return JSON.parse(withoutHeartbeats); } catch {}
+  const frames = raw.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith('data:') || line.startsWith('{')).map(line => line.startsWith('data:') ? line.slice(5).trim() : line).filter(line => line && line !== '[DONE]').map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
   if (!frames.length) return { error: { message: raw.slice(0, 1000) || '中转站返回了空响应' } };
   let content = '', reasoning = '', usage = {}, stop = null;
   const calls = new Map(), blocks = new Map();
@@ -80,6 +83,13 @@ function applyPatch(body, patch) {
 }
 // A finished stream may stay open on some relays; stop reading at the protocol's own end marker.
 const STREAM_END = /(?:^|\n)(?:data:\s*\[DONE\]|event:\s*message_stop|data:\s*\{\s*"type"\s*:\s*"message_stop")/;
+function streamError(raw) {
+  return raw.split(/\r?\n/).some(line => {
+    const text=line.trim().replace(/^data:\s*/, '');
+    if (!text.startsWith('{')) return false;
+    try {const value=JSON.parse(text);return Boolean(value.error || value.type==='error')}catch{return false}
+  });
+}
 const capabilities = new Map();
 // timeoutMS is an idle timeout (no new bytes), so long but live streams are never cut; maxMS is the hard cap.
 export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000 }) {
@@ -108,7 +118,7 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
           if (timing.firstChunkMs === null) timing.firstChunkMs = Date.now() - startedAt;
           timing.bytes += value.byteLength;
           raw += decoder.decode(value, { stream: true });
-          if (STREAM_END.test(raw.slice(-400))) { timing.endedBy = 'marker'; reader.cancel().catch(() => {}); break; }
+          if (STREAM_END.test(raw.slice(-400)) || streamError(raw.slice(-16384))) { timing.endedBy = 'marker'; reader.cancel().catch(() => {}); break; }
         }
         raw += decoder.decode();
       } else { raw = await response.text(); timing.endedBy = 'close'; }

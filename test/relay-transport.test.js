@@ -87,3 +87,10 @@ test('the hard cap still ends a stream that keeps trickling forever',async()=>{
  await assert.rejects(requestRelay({url:'https://drip.test/v1/chat/completions',headers:{},body:{model:'drip'},timeoutMS:200,maxMS:80,fetchImpl:async(_,options)=>new Response(new ReadableStream({start(c){const t=setInterval(()=>c.enqueue(new TextEncoder().encode(': ping\n\n')),10);options.signal.addEventListener('abort',()=>{clearInterval(t);c.error(new Error('aborted'))},{once:true});}}))}),
   error=>error.statusCode===504&&error.message.includes('总耗时'));
 });
+test('heartbeat comments followed by a bare JSON error terminate an open stream immediately',async()=>{
+ const result=await requestRelay({url:'https://mixed.test/v1/messages',headers:{},body:{model:'mixed'},timeoutMS:500,fetchImpl:async()=>sse([': PING\n\n',JSON.stringify({error:{message:'upstream temporarily unavailable'},type:'error'})+'\n'],{close:false})});
+ assert.equal(result.data.error.message,'upstream temporarily unavailable');assert.equal(result.timing.endedBy,'marker');
+});
+test('bare native JSON after heartbeat comments preserves a successful response',()=>{
+ assert.equal(decodeRelayResponse(': PING\n\n'+JSON.stringify({type:'message',content:[{type:'text',text:'真回复'}]})).content[0].text,'真回复');
+});

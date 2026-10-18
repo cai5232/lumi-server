@@ -1,3 +1,4 @@
+import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
@@ -26,6 +27,7 @@ import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promi
 import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
 
 const port = Number(process.env.PORT || 8787);
+const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 await duettoReady;
 const duettoPort = duettoServer.address().port;
@@ -52,7 +54,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -4989,6 +4991,20 @@ const server = createServer(async (req, res) => {
         }
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    const jobMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/requests\/([a-zA-Z0-9_-]{8,128})$/);
+    if (jobMatch && req.method === "GET") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, {error:"unauthorized"});
+      const job = chatJobs.read(decodeURIComponent(jobMatch[1]),jobMatch[2]);
+      return send(res,job.status,job.body);
+    }
+    const asyncChatMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/messages$/);
+    if (asyncChatMatch && req.method === "POST" && req.headers.prefer === "respond-async") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, {error:"unauthorized"});
+      const id = String(req.headers["idempotency-key"] || "");
+      if (!/^[a-zA-Z0-9_-]{8,128}$/.test(id)) return send(res,400,{error:"invalid_idempotency_key"});
+      const job=chatJobs.start(decodeURIComponent(asyncChatMatch[1]),id,await body(req),req.headers.authorization);
+      return send(res,job.status,job.body);
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });

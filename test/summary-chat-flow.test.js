@@ -82,6 +82,16 @@ globalThis.fetch=async(url,options={})=>{
     for(const response of failures){assert.equal(response.status,503);assert.match((await response.json()).error,/上游渠道不可用/);}
     assert.equal((await retry()).status,503,'a later retry must retain the original failure');
     assert.equal((await chat('不同消息','slow-disabled-model','retry-failed-123')).status,409);
+    const accepted=await fetch(base+'/v1/chats/default/messages',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test-token',prefer:'respond-async','idempotency-key':'async-chat-123'},body:JSON.stringify({content:'后台任务测试',provider:'custom',model:'test-model',customProvider:{apiKey:'fake-key',baseURL:'https://model.test/v1',apiFormat:'openai'}})});
+    assert.equal(accepted.status,202);
+    assert.equal((await fetch(base+'/v1/chats/default/requests/async-chat-123')).status,401);
+    let completed;
+    for(let i=0;i<50;i++){
+      completed=await fetch(base+'/v1/chats/default/requests/async-chat-123',{headers:{authorization:'Bearer test-token'}});
+      if(completed.status!==202)break;
+      await new Promise(r=>setTimeout(r,50));
+    }
+    assert.equal(completed.status,200);assert.equal((await completed.json()).assistantMessage.content,'测试回复');
     const failedCalls=(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse).filter(x=>x.model==='slow-disabled-model');
     assert.equal(failedCalls.length,1,'concurrent and later retries must not start another paid model call');
   }finally{
