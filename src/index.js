@@ -4,6 +4,7 @@ import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
 import { extractCompleteContextSummary, isNormalModelCompletion } from "./context-summary.js";
+import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
@@ -2026,9 +2027,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   });
   // Explicit Anthropic-format custom routes support native cache_control.
   // Do not add Anthropic markers to OpenAI-compatible custom routes.
+  const anthropicSafeMessages = nativeAnthropic
+    ? removeMalformedAnthropicThinkingBlocks(providerMessages)
+    : providerMessages;
   const preparedMessages = customProvider && !nativeAnthropic
     ? providerMessages
-    : cacheMessages(providerMessages, model, cacheCurrentUser);
+    : cacheMessages(anthropicSafeMessages, model, cacheCurrentUser);
   const mcpSettings = mcpThreadId ? mailSettings : { servers: [] };
   const mcpServers = mcpSettings.servers.filter(server => server.enabled);
   // Keep Anthropic's remote MCP connector for server-configured providers.
