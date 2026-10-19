@@ -2628,9 +2628,10 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (!chunks.length) return false;
 
   let summary = String(thread.contextSummary || "").trim();
-  // Keep the distiller's maximum below the native extended-thinking budget
-  // threshold: the compacting task needs a concise summary, not long reasoning.
-  const summaryLimit = Math.max(1024, Math.min(1792, Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 1400)));
+  // Preserve the previous generous default while allowing the configured output budget
+  // to pass through without an application-level upper cap.
+  const configuredSummaryLimit = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000);
+  const summaryLimit = Math.max(1024, Number.isFinite(configuredSummaryLimit) ? Math.floor(configuredSummaryLimit) : 25000);
   for (let i = 0; i < chunks.length; i++) {
     const batchStartedAt = Date.now();
     console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
