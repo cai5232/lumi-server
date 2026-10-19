@@ -222,15 +222,16 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.equal(thirdKeepalive.hit, true);
     await stopBackend(child);
     child = undefined;
-    env.LUMI_SYSTEM_PROMPT = "不同的系统提示词".repeat(500);
+    env.LUMI_SYSTEM_PROMPT = "旧环境变量提示词".repeat(500);
     child = await startBackend(port, env);
-    const changed = await chat("第三条消息");
+    const changed = await chat("第三条消息", "旧客户端提示词".repeat(500));
     assert.ok(changed.assistantMessage);
-    assert.equal(normalSeen[5].hit, false, "a changed system prompt invalidates the prefix");
+    assert.equal(normalSeen[5].hit, true, "legacy environment and client prompts must not replace the backend prompt");
+    assert.equal(normalSeen[5].system, normalSeen[3].system, "the backend prompt remains canonical");
     const changedHealth = await fetch(`${base}/health`).then((response) => response.json());
-    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameSystemPrompt, false);
-    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameAssistantPrefix, false);
-    assert.equal(changedHealth.cache.prompt.lastChatContinuity.readTokens, 0);
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameSystemPrompt, true);
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.sameAssistantPrefix, true);
+    assert.equal(changedHealth.cache.prompt.lastChatContinuity.readTokens, 2048);
   } finally {
     await stopBackend(child);
     await new Promise((resolve) => provider.close(resolve));
