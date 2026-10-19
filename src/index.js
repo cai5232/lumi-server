@@ -2612,7 +2612,7 @@ function setCompactionDiagnostics(id, patch) {
 async function compactContext(thread, plan, { model, customProvider }) {
   // Bound *every* distillation request, including a single enormous message.
   // Keep all source text; chunk long messages instead of dropping any content.
-  const maxChunkChars = Math.max(4000, Math.min(12000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 8000)));
+  const maxChunkChars = Math.max(4000, Math.min(64000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 48000)));
   const chunks = [];
   let chunk = "";
   const append = (part) => {
@@ -2640,12 +2640,37 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (chunk) chunks.push(chunk);
   if (!chunks.length) return false;
 
-  let summary = String(thread.contextSummary || "").trim();
+  // Resume only when the previous summary, exact history and model route agree.
+  const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
+  const fingerprint = createHash("sha256").update(JSON.stringify({
+    boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    through: plan.throughMessageId, chunks, model: process.env.LUMI_COMPACTION_MODEL || model, route: customProvider
+  })).digest("hex");
+  let checkpoint = null;
+  try {
+    const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
+    if (saved.fingerprint === fingerprint && Number.isInteger(saved.nextIndex) &&
+        saved.nextIndex >= 0 && saved.nextIndex <= chunks.length &&
+        typeof saved.summary === "string") checkpoint = saved;
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[compaction] checkpoint ignored: " + error.message);
+  }
+  let summary = checkpoint ? checkpoint.summary : String(thread.contextSummary || "").trim();
+  const resumeIndex = checkpoint?.nextIndex || 0;
+  const saveCheckpoint = async (nextIndex, nextSummary) => {
+    await mkdir(dataDir, { recursive: true });
+    const temporaryPath = checkpointPath + "." + randomUUID() + ".tmp";
+    try {
+      await writeFile(temporaryPath, JSON.stringify({ fingerprint, nextIndex, summary: nextSummary }));
+      await rename(temporaryPath, checkpointPath);
+    } finally { await unlink(temporaryPath).catch(() => {}); }
+  };
+  if (resumeIndex) console.info("[compaction] resuming at batch " + (resumeIndex + 1) + "/" + chunks.length);
   // Preserve the previous generous default while allowing the configured output budget
   // to pass through without an application-level upper cap.
   const configuredSummaryLimit = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000);
   const summaryLimit = Math.max(1024, Number.isFinite(configuredSummaryLimit) ? Math.floor(configuredSummaryLimit) : 25000);
-  for (let i = 0; i < chunks.length; i++) {
+  for (let i = resumeIndex; i < chunks.length; i++) {
     const batchStartedAt = Date.now();
     console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
       " chars=" + chunks[i].length + " summaryChars=" + summary.length);
@@ -2676,6 +2701,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
     console.info("[compaction] batch " + (i + 1) + "/" + chunks.length +
       " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s finish=" + result.finishReason);
     summary = next;
+    await saveCheckpoint(i + 1, summary);
   }
   // Commit atomically only after every chunk succeeds.
   thread.contextSummary = summary;
@@ -2735,6 +2761,13 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const threads = await readThreads();
         const snapshot = threads[id];
         if (!snapshot) return;
+        const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
+        try {
+          const saved = JSON.parse(await readFile(cooldownPath, "utf8"));
+          if (Date.now() < Number(saved.retryAt || 0)) return;
+        } catch (error) {
+          if (error?.code !== "ENOENT") console.warn("[compaction] cooldown ignored: " + error.message);
+        }
         const plan = compactionPlan(snapshot);
         if (!plan) {
           setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
@@ -2754,6 +2787,8 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, snapshot);
         if (applied) {
           compactionRetryAfter.delete(id);
+          const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
+          await unlink(cooldownPath).catch(() => {});
           setCompactionDiagnostics(id, { status: "succeeded", completedAt: new Date().toISOString(), error: null });
           console.info("[compaction] background summary committed thread=" + id);
         } else {
@@ -2763,6 +2798,11 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
       } catch (error) {
         const retryAt = Date.now() + 10 * 60_000;
         compactionRetryAfter.set(id, retryAt);
+        try {
+          await mkdir(dataDir, { recursive: true });
+          const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
+          await writeFile(cooldownPath, JSON.stringify({ retryAt }));
+        } catch (persistError) { console.warn("[compaction] cooldown save failed: " + persistError.message); }
         setCompactionDiagnostics(id, { status: "failed", failedAt: new Date().toISOString(), retryAt: new Date(retryAt).toISOString(), error: String(error.message || error).slice(0, 500) });
         console.warn("[compaction] background attempt failed; will retry after cooldown: " +
           String(error.message || error).slice(0, 300));
