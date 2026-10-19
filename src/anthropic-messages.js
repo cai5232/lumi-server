@@ -6,7 +6,7 @@ export function removeMalformedAnthropicThinkingBlocks(messages) {
 
     const content = message.content.filter((block) =>
       !block || typeof block !== "object" || block.type !== "thinking" ||
-      typeof block.thinking === "string"
+      (typeof block.thinking === "string" && block.thinking.trim().length > 0)
     );
     if (content.length === message.content.length) return [message];
     return content.length ? [{ ...message, content }] : [];
