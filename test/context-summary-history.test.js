@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
+import {extractCompleteContextSummary, isNormalModelCompletion} from '../src/context-summary.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const context = {};
@@ -34,7 +35,8 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const messages = [{id:'a',role:'user',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
   const calls = [];
   Object.assign(context, {process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
-    callModel:async request => {calls.push(request);return '<context_summary>新摘要</context_summary>';}});
+    callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
+    extractCompleteContextSummary, isNormalModelCompletion});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
   vm.runInContext(source.slice(source.indexOf('async function compactContext('), source.indexOf('\nconst backgroundCompactionJobs')), context);
   assert.ok(context.messageTokens(messages) < 100);
