@@ -3130,6 +3130,10 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
+  const configuredSystemPrompt = typeof process.env.LUMI_SYSTEM_PROMPT === "string" && process.env.LUMI_SYSTEM_PROMPT.trim()
+    ? process.env.LUMI_SYSTEM_PROMPT
+    : typeof systemPrompt === "string" && systemPrompt.trim() ? systemPrompt : "";
+  if (configuredSystemPrompt) system = configuredSystemPrompt;
   const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous

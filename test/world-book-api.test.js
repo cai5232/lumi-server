@@ -20,7 +20,7 @@ test('authorized API persists books, applies selection and injects updated conte
  let child;
  const base=`http://127.0.0.1:${port}`;
  const start=async()=>{
-  child=spawn(process.execPath,['src/index.js'],{env:{...process.env,PORT:String(port),LUMI_DATA_DIR:directory,LUMI_PUSH_API_TOKEN:'test',LUMI_MODEL_API_KEY:'test',LUMI_MODEL_API_URL:`http://127.0.0.1:${providerPort}/v1`,LUMI_MEMORY_API_URL:`http://127.0.0.1:${providerPort}`,LUMI_MODEL_NAME:'test-model',LUMI_CACHE_KEEPALIVE_ENABLED:'false'},stdio:'ignore'});
+  child=spawn(process.execPath,['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'],{env:{...process.env,PORT:String(port),LUMI_DATA_DIR:directory,LUMI_PUSH_API_TOKEN:'test',LUMI_MODEL_API_KEY:'test',LUMI_TEST_MODEL_TARGET:`http://127.0.0.1:${providerPort}`,LUMI_MODEL_API_URL:`http://127.0.0.1:${providerPort}/v1`,LUMI_MEMORY_API_URL:`http://127.0.0.1:${providerPort}`,LUMI_MODEL_NAME:'test-model',LUMI_CACHE_KEEPALIVE_ENABLED:'false'},stdio:'ignore'});
   for(let i=0;i<100;i++){try{if((await fetch(base+'/health')).ok)return;}catch{} await new Promise(r=>setTimeout(r,50));} throw Error('backend unavailable');
  };
  const stop=async()=>{ if(child&&child.exitCode===null){const done=new Promise(r=>child.once('exit',r)); child.kill(); await done;} child=null; };
@@ -31,7 +31,7 @@ test('authorized API persists books, applies selection and injects updated conte
   assert.equal((await request('/v1/world-books','GET',undefined,false)).status,401);
   const initial=await (await request('/v1/world-books')).json(); assert.equal(initial.revision,0);
   let settings=await (await request('/v1/world-books','PUT',{books:[{id:'b',name:'龙',entries:[{id:'e',content:'WORLD_DRAGON_V1',keywords:['dragon']}]}],activeBookIds:['b'],revision:0})).json();
-  const chat=async content=>{ const r=await request('/v1/chats/default/messages','POST',{content}); assert.equal(r.status,200); assert.ok((await r.json()).assistantMessage); };
+  const chat=async content=>{ const r=await request('/v1/chats/default/messages','POST',{content,provider:'custom',model:'test-model',customProvider:{apiKey:'test',baseURL:'https://model.test/v1',apiFormat:'openai'}}); assert.equal(r.status,200); assert.ok((await r.json()).assistantMessage); };
   await chat('dragon'); assert.ok(plain().includes('WORLD_DRAGON_V1'));
   settings.books[0].entries[0].content='WORLD_DRAGON_V2'; settings=await(await request('/v1/world-books','PUT',settings)).json();
   await chat('dragon again'); assert.ok(plain().includes('WORLD_DRAGON_V2')); assert.ok(!plain().includes('WORLD_DRAGON_V1'));

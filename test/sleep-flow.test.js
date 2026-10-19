@@ -19,7 +19,7 @@ async function freePort() {
 }
 
 async function startBackend(port, env) {
-  const child = spawn(process.execPath, ["src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
+  const child = spawn(process.execPath, ["--import", new URL('./mock-model-fetch.js', import.meta.url).pathname, "src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
   for (let i = 0; i < 100; i += 1) {
     if (child.exitCode !== null) throw new Error(`backend exited: ${child.exitCode}`);
     try {
@@ -73,7 +73,7 @@ test("farewell starts sleep and chosen nightmare contact is delivered without ex
   const port = await freePort();
   const env = {
     LUMI_DATA_DIR: dataDir,
-    LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
+    LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`,
     LUMI_MODEL_API_KEY: "test",
     LUMI_MODEL_NAME: "test-model",
@@ -90,7 +90,7 @@ test("farewell starts sleep and chosen nightmare contact is delivered without ex
     const base = `http://127.0.0.1:${port}`;
     const response = await fetch(`${base}/v1/chats/default/messages`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: "晚安", systemPrompt: "使用中文回复" })
+      body: JSON.stringify({ content: "晚安", systemPrompt: "使用中文回复", provider: "custom", model: "test-model", customProvider: { apiKey: "test", baseURL: "https://model.test/v1", apiFormat: "openai" } })
     });
     assert.equal(response.status, 200);
     const deadline = Date.now() + 15_000;

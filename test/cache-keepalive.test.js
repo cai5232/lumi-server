@@ -19,7 +19,7 @@ async function freePort() {
 }
 
 async function startBackend(port, env) {
-  const child = spawn(process.execPath, ["src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
+  const child = spawn(process.execPath, ["--import", new URL('./mock-model-fetch.js', import.meta.url).pathname, "src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
   let lastHealthFailure = "no response";
   for (let i = 0; i < 100; i++) {
     if (child.exitCode !== null) throw new Error(`backend exited: ${child.exitCode}`);
@@ -47,15 +47,15 @@ test("keepalive idle cap is measured from user activity, not previous probes", a
     for await (const _chunk of req) { /* drain request */ }
     res.writeHead(200, { "content-type": "application/json" });
     res.end(req.method === "GET" ? "[]" : JSON.stringify({
-      choices: [{ message: { content: "ack" } }],
-      usage: { cache_read_input_tokens: 2048 }
+      type: "message", content: [{ type: "text", text: "ack" }], stop_reason: "end_turn",
+      usage: { input_tokens: 2048, cache_read_input_tokens: 2048 }
     }));
   });
   const providerPort = await listen(provider);
   const port = await freePort();
   const env = {
     LUMI_DATA_DIR: dataDir,
-    LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
+    LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`,
     LUMI_MODEL_API_KEY: "test",
     LUMI_MODEL_NAME: "anthropic/claude-sonnet-4.6",
@@ -69,7 +69,7 @@ test("keepalive idle cap is measured from user activity, not previous probes", a
     const base = `http://127.0.0.1:${port}`;
     const chat = await fetch(`${base}/v1/chats/default/messages`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content: "缓存测试", systemPrompt: "稳定的系统提示词".repeat(500) })
+      body: JSON.stringify({ content: "缓存测试", systemPrompt: "稳定的系统提示词".repeat(500), provider: "custom", model: "anthropic/claude-sonnet-4-6", customProvider: { apiKey: "test", baseURL: "https://model.test/v1", apiFormat: "anthropic" } })
     }).then(r => r.json());
     assert.ok(chat.assistantMessage);
     await stopBackend(child);
@@ -118,12 +118,20 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     const plain = body.messages.map((message) => ({ role: message.role, content: typeof message.content === "string" ? message.content : message.content.map((block) => block.text) }));
     const breakpoints = body.messages.flatMap((message, index) =>
       Array.isArray(message.content) && message.content.some((block) => block.cache_control) ? [index] : []);
-    const keys = breakpoints.map((index) => JSON.stringify({ model: body.model, prefix: plain.slice(0, index + 1) }));
+    const cachePrefix = (messages) => messages.map((message) => ({
+      ...message,
+      content: Array.isArray(message.content) && message.content.length === 1 ? message.content[0] : message.content
+    }));
+    const keys = breakpoints.map((index) => JSON.stringify({ model: body.model, system: JSON.stringify(body.system || ""), prefix: cachePrefix(plain.slice(0, index + 1)) }));
     const hitKey = keys.filter((key) => cache.has(key)).at(-1);
     const hit = Boolean(hitKey);
     for (const key of keys) cache.add(key);
+    // A completed assistant reply becomes part of the reusable prefix on the
+    // following request, matching how this test models Anthropic cache reads.
+    cache.add(JSON.stringify({ model: body.model, system: JSON.stringify(body.system || ""), prefix: cachePrefix([...plain, { role: "assistant", content: "AI 原始回复" }]) }));
+
     const observation = {
-      plain, breakpoints, keys, hit, hitKey,
+      plain, system: JSON.stringify(body.system || ""), breakpoints, keys, hit, hitKey,
       emotionEvaluation: plain.some((message) => typeof message.content === "string" && message.content.includes("情绪状态评估器"))
     };
     seen.push(observation);
@@ -133,13 +141,13 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
       await new Promise((resolve) => { releaseSecondKeepalive = resolve; });
     }
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ choices: [{ message: { content: "AI 原始回复" } }], usage: { cache_read_input_tokens: hit ? 2048 : 0, cache_creation_input_tokens: hit ? 256 : 2048 } }));
+    res.end(JSON.stringify({ type: "message", content: [{ type: "text", text: "AI 原始回复" }], stop_reason: "end_turn", usage: { input_tokens: 2048, cache_read_input_tokens: hit ? 2048 : 0, cache_creation_input_tokens: hit ? 256 : 2048 } }));
   });
   const providerPort = await listen(provider);
   const port = await freePort();
   const env = {
     LUMI_DATA_DIR: dataDir,
-    LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
+    LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`,
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`,
     LUMI_MODEL_API_KEY: "test",
     LUMI_MODEL_NAME: "anthropic/claude-sonnet-4.6",
@@ -153,7 +161,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     const base = `http://127.0.0.1:${port}`;
     const chat = (content, systemPrompt) => fetch(`${base}/v1/chats/default/messages`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ content, systemPrompt })
+      body: JSON.stringify({ content, systemPrompt, provider: "custom", model: "anthropic/claude-sonnet-4-6", customProvider: { apiKey: "test", baseURL: "https://model.test/v1", apiFormat: "anthropic" } })
     }).then((response) => response.json());
     const first = await chat("第一条消息", "稳定的系统提示词".repeat(500));
     assert.ok(first.assistantMessage, JSON.stringify(first));
@@ -172,7 +180,7 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.equal(normalSeen[1].hit, true);
     const assistantKey = normalSeen[1].keys.at(-1);
     assert.ok(assistantKey.includes("AI 原始回复"), "the refreshed boundary must contain the assistant response");
-    assert.deepEqual(normalSeen[1].plain.at(-2).content, [first.assistantMessage.modelContent]);
+    assert.deepEqual(normalSeen[1].plain.at(-2).content, [first.assistantMessage.content]);
     await stopBackend(child);
     child = undefined;
     const refreshedThreads = JSON.parse(await readFile(path, "utf8"));
@@ -194,8 +202,8 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
     assert.ok(next.assistantMessage, JSON.stringify(next));
     assert.equal(normalSeen[3].hit, true);
     assert.equal(normalSeen[3].hitKey, assistantKey, "the next chat must read the assistant prefix");
-    assert.equal(normalSeen[0].plain[0].content[0], normalSeen[1].plain[0].content[0], "original and keepalive system prompts must match byte for byte");
-    assert.equal(normalSeen[1].plain[0].content[0], normalSeen[3].plain[0].content[0], "keepalive and real chat system prompts must match byte for byte");
+    assert.equal(normalSeen[0].system, normalSeen[1].system, "original and keepalive system prompts must match byte for byte");
+    assert.equal(normalSeen[1].system, normalSeen[3].system, "keepalive and real chat system prompts must match byte for byte");
     const health = await fetch(`${base}/health`).then((response) => response.json());
     assert.equal(health.cache.prompt.lastChatContinuity.sameSystemPrompt, true);
     assert.equal(health.cache.prompt.lastChatContinuity.sameAssistantPrefix, true);
@@ -212,7 +220,11 @@ test("keepalive reads the old prefix and the next chat reads its assistant prefi
       method: "POST", headers: { authorization: "Bearer test" }
     }).then((response) => response.json());
     assert.equal(thirdKeepalive.hit, true);
-    const changed = await chat("第三条消息", "不同的系统提示词".repeat(500));
+    await stopBackend(child);
+    child = undefined;
+    env.LUMI_SYSTEM_PROMPT = "不同的系统提示词".repeat(500);
+    child = await startBackend(port, env);
+    const changed = await chat("第三条消息");
     assert.ok(changed.assistantMessage);
     assert.equal(normalSeen[5].hit, false, "a changed system prompt invalidates the prefix");
     const changedHealth = await fetch(`${base}/health`).then((response) => response.json());

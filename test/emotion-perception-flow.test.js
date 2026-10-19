@@ -33,10 +33,10 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
   const port = await listen(portProbe);
   await new Promise(resolve => portProbe.close(resolve));
   const env = { ...process.env, PORT: String(port), LUMI_DATA_DIR: folder,
-    LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`, LUMI_MODEL_API_KEY: 'test-only', LUMI_MODEL_NAME: 'test-model',
+    LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`, LUMI_MODEL_API_KEY: 'test-only', LUMI_MODEL_NAME: 'test-model',
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`, LUMI_BACKGROUND_PULSE_MS: '60000', LUMI_CACHE_KEEPALIVE_ENABLED: 'false' };
   delete env.MURMUR_SERVICE_URL;
-  const backend = spawn(process.execPath, ['src/index.js'], { cwd: new URL('..', import.meta.url), env, stdio: 'ignore' });
+  const backend = spawn(process.execPath, ['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'], { cwd: new URL('..', import.meta.url), env, stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   try {
     let ready = false;
@@ -47,7 +47,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
     }
     assert.ok(ready);
     for (const content of ['拿刚才的小失误开个玩笑', '还想着刚才的事吗']) {
-      const result = await fetch(`${base}/v1/chats/default/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content }) });
+      const result = await fetch(`${base}/v1/chats/default/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } }) });
       assert.equal(result.status, 200);
       const data = await result.json();
       assert.equal(typeof data.assistantMessage?.content, 'string');
