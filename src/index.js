@@ -27,10 +27,12 @@ import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyC
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
 import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
+import { createStickerStore } from "./stickers.js";
 
 const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const stickerStore = createStickerStore(dataDir);
 await duettoReady;
 const duettoPort = duettoServer.address().port;
 const musicService = createMusicService(dataDir);
@@ -3553,6 +3555,26 @@ async function body(req) {
   return raw ? JSON.parse(raw) : {};
 }
 
+async function limitedJSONBody(req, maxBytes) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      const error = new Error("request_body_too_large");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
+  }
+  try { return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {}; }
+  catch {
+    const error = new Error("invalid_json");
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
 async function binaryBody(req, maxBytes) {
   const chunks = [];
   let size = 0;
@@ -3877,6 +3899,28 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname === "/v1/stickers" || url.pathname.startsWith("/v1/stickers/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method === "GET" && url.pathname === "/v1/stickers") {
+        return send(res, 200, await stickerStore.list());
+      }
+      if (req.method === "POST" && url.pathname === "/v1/stickers") {
+        const input = await limitedJSONBody(req, 3_600_000);
+        return send(res, 201, { sticker: await stickerStore.add(input) });
+      }
+      const stickerDelete = url.pathname.match(/^\/v1\/stickers\/([0-9a-f-]{36})$/i);
+      if (req.method === "DELETE" && stickerDelete) {
+        const removed = await stickerStore.remove(stickerDelete[1]);
+        return send(res, removed ? 200 : 404, { ok: removed });
+      }
+      const stickerImage = url.pathname.match(/^\/v1\/stickers\/assets\/([0-9a-f-]{36}\.(?:jpg|png|gif|webp))$/i);
+      if (req.method === "GET" && stickerImage) {
+        const image = await stickerStore.image(stickerImage[1]);
+        if (!image) return send(res, 404, { error: "not_found" });
+        return sendBinary(res, 200, image.bytes, image.mimeType);
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
     if (req.method === "GET" && url.pathname === "/v1/usage/requests") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const requests = await modelRequestStore.read();
@@ -5137,7 +5181,13 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && match[2]) {
       const input = messageInput ?? await body(req);
-      const images = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : [];
+      const isStickerMessage = input.contentType === "sticker";
+      const stickerImageURL = isStickerMessage && typeof input.stickerImageURL === "string" && /^\/v1\/stickers\/assets\/[0-9a-f-]{36}\.(?:jpg|png|gif|webp)$/i.test(input.stickerImageURL)
+        ? input.stickerImageURL
+        : null;
+      if (isStickerMessage && !stickerImageURL) return send(res, 400, { error: "sticker_image_required" });
+      // Sticker pixels are for the chat bubble; the model gets the human-readable name only.
+      const images = isStickerMessage ? [] : (Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,/i.test(image)).slice(0, 4) : []);
       const galleryImageIDs = Array.isArray(input.galleryImageIDs)
         ? input.galleryImageIDs.filter((itemID) => typeof itemID === "string" && /^[a-f0-9]{64}$/i.test(itemID)).slice(0, 4)
         : [];
@@ -5186,7 +5236,7 @@ const server = createServer(async (req, res) => {
       const result = (async () => {
       const messageText = String(input.content || "").trim();
       markUserActivity(threads[id], messageText);
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), createdAt: new Date().toISOString() };
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
       const storedUserMessage = { ...userMessage, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
@@ -5204,7 +5254,10 @@ const server = createServer(async (req, res) => {
         console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
         throw error;
       }
-      generated = await generateReply({ input: `${userMessage.content}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: userMessage.content, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      const modelMessageContent = isStickerMessage
+        ? `[用户发送了贴纸「${messageText.match(/^\[表情:\s*(.+)\]$/)?.[1] || "未命名"}」]`
+        : userMessage.content;
+      generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);

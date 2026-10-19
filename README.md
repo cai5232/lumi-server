@@ -9,15 +9,15 @@ npm install
 npm run dev
 ```
 
-默认端口为 `8787`，数据保存在 `data/threads.json`。生产环境请通过 `LUMI_DATA_DIR` 指定持久化目录，并把模型服务的密钥放在 Zeabur 环境变量中，不要写入代码或 iOS 客户端。
+默认端口为 `8787`，数据保存在 `data/threads.json`。生产环境请通过 `LUMI_DATA_DIR` 指定持久化目录，并把模型服务的密钥放在部署平台环境变量中，不要写入代码或 iOS 客户端。
 
-Zeabur 环境变量：
+部署环境变量：
 
 - `LUMI_MODEL_API_URL`：OpenAI 兼容的 Chat Completions 完整地址
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
 - `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
-- `LUMI_DATA_DIR`：建议设为 `/data`，并在 Zeabur 挂载持久化 Volume 到 `/data`
+- `LUMI_DATA_DIR`：建议设为 `/data`，并在部署平台挂载持久化 Volume 到 `/data`
 - `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
 - 上下文压缩：以上游上一条请求实际输入 Token 数为依据，达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 后，在下一条普通聊天请求中单独调用摘要模型压缩较早历史；默认窗口 `200000`、触发比例 `0.85`（约 170k）。保留最近至少 `10` 轮、最多 `15` 轮完整对话，并以约 `20000` token 为尾部目标；摘要模型默认使用当前聊天模型，也可通过 `LUMI_COMPACTION_MODEL` 单独指定。电话和主动提醒请求不触发压缩。
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
@@ -26,6 +26,12 @@ Zeabur 环境变量：
 - `LUMI_MEMORY_WRITE_PATH`：可选，写入路径，默认 `/memories`
 - `LETTERS_MAP_BASE_URL`：藏宝地图服务地址，默认 `https://lumi-hidden-letters.zeabur.app`
 - `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端；配置后会把该服务的 MCP 自动加入 Lumi
+
+## 聊天贴纸库
+
+iOS 聊天输入框的贴纸按钮读取 `GET /v1/stickers`，新增贴纸使用 `POST /v1/stickers`（JSON 字段：`name`、`category`、`dataURL`，支持 JPEG、PNG、GIF、WebP，单张最大 2.5 MB）。读取和新增接口，以及贴纸图片读取接口，都使用现有 `LUMI_PUSH_API_TOKEN` Bearer 鉴权。贴纸目录和目录清单分别保存在 `LUMI_DATA_DIR/stickers/` 与 `LUMI_DATA_DIR/stickers.json`。
+
+Coolify 部署时，将 `LUMI_DATA_DIR` 设为 `/data`，并把持久化 Volume 挂载到 `/data`；这样重新部署或重启后，贴纸图片和清单仍会保留。聊天记录只保存贴纸名称和资源路径，聊天模型收到名称文本，不会收到贴纸图片内容。
 
 藏宝地图 MCP 地址为 `${LETTERS_MAP_BASE_URL}/mcp`，传输方式是 Streamable HTTP，授权头由后端使用 `LETTERS_MAP_PASSWORD` 自动生成。Lumi 会连接并读取原仓库提供的五个工具；聊天模型按对话需要调用。无需把地图页面或地图数据搬进 Lumi。
 - `LUMI_WATCH_ANALYSIS_API_URL`、`LUMI_WATCH_ANALYSIS_API_KEY`、`LUMI_WATCH_ANALYSIS_MODEL`：可选的共看视频分析默认模型；iOS 页面填写的配置会按请求单独转发，不要求在这里配置
