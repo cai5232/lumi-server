@@ -3,6 +3,7 @@ import { createModelRequestStore } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
+import { extractCompleteContextSummary, isNormalModelCompletion } from "./context-summary.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
@@ -1577,8 +1578,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\s*>/gi, "")
     .trim();
 }
 
@@ -1978,7 +1979,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal, returnMetadata = false }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2328,7 +2329,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
-    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace });
+    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -2339,6 +2340,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${finishReason} contentTypes=${blockTypes} thinkingPresent=${Boolean(nativeThinking)}`);
     throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
   }
+  const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
+  if (returnMetadata) return { content: content.trim(), finishReason };
   const finalContent = nativeThinking ? `<thinking>${nativeThinking}</thinking>\n${content.trim()}` : content.trim();
   return toolTrace.length ? `${finalContent}\n<lumi_tool_calls>${JSON.stringify(toolTrace)}</lumi_tool_calls>` : finalContent;
 }
@@ -2595,6 +2598,10 @@ function compactionPlan(thread) {
 
 // A failed compaction must not stall every subsequent chat message.
 const compactionRetryAfter = new Map();
+const compactionDiagnostics = new Map();
+function setCompactionDiagnostics(id, patch) {
+  compactionDiagnostics.set(id, { ...(compactionDiagnostics.get(id) || {}), ...patch, updatedAt: new Date().toISOString() });
+}
 
 async function compactContext(thread, plan, { model, customProvider }) {
   // Bound *every* distillation request, including a single enormous message.
@@ -2636,11 +2643,11 @@ async function compactContext(thread, plan, { model, customProvider }) {
     const batchStartedAt = Date.now();
     console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
       " chars=" + chunks[i].length + " summaryChars=" + summary.length);
-    let raw;
+    let result;
     try {
-      raw = await callModel({
+      result = await callModel({
       messages: [
-        { role: "system", content: "你是长期聊天上下文的保真蒸馏器。只输出 <context_summary>...</context_summary>。将已有摘要与新增对话合并，保留重要事实、关系变化、承诺、偏好、时间与未完成事项。不得编造。" },
+        { role: "system", content: "你是长期聊天上下文的保真蒸馏器。只输出一个完整的 <context_summary>...</context_summary>，不要输出寒暄、分析或 Markdown。准确合并已有摘要与新增历史，优先保留用户画像、关系变化、偏好与边界、重要事实、承诺约定、未完成事项及近期话题来龙去脉。尽量按日期和时间整理具体事件，保留人物、因果与明确表达；区分事实和推测，不要编造，也不要把重要细节泛化。摘要应足够完整，让后续聊天能自然承接。" },
         { role: "user", content: "已有滚动摘要：\n" + (summary || "（无）") + "\n\n新增历史（第 " + (i + 1) + "/" + chunks.length + " 批）：\n" + chunks[i] }
       ],
       provider: "custom",
@@ -2648,17 +2655,20 @@ async function compactContext(thread, plan, { model, customProvider }) {
       customProvider,
       maxOutputTokens: summaryLimit,
       temperature: 0.2,
-      cacheCurrentUser: false
+      cacheCurrentUser: false,
+      returnMetadata: true
       });
     } catch (error) {
       throw new Error("batch " + (i + 1) + "/" + chunks.length + " after " +
         Math.round((Date.now() - batchStartedAt) / 1000) + "s: " + String(error.message || error));
     }
+    if (!isNormalModelCompletion(result?.finishReason)) {
+      throw new Error("distiller did not finish normally at chunk " + (i + 1) + ": " + String(result?.finishReason || "unknown"));
+    }
+    const next = extractCompleteContextSummary(result?.content);
+    if (!next) throw new Error("distiller returned an empty, malformed, or incomplete context summary at chunk " + (i + 1));
     console.info("[compaction] batch " + (i + 1) + "/" + chunks.length +
-      " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s");
-    const match = raw.match(/<context_summary[^>]*>([\s\S]*?)<\/context_summary>/i);
-    const next = (match ? match[1] : raw).trim();
-    if (!next) throw new Error("distiller returned an empty context summary at chunk " + (i + 1));
+      " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s finish=" + result.finishReason);
     summary = next;
   }
   // Commit atomically only after every chunk succeeds.
@@ -2720,21 +2730,34 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const snapshot = threads[id];
         if (!snapshot) return;
         const plan = compactionPlan(snapshot);
-        if (!plan) return;
+        if (!plan) {
+          setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
+          return;
+        }
+        setCompactionDiagnostics(id, { status: "running", lastAttemptAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate, sourceMessageCount: plan.olderMessages.length, error: null });
         const oldSummary = String(snapshot.contextSummary || "");
         const oldBoundary = String(snapshot.compactedThroughMessageId || "");
         const completed = await compactContext(snapshot, plan, { model, customProvider });
         if (!completed) return;
         // If the user is chatting, wait for a later turn rather than writing
         // over the chat's concurrently-updated thread snapshot.
-        if (activeChatThreads.has(id)) return;
+        if (activeChatThreads.has(id)) {
+          setCompactionDiagnostics(id, { status: "deferred", reason: "chat_in_progress" });
+          return;
+        }
         const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, snapshot);
         if (applied) {
           compactionRetryAfter.delete(id);
+          setCompactionDiagnostics(id, { status: "succeeded", completedAt: new Date().toISOString(), error: null });
           console.info("[compaction] background summary committed thread=" + id);
-        } else console.info("[compaction] summary commit deferred because thread changed or is busy: " + id);
+        } else {
+          setCompactionDiagnostics(id, { status: "deferred", reason: "thread_changed_or_busy" });
+          console.info("[compaction] summary commit deferred because thread changed or is busy: " + id);
+        }
       } catch (error) {
-        compactionRetryAfter.set(id, Date.now() + 10 * 60_000);
+        const retryAt = Date.now() + 10 * 60_000;
+        compactionRetryAfter.set(id, retryAt);
+        setCompactionDiagnostics(id, { status: "failed", failedAt: new Date().toISOString(), retryAt: new Date(retryAt).toISOString(), error: String(error.message || error).slice(0, 500) });
         console.warn("[compaction] background attempt failed; will retry after cooldown: " +
           String(error.message || error).slice(0, 300));
       } finally {
@@ -2966,7 +2989,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const proactiveRawContext = proactive
     ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16).map((message) => message.content).join("\n")
     : "";
-  const memories = callMode ? [] : await searchMemories(proactive ? [input, summaryText, proactiveRawContext].filter(Boolean).join("\n") : input);
+  const recentMemoryContext = contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-12).map((message) => historicalModelContent(message.modelContent) || message.content).filter(Boolean).join("\n");
+  const memoryRecallQuery = [input, summaryText, recentMemoryContext, proactive ? proactiveRawContext : ""].filter(Boolean).join("\n");
+  const memories = callMode ? [] : await searchMemories(memoryRecallQuery);
   // The model should see the user's local clock, not an ISO/UTC timestamp
   // ending in `Z`. Keep the zone explicit so relative dates are unambiguous.
   const timestamp = new Intl.DateTimeFormat("zh-CN", {
@@ -2980,7 +3005,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     hourCycle: "h23"
   }).format(new Date()).replace(/\//g, "-");
   const retrieved = memories.length
-    ? `<retrieved_memories source="system" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>`
+    ? `<core_memories source="memory_core" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</core_memories>`
     : "";
   const relevantMessages = contextMessages(thread);
   const chatHistory = relevantMessages
@@ -4591,7 +4616,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
