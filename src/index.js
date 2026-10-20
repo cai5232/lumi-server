@@ -2509,10 +2509,11 @@ function normalizeMemories(data) {
 }
 
 async function searchMemories(input) {
-  const keywords = await extractMemoryKeywords(input);
   const source = String(input || "").trim().slice(0, 1200);
   if (!source) return [];
-  const query = [source, ...keywords].filter(Boolean).join(" ").slice(0, 800);
+  // Keep the actual topic first. Do not append a huge rolling summary:
+  // Nocturne performs lexical topic matching and rejects >800 characters.
+  const query = source.slice(0, 800);
   try {
     const memories = normalizeMemories(await memorySearchRequest(query));
     cacheStats.memoryResults += memories.length;
@@ -2561,17 +2562,16 @@ async function archiveDreamInNocturne(thread, record) {
 
 async function writeMemory(content, threadId) {
   try {
-    const created = await memoryRequest(memoryWritePath, {
-      dream_line: content,
-      content,
-      memory: content,
-      text: content,
-      status: "draft",
-      note_type: "inward",
-      drive_tag: "lumi",
-      source: "lumi",
-      threadId
-    });
+    const directNookBridge = memoryWritePath.replace(/\/$/, "") === "/api/integrations/nook/memories";
+    const created = await memoryRequest(memoryWritePath, directNookBridge
+      ? { content, kind: "memory", tags: "lumi,dialogue,auto" }
+      : {
+          dream_line: content, content, memory: content, text: content,
+          status: "draft", note_type: "inward", drive_tag: "lumi",
+          source: "lumi", threadId
+        });
+    if (directNookBridge && created?.ok !== true) throw new Error("记忆库未确认保存成功");
+    if (created?.error) throw new Error(typeof created.error === "string" ? created.error : JSON.stringify(created.error));
     const id = created?.id || created?.note?.id || created?.data?.id;
     if (id && memoryWritePath.includes("/api/latent-notes")) {
       await memoryRequest(`${memoryWritePath}/${encodeURIComponent(id)}/update`, { status: "approved" });
@@ -2923,7 +2923,16 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16).map((message) => message.content).join("\n")
     : "";
   const recentMemoryContext = contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-12).map((message) => historicalModelContent(message.modelContent) || message.content).filter(Boolean).join("\n");
-  const memoryRecallQuery = [input, summaryText, recentMemoryContext, proactive ? proactiveRawContext : ""].filter(Boolean).join("\n");
+  // A focused query is far more accurate for Nocturne's lexical matching.
+  // For vague follow-ups, include only a short recent user-turn clue.
+  const primaryMemoryQuery = String(input || "").trim();
+  const vagueMemoryQuery = primaryMemoryQuery.length < 12 ||
+    /^(?:那个|这个|上次|之前|后来|然后|还有|继续|它|他|她|呢|怎么样|记得)/.test(primaryMemoryQuery);
+  const lastUserMemoryHint = vagueMemoryQuery
+    ? contextMessages(thread).filter(message => message.role === "user")
+        .slice(-3).map(message => String(message.content || "").slice(0, 160)).join(" ")
+    : "";
+  const memoryRecallQuery = [primaryMemoryQuery, lastUserMemoryHint].filter(Boolean).join(" ").slice(0, 800);
   const memories = callMode ? [] : await searchMemories(memoryRecallQuery);
   // The model should see the user's local clock, not an ISO/UTC timestamp
   // ending in `Z`. Keep the zone explicit so relative dates are unambiguous.
