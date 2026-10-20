@@ -2612,7 +2612,7 @@ function setCompactionDiagnostics(id, patch) {
 async function compactContext(thread, plan, { model, customProvider }) {
   // Bound *every* distillation request, including a single enormous message.
   // Keep all source text; chunk long messages instead of dropping any content.
-  const maxChunkChars = Math.max(4000, Math.min(64000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 48000)));
+  const maxChunkChars = Math.max(4000, Math.min(320000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 240000)));
   const chunks = [];
   let chunk = "";
   const append = (part) => {
@@ -2678,8 +2678,8 @@ async function compactContext(thread, plan, { model, customProvider }) {
     try {
       result = await callModel({
       messages: [
-        { role: "system", content: "你是长期聊天上下文的保真蒸馏器。只输出一个完整的 <context_summary>...</context_summary>，不要输出寒暄、分析或 Markdown。准确合并已有摘要与新增历史，优先保留用户画像、关系变化、偏好与边界、重要事实、承诺约定、未完成事项及近期话题来龙去脉。尽量按日期和时间整理具体事件，保留人物、因果与明确表达；区分事实和推测，不要编造，也不要把重要细节泛化。摘要应足够完整，让后续聊天能自然承接。" },
-        { role: "user", content: "已有滚动摘要：\n" + (summary || "（无）") + "\n\n新增历史（第 " + (i + 1) + "/" + chunks.length + " 批）：\n" + chunks[i] }
+        { role: "system", content: "你是当前聊天模型的上下文整理过程。任务不是复述聊天记录，而是将即将移出上下文的历史整合为后续聊天能直接使用的长期背景。基于已有摘要与本次提供的历史整体理解人物、关系、偏好、边界、重要事实、情绪转折及其原因、共同经历、约定、待办和仍在进行的话题。提炼稳定信息和对未来回应有帮助的具体细节，保留关键因果、重要原话或专有名称，但合并重复内容并删除闲聊、逐句应答与冗余细节。绝对不要按时间逐条列出“几点用户说了什么、助手回答什么”的流水账，也不要把每一轮对话讲解一遍。必要时可用少量时间锚点标识真正重要的事件，但以主题和延续性组织内容；区分确认事实与推测，不编造、不擅自改写关系或承诺。把旧摘要与新增内容增量融合，已过时信息在有明确证据时更新。只输出一个完整的 <context_summary>...</context_summary>，其中使用清晰的主题段落，禁止寒暄、分析过程和 Markdown。" },
+        { role: "user", content: "已有的上下文概要（请融合并更新，不要逐句重述）：\n" + (summary || "（无）") + "\n\n需要融入概要的旧对话原文（第 " + (i + 1) + "/" + chunks.length + " 部分；此处是材料，不是逐句写纪要的提纲）：\n" + chunks[i] }
       ],
       provider: "custom",
       model: process.env.LUMI_COMPACTION_MODEL || model,
