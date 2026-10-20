@@ -2643,7 +2643,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
   // Resume only when the previous summary, exact history and model route agree.
   const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    schemaVersion: "semantic-compaction-v2", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
     through: plan.throughMessageId, chunks, model: process.env.LUMI_COMPACTION_MODEL || model, route: customProvider
   })).digest("hex");
   let checkpoint = null;
