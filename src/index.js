@@ -2640,10 +2640,13 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (chunk) chunks.push(chunk);
   if (!chunks.length) return false;
 
+  // Carry the same stable chat instructions into semantic compaction so the model
+  // understands who is speaking, rather than treating history as an external transcript.
+  const chatSystemContext = String(thread.cacheSystem || "").trim();
   // Resume only when the previous summary, exact history and model route agree.
   const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    schemaVersion: "semantic-compaction-v2", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    schemaVersion: "semantic-compaction-v3", chatSystemContext, boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
     through: plan.throughMessageId, chunks, model: process.env.LUMI_COMPACTION_MODEL || model, route: customProvider
   })).digest("hex");
   let checkpoint = null;
@@ -2678,6 +2681,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
     try {
       result = await callModel({
       messages: [
+        ...(chatSystemContext ? [{ role: "system", content: chatSystemContext }] : []),
         { role: "system", content: "你是当前聊天模型的上下文整理过程。任务不是复述聊天记录，而是将即将移出上下文的历史整合为后续聊天能直接使用的长期背景。基于已有摘要与本次提供的历史整体理解人物、关系、偏好、边界、重要事实、情绪转折及其原因、共同经历、约定、待办和仍在进行的话题。提炼稳定信息和对未来回应有帮助的具体细节，保留关键因果、重要原话或专有名称，但合并重复内容并删除闲聊、逐句应答与冗余细节。绝对不要按时间逐条列出“几点用户说了什么、助手回答什么”的流水账，也不要把每一轮对话讲解一遍。必要时可用少量时间锚点标识真正重要的事件，但以主题和延续性组织内容；区分确认事实与推测，不编造、不擅自改写关系或承诺。把旧摘要与新增内容增量融合，已过时信息在有明确证据时更新。只输出一个完整的 <context_summary>...</context_summary>，其中使用清晰的主题段落，禁止寒暄、分析过程和 Markdown。" },
         { role: "user", content: "已有的上下文概要（请融合并更新，不要逐句重述）：\n" + (summary || "（无）") + "\n\n需要融入概要的旧对话原文（第 " + (i + 1) + "/" + chunks.length + " 部分；此处是材料，不是逐句写纪要的提纲）：\n" + chunks[i] }
       ],
