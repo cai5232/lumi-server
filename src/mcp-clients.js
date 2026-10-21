@@ -17,11 +17,12 @@ export function modelToolsForServer(server) {
     : tools;
 }
 
-export function validateMcpURL(value, { allowZeaburInternal = false } = {}) {
+export function validateMcpURL(value, { allowZeaburInternal = false, allowGithubMcpInternal = false } = {}) {
   let url;
   try { url = new URL(String(value || '').trim()); } catch { throw new Error('MCP URL 无效'); }
   const trustedInternal = allowZeaburInternal && url.protocol === 'http:' && url.hostname.toLowerCase().endsWith('.zeabur.internal');
-  if ((url.protocol !== 'https:' && !trustedInternal) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
+  const trustedGithubMcpInternal = allowGithubMcpInternal && url.protocol === 'http:' && url.hostname.toLowerCase() === 'github-mcp' && url.port === '3000' && url.pathname === '/mcp';
+  if ((url.protocol !== 'https:' && !trustedInternal && !trustedGithubMcpInternal) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal && !trustedGithubMcpInternal)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址或受信任的内网地址');
   return url.toString();
 }
 
@@ -40,7 +41,8 @@ export function normalizeMcpServers(input) {
       headers[key] = String(value).slice(0, 4000);
     }
     const configuredEngawaURL = id === ENGAWA_SERVER_ID && String(item.url || '').trim() === String(process.env.ENGAWA_MCP_URL || '').trim();
-    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
+    const configuredGithubMcpURL = id === 'github-mcp' && String(item.url || '').trim() === String(process.env.GITHUB_MCP_URL || '').trim();
+    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL, allowGithubMcpInternal: configuredGithubMcpURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
   });
 }
 
@@ -86,6 +88,27 @@ export class McpClientStore {
         id: 'netease-music', name: '网易云音乐', enabled: true, url: neteaseMcpURL,
         headers: { Authorization: `Bearer ${neteaseMcpToken}` }, tools: [], connectedAt: null
       }])[0]);
+    }
+    const githubMcpURL = String(process.env.GITHUB_MCP_URL || '').trim();
+    const githubMcpToken = String(process.env.GITHUB_MCP_TOKEN || '');
+    if (githubMcpURL && githubMcpToken) {
+      const url = validateMcpURL(githubMcpURL, { allowGithubMcpInternal: true });
+      const headers = { Authorization: `Bearer ${githubMcpToken}` };
+      const existing = settings.servers.find(server => server.id === 'github-mcp');
+      if (existing) {
+        if (existing.url !== url || existing.headers?.Authorization !== headers.Authorization) {
+          existing.tools = [];
+          existing.connectedAt = null;
+        }
+        existing.url = url;
+        existing.headers = headers;
+        existing.enabled = true;
+        existing.error = '';
+      } else {
+        settings.servers.push(normalizeMcpServers([{
+          id: 'github-mcp', name: 'GitHub MCP', enabled: true, url, headers, tools: [], connectedAt: null
+        }])[0]);
+      }
     }
     return settings;
   }
