@@ -7,14 +7,14 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 const listen = async server => {await new Promise(r=>server.listen(0,'127.0.0.1',r));return server.address().port;};
 test('HTTP sticker requests send the saved name and caption to the model', {timeout:45000}, async () => {
- const directory=await mkdtemp(join(tmpdir(),'lumi-sticker-api-')), seen=[];
+ const directory=await mkdtemp(join(tmpdir(),'lumi-sticker-api-')), seen=[];let reply='测试回复';
  const provider=createServer(async(req,res)=>{
   let raw='';for await(const c of req)raw+=c;
   res.writeHead(200,{'content-type':'application/json'});
   if(req.url.includes('/api/integrations/'))return res.end('{"related":""}');
   if(req.method==='GET')return res.end('[]');
   seen.push(JSON.parse(raw));
-  res.end(JSON.stringify({choices:[{message:{content:'测试回复'}}],usage:{prompt_tokens:100,completion_tokens:2}}));
+  res.end(JSON.stringify({choices:[{message:{content:reply}}],usage:{prompt_tokens:100,completion_tokens:2}}));
  });
  const providerPort=await listen(provider), probe=createServer();
  const port=20000+Math.floor(Math.random()*10000);await new Promise(r=>probe.listen(port,'127.0.0.1',r));await new Promise(r=>probe.close(r));
@@ -38,6 +38,30 @@ test('HTTP sticker requests send the saved name and caption to the model', {time
    assert.ok(modelText.includes('老公'),modelText);
    assert.ok(!modelText.includes('未命名'),modelText);
   }
+  // A sticker without caption must still invoke the model.
+  const route={provider:'custom',model:'test-model',customProvider:{apiKey:'test',baseURL:'https://model.test/v1',apiFormat:'openai'}};
+  const alone=await request('/v1/chats/default/messages',{...route,content:'',contentType:'sticker',stickerName:sticker.name,stickerImageURL:sticker.image});
+  assert.equal(alone.status,200);assert.equal((await alone.json()).assistantMessage.content,'测试回复');
+  for(const caption of ['抱抱','']) {
+   reply=[caption,`[发送表情:${sticker.id}]`].filter(Boolean).join('\n');
+   const sent=await request('/v1/chats/default/messages',{...route,content:'给我发表情'});
+   assert.equal(sent.status,200);
+   const result=await sent.json();
+   assert.equal(result.assistantMessage.contentType,'sticker');
+   assert.equal(result.assistantMessage.stickerImageURL,sticker.image);
+   assert.ok(result.assistantMessage.content.includes(`[表情: ${sticker.name}]`));
+   assert.ok(!result.assistantMessage.content.includes('发送表情:'));
+   if(caption)assert.ok(result.assistantMessage.content.startsWith(caption));
+   assert.ok(JSON.stringify(seen.at(-1).messages).includes(sticker.id));
+  }
+  reply=`抱抱\n[发送表情:${sticker.id}]`;
+  const streamed=await request('/v1/chats/default/messages',{...route,content:'再发一张',stream:true});
+  assert.equal(streamed.status,200);
+  const events=(await streamed.text()).split('\n').filter(line=>line.startsWith('data: ')).map(line=>JSON.parse(line.slice(6)));
+  assert.ok(!events.filter(event=>event.type==='text').some(event=>event.content.includes('发送表情')));
+  assert.equal(events.find(event=>event.type==='complete').response.assistantMessage.stickerImageURL,sticker.image);
+  const history=await(await fetch(base+'/v1/chats/default',{headers:{authorization:'Bearer test'}})).json();
+  assert.ok(JSON.stringify(history).includes(sticker.image),'AI sticker persists in history');
  } finally {
   if(child.exitCode===null){const done=new Promise(r=>child.once('exit',r));child.kill();await done;}
   await new Promise(r=>provider.close(r));await rm(directory,{recursive:true,force:true});

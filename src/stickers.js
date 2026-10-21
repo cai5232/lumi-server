@@ -116,3 +116,24 @@ export function stickerMessageForModel(input, catalogSticker = null) {
   const caption = marker ? content.replace(marker[0], "").trim() : content;
   return [caption, name ? `[用户发送了贴纸「${name}」]` : "[用户发送了一张贴纸，未提供名称]"].filter(Boolean).join("\n");
 }
+
+const stickerReplyMarker = /\[发送表情[:：]\s*([^\]\r\n]+)\]/g;
+function availableStickers(stickers) {
+  return stickers.filter(sticker => sticker && /^[0-9a-f-]{36}$/i.test(sticker.id) && /^\/v1\/stickers\/assets\/[0-9a-f-]{36}\.(?:jpg|png|gif|webp)$/i.test(sticker.image) && typeof sticker.name === 'string').slice(0, 200);
+}
+
+export function sharedStickerContext(stickers) {
+  const available = availableStickers(stickers);
+  if (!available.length) return '';
+  return '\n\n[共享表情包库]\n下面是用户与你共用的贴纸，名称是用户的文字描述，不代表你看过图片。你可以在适合时选用一张，也可以只发贴纸；不必每条回复都发。选用时在回复末尾单独写 [发送表情:编号]，可在标记前写正常配文。只允许使用下列编号，不要编造编号或图片链接。\n' + JSON.stringify(available.map(({id,name})=>({id,name}))) + '\n[/共享表情包库]';
+}
+
+export function extractStickerReply(content, stickers) {
+  const available = availableStickers(stickers);
+  let selected = null;
+  const text = String(content || '').replace(stickerReplyMarker, (_, id) => {
+    selected ||= available.find(sticker => sticker.id === id.trim()) || null;
+    return '';
+  }).trim();
+  return {content: text, sticker: selected};
+}

@@ -29,7 +29,7 @@ import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyC
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
 import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
-import { createStickerStore, stickerMessageForModel } from "./stickers.js";
+import { createStickerStore, stickerMessageForModel, sharedStickerContext, extractStickerReply } from "./stickers.js";
 
 const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
@@ -62,7 +62,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2885,7 +2885,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
+async function generateReply({ input, worldBookInput = input, stickerContext = "", images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
   await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3093,7 +3093,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   thread[activationKey] = activation.state;
   const worldBookSignature = createHash('sha256').update(JSON.stringify(activation.entries)).digest('hex');
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
-  cacheSystem = injectedSystem[0].content;
+  cacheSystem = injectedSystem[0].content + stickerContext;
   const previousUserContent = previousUser
     ? (historicalModelContent(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
@@ -5249,7 +5249,7 @@ const server = createServer(async (req, res) => {
       const galleryImageIDs = Array.isArray(input.galleryImageIDs)
         ? input.galleryImageIDs.filter((itemID) => typeof itemID === "string" && /^[a-f0-9]{64}$/i.test(itemID)).slice(0, 4)
         : [];
-      if ((!input.content || !String(input.content).trim()) && !images.length && !galleryImageIDs.length) return send(res, 400, { error: "content_image_or_gallery_required" });
+      if ((!input.content || !String(input.content).trim()) && !images.length && !galleryImageIDs.length && !isStickerMessage) return send(res, 400, { error: "content_image_or_gallery_required" });
       const requestId = String(req.headers["idempotency-key"] || "");
       if (requestId && !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) return send(res, 400, { error: "invalid_idempotency_key" });
       if (requestId) {
@@ -5296,7 +5296,7 @@ const server = createServer(async (req, res) => {
       const result = (async () => {
       const messageText = String(input.content || "").trim();
       markUserActivity(threads[id], messageText);
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : {}), createdAt: new Date().toISOString() };
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (isStickerMessage ? `[表情: ${typeof input.stickerName === "string" ? input.stickerName : "表情包"}]` : images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
       const storedUserMessage = { ...userMessage, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
@@ -5314,13 +5314,15 @@ const server = createServer(async (req, res) => {
         console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
         throw error;
       }
+      const sharedStickers = (await stickerStore.list()).stickers;
       const catalogSticker = isStickerMessage
-        ? (await stickerStore.list()).stickers.find(sticker => sticker.image === stickerImageURL)
+        ? sharedStickers.find(sticker => sticker.image === stickerImageURL)
         : null;
+      const stickerContext = sharedStickerContext(sharedStickers);
       const modelMessageContent = isStickerMessage
         ? stickerMessageForModel(input, catalogSticker)
         : userMessage.content;
-      generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, stickerContext, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
@@ -5351,10 +5353,12 @@ const server = createServer(async (req, res) => {
       keepaliveState.lastRequestAt = generated.cacheRequestStartedAt;
       keepaliveState.disabledForMessageId = "";
       const dial = extractDialMarker(generated.content);
-      const visibleContent = dial.content;
+      const stickerReply = extractStickerReply(dial.content, sharedStickers);
+      const replySticker = generated.htmlContent ? null : stickerReply.sticker;
+      const visibleContent = stickerReply.content || (replySticker ? "" : (dial.content ? "这张表情暂时用不了。" : ""));
       // The upstream relay may only support complete JSON replies. Emit the already-cleaned user-facing text in short SSE chunks for a typing effect.
       if (input.stream === true) await startChatTextStream(res, visibleContent);
-      const contentType = generated.htmlContent ? (visibleContent ? "mixed" : "html") : "text";
+      const contentType = generated.htmlContent ? (visibleContent ? "mixed" : "html") : (replySticker ? "sticker" : "text");
       let speech = null;
       let speechError = null;
       const claimsSpeechWasSent = /(?:语音|音频)(?:消息)?[^。！？\n]{0,16}(?:发了|发给你|发出|送达)|(?:发了|发给你|发出)[^。！？\n]{0,16}(?:语音|音频)/i.test(visibleContent);
@@ -5374,7 +5378,8 @@ const server = createServer(async (req, res) => {
       const assistantMessage = {
         id: randomUUID(),
         role: "assistant",
-        content: visibleContent,
+        content: replySticker ? [visibleContent, `[表情: ${replySticker.name}]`].filter(Boolean).join("\n") : visibleContent,
+        ...(replySticker ? { stickerImageURL: replySticker.image } : {}),
         toolCalls: generated.toolCalls || [],
         thinking: generated.thinking,
         // Used only when reconstructing the exact model-side history for prompt cache.
