@@ -1,3 +1,4 @@
+import { withCircadianState, circadianOptions } from "./circadian.js";
 import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
@@ -61,7 +62,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -4341,7 +4342,9 @@ const server = createServer(async (req, res) => {
           if (req.method !== "GET") { payload = await body(req); headers["content-type"] = "application/json"; }
           const upstream = await fetch(target, { method: req.method, headers, signal: AbortSignal.timeout(8_000), ...(payload ? { body: JSON.stringify(payload) } : {}) });
           const responseText = await upstream.text();
-          return send(res, upstream.status, (() => { try { return JSON.parse(responseText); } catch { return { error: "murmur_invalid_response" }; } })());
+          const payloadResult = (() => { try { return JSON.parse(responseText); } catch { return { error: "murmur_invalid_response" }; } })();
+          return send(res, upstream.status, req.method === "GET" && operation === "state" && upstream.ok
+            ? withCircadianState(payloadResult) : payloadResult);
         } catch (error) { console.warn(`Murmur service request failed: ${error.message}`); return send(res, 502, { error: "murmur_unavailable" }); }
       }
       const emotion = sharedEmotionState;
@@ -4349,7 +4352,7 @@ const server = createServer(async (req, res) => {
         if (operation === "state") {
           tickEmotion(emotion, Date.now(), (at) => inEmotionQuietHours(new Date(at)));
           await saveEmotionState();
-          return send(res, 200, { time: new Date().toISOString(), drives: Object.fromEntries(Object.entries(emotion.drives).map(([drive, value]) => [drive, { v: Number(value.toFixed(3)), z: EMOTION_DRIVES[drive].label, b: EMOTION_DRIVES[drive].baseline }])), top: topEmotion(emotion), offlineTicks: emotion.offlineTicks });
+          return send(res, 200, withCircadianState({ time: new Date().toISOString(), drives: Object.fromEntries(Object.entries(emotion.drives).map(([drive, value]) => [drive, { v: Number(value.toFixed(3)), z: EMOTION_DRIVES[drive].label, b: EMOTION_DRIVES[drive].baseline }])), top: topEmotion(emotion), offlineTicks: emotion.offlineTicks }));
         }
         if (operation === "arc") {
           const type = url.searchParams.get("type");
@@ -4605,7 +4608,7 @@ const server = createServer(async (req, res) => {
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: process.env.LUMI_COMPACTION_MODEL || "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
-      emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
+      emotion: { enabled: true, circadian: { ...circadianOptions(), version: "readonly-v1" }, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
     }
     if (req.method === "GET" && url.pathname === "/v1/providers") {

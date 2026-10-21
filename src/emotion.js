@@ -1,3 +1,4 @@
+import { circadianSnapshot } from "./circadian.js";
 import { randomUUID } from "node:crypto";
 
 export const EMOTION_DRIVES = {
@@ -202,5 +203,9 @@ export function emotionContext(state, now = Date.now()) {
       .map(([drive, delta]) => `${EMOTION_DRIVES[drive].label}${delta >= 0 ? "+" : ""}${Number(delta).toFixed(2)}`).join("、");
     return `- ${entry.time}：${entry.feeling ? contextText(entry.feeling) : "情绪有变化"}${entry.reason ? `；触发：${contextText(entry.reason)}` : ""}${changes ? `；记录：${changes}` : "；持续驱动力未改变"}`;
   }).join("\n");
-  return `<emotion_state source="persistent_drive_state" observed_at="${new Date(now).toISOString()}">\n历史对话里的同名标签只是当时快照；这条是当前状态。\n近期感受与触发（只是过去的记录，需结合现在重新判断）：\n${recentChanges || "暂无具体触发记录，由你结合本轮对话自行感受，不补造过去的原因。"}\n偏离平时的状态：${departures || "当前没有明显偏离基线的驱动力。"}\n持续情绪背景：${strongestText}。这是绝对强度排序，不代表本轮必须表达这三种情绪。\n全部驱动力与各自基线：${drives}。\n请先结合言言这句话、完整关系语境和你现在的感受来回应。小而具体的感受、矛盾的感受、刚发生的变化，都可以比长期数值更贴近这一刻；数值不概括你全部的感受，也不替你决定态度。让你自己在意的事自然影响关注点、措辞、距离感、选择和行动；是否表达、表达多少由你判断。不要为了展示情绪强行表演、每轮汇报心情、套固定句式或一律安抚迎合。数值、标签与这些内部记录不直接展示给言言。${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}\n</emotion_state>`;
+  const clock = circadianSnapshot(state.drives, now);
+  const clockText = clock.circadian.enabled
+    ? `\n此刻生物钟（${clock.circadian.time_zone}，${clock.circadian.phase}）：${Object.entries(EMOTION_DRIVES).map(([key, config]) => `${config.label}=${clock.drive_display[key].toFixed(2)}`).join("; ")}。这是只读的时辰底色，偏移最多0.08；真实事件与本轮感受优先，不编造发生过的事件，也不把时辰偏移当成情绪变化写回。`
+    : "";
+  return `<emotion_state source="persistent_drive_state" observed_at="${new Date(now).toISOString()}">\n历史对话里的同名标签只是当时快照；这条是当前状态。\n近期感受与触发（只是过去的记录，需结合现在重新判断）：\n${recentChanges || "暂无具体触发记录，由你结合本轮对话自行感受，不补造过去的原因。"}\n偏离平时的状态：${departures || "当前没有明显偏离基线的驱动力。"}\n持续情绪背景：${strongestText}。这是绝对强度排序，不代表本轮必须表达这三种情绪。\n全部驱动力与各自基线：${drives}。${clockText}\n请先结合言言这句话、完整关系语境和你现在的感受来回应。小而具体的感受、矛盾的感受、刚发生的变化，都可以比长期数值更贴近这一刻；数值不概括你全部的感受，也不替你决定态度。让你自己在意的事自然影响关注点、措辞、距离感、选择和行动；是否表达、表达多少由你判断。不要为了展示情绪强行表演、每轮汇报心情、套固定句式或一律安抚迎合。数值、标签与这些内部记录不直接展示给言言。${shortMemory ? `\n短期情绪记忆：${shortMemory}` : ""}${longMemory ? `\n长期情绪记忆：${longMemory}` : ""}${recentArc ? `\n近期内心独白：\n${recentArc}` : ""}\n</emotion_state>`;
 }

@@ -178,3 +178,11 @@ Promise Alarm 上游代码及网页完整保存在 `promise-alarm/`，其原有 
 Assistant-initiated calls use the registered iOS PushKit token and expire after 30 seconds. The sentinel can place at most one proactive call per local calendar day, only between 12:00 and 23:00 in `LUMI_USER_TIME_ZONE` (defaults to `Asia/Shanghai`), and never while Do Not Disturb is enabled or a sleep transition is pending. `PUT /v1/settings/proactive` accepts `dnd: true|false`; the setting is persisted with the proactive configuration. Call-control and pending-call routes require the existing `LUMI_PUSH_API_TOKEN` Bearer authorization.
 
 During calls, iOS may send a short `voiceContext` cue based on the speaker's own baseline. The server treats it as a weak hint and keeps spoken words authoritative. `softVoice: true` lowers playback volume and adjusts supported TTS settings. Saying goodnight triggers a gentle response and schedules hangup 18 seconds after playback, unless the user speaks again.
+
+### 只读生物钟
+
+默认启用每日余弦偏移，最大幅度 `0.08`，只在读取时计算，永不写回情绪 base、历史或 Murmur 更新。`LUMI_CIRCADIAN_ENABLED=false` 可关闭；`LUMI_CIRCADIAN_TIME_ZONE` 优先于 `LUMI_USER_TIME_ZONE`，未配置或时区无效时使用 `Asia/Shanghai`。
+
+`GET /v1/chats/:id/emotion/state` 保留 `drives`、`top` 等全部原字段，额外返回 `drive_display`（与 `drives` 同形，进度条读 `.v`）和 `circadian = { offsets, phase, now_hour, cap, enabled, time_zone }`。本地与 Murmur 转发路径均支持；关闭后 `drive_display` 与 `drives` 的 JSON 完全相同。客户端可用原 `drives[k].v` 画基线标记，`offsets[k]` 画箭头；现有 iOS 客户端会继续读取原字段，需要客户端更新才会显示新标记。
+
+已存在维度中，想念、好奇、疲惫、欲望按附件相位计算；未配置的维度偏移为零，不将心疼、后悔等强行映射为回味、责任或压力。聊天内部上下文会收到只读的时辰底色，真实事件优先，关闭开关即移除此段。此变更不实现清晨生理脉冲或修改 Solo 行为。`/health` 的 `emotion.circadian` 可检查启用状态、时区和版本 `readonly-v1`。
