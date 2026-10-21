@@ -131,7 +131,7 @@ The sidecar uses Node's built-in SQLite and requires Node 22.5+. Its PIN, NetEas
 Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase session is stored in `LUMI_DATA_DIR/ncm-cookie.txt` with owner-only file permissions; room state and chat are stored in `music-room-state.json` and `music-room-messages.json`. Keep `LUMI_DATA_DIR` on a persistent volume.
 - `GET /health`
 - `GET /v1/chats/:id`
-- `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`
+- `POST /v1/chats/:id/messages`，JSON body：`{"content":"你好","systemPrompt":"可选"}`；设置 `"stream":true` 时，服务端按 SSE 发送正文文字片段和最终完整响应，不支持上游流式的线路也会获得视觉分段效果
 - `GET /v1/watch/analysis-config`、`POST /v1/watch/analyze`：Bearer 鉴权；将当前视频帧转发给单独配置的 OpenAI 兼容视觉模型，不上传或保存完整视频
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量

@@ -2,6 +2,7 @@ import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
+import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
 import { extractCompleteContextSummary, isNormalModelCompletion } from "./context-summary.js";
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
@@ -5157,7 +5158,8 @@ const server = createServer(async (req, res) => {
       // conversation lock, including when that original result is an error.
       if (previous && previous.expiresAt > Date.now()) {
         if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
-        return send(res, 200, await previous.result);
+        const replay = await previous.result;
+        return messageInput?.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
       }
     }
     // Let an already running probe finish before reading history. Reserve the
@@ -5254,7 +5256,8 @@ const server = createServer(async (req, res) => {
           const assistantMessage = threads[id].messages[previousIndex + 1];
           if (assistantMessage?.role !== "assistant") return send(res, 409, { error: "incomplete_previous_request" });
           const updatedOptionMessage = threads[id].messages[previousIndex - 1]?.role === "assistant" ? threads[id].messages[previousIndex - 1] : null;
-          return send(res, 200, { userMessage, assistantMessage, updatedOptionMessage, memorySaved: false, speechAudioBase64: null, speechDuration: null, speechScript: null });
+          const replay = { userMessage, assistantMessage, updatedOptionMessage, memorySaved: false, speechAudioBase64: null, speechDuration: null, speechScript: null };
+          return input.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
         }
       }
       // Older iOS builds retry the exact same POST up to three times. Coalesce
@@ -5267,7 +5270,8 @@ const server = createServer(async (req, res) => {
       const previous = recentMessageRequests.get(key);
       if (previous) {
         if (previous.fingerprint !== fingerprint) return send(res, 409, { error: "idempotency_key_reused" });
-        return send(res, 200, await previous.result);
+        const replay = await previous.result;
+        return messageInput?.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
       }
       const requestedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
       // A frontend preset is self-contained. Treat its presence as the
@@ -5342,6 +5346,8 @@ const server = createServer(async (req, res) => {
       keepaliveState.disabledForMessageId = "";
       const dial = extractDialMarker(generated.content);
       const visibleContent = dial.content;
+      // The upstream relay may only support complete JSON replies. Emit the already-cleaned user-facing text in short SSE chunks for a typing effect.
+      if (input.stream === true) await startChatTextStream(res, visibleContent);
       const contentType = generated.htmlContent ? (visibleContent ? "mixed" : "html") : "text";
       let speech = null;
       let speechError = null;
@@ -5427,6 +5433,11 @@ const server = createServer(async (req, res) => {
         const response = await result;
         const entry = recentMessageRequests.get(key);
         if (entry?.result === result) entry.expiresAt = Date.now() + (requestId ? 5 * 60_000 : legacyRetryWindowMs);
+        if (input.stream === true) {
+          if (!res.headersSent) await startChatTextStream(res, response?.assistantMessage?.contentType === "html" ? "" : String(response?.assistantMessage?.content || ""));
+          finishChatTextStream(res, response);
+          return;
+        }
         return send(res, 200, response);
       } catch (error) {
         if (recentMessageRequests.get(key)?.result === result) {
@@ -5437,6 +5448,10 @@ const server = createServer(async (req, res) => {
         }
         // Even a failed foreground turn can trigger recovery of an oversized context.
         scheduleBackgroundCompaction(id, selectedModel, customProvider);
+        if (input.stream === true && res.getHeader("content-type")?.includes("text/event-stream")) {
+          failChatTextStream(res, error);
+          return;
+        }
         throw error;
       }
     }
