@@ -106,3 +106,13 @@ export function createStickerStore(dataDir) {
     }
   };
 }
+
+// Keep captions and names separate: older clients append a marker to the caption.
+export function stickerMessageForModel(input, catalogSticker = null) {
+  const content = typeof input.content === "string" ? input.content.trim() : "";
+  const marker = content.match(/\[表情[:：]\s*([^\r\n]+)\]\s*$/);
+  const cleanName = value => typeof value === "string" ? value.trim().slice(0, 80) : "";
+  const name = cleanName(input.stickerName) || cleanName(catalogSticker?.name) || cleanName(marker?.[1]);
+  const caption = marker ? content.replace(marker[0], "").trim() : content;
+  return [caption, name ? `[用户发送了贴纸「${name}」]` : "[用户发送了一张贴纸，未提供名称]"].filter(Boolean).join("\n");
+}
