@@ -186,3 +186,9 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 `GET /v1/chats/:id/emotion/state` 保留 `drives`、`top` 等全部原字段，额外返回 `drive_display`（与 `drives` 同形，进度条读 `.v`）和 `circadian = { offsets, phase, now_hour, cap, enabled, time_zone }`。本地与 Murmur 转发路径均支持；关闭后 `drive_display` 与 `drives` 的 JSON 完全相同。客户端可用原 `drives[k].v` 画基线标记，`offsets[k]` 画箭头；现有 iOS 客户端会继续读取原字段，需要客户端更新才会显示新标记。
 
 已存在维度中，想念、好奇、疲惫、欲望按附件相位计算；未配置的维度偏移为零，不将心疼、后悔等强行映射为回味、责任或压力。聊天内部上下文会收到只读的时辰底色，真实事件优先，关闭开关即移除此段。此变更不实现清晨生理脉冲或修改 Solo 行为。`/health` 的 `emotion.circadian` 可检查启用状态、时区和版本 `readonly-v1`。
+
+### 工具执行事实
+
+普通聊天、通话和自主唤醒会从当前线程的服务端工具记录中读取最近执行结果，并作为隐藏上下文传给模型；读取不依赖摘要压缩边界，重启后仍可恢复。最多 12 条、总计约 16k 字符，结果为数据而非指令，不据此自动重做操作。
+
+`succeeded` 表示成功；`failed` 表示尝试过但失败；`not_executed` 表示被阻止或参数无效；`unconfirmed` 表示还没有确定结果。MCP 的 `isError: true` 会作为失败处理并设置 Anthropic `tool_result.is_error`，不再记成成功。旧记录中即使误存 `succeeded: true`，隐藏上下文也会优先读取原始结果的错误标记。该修复不替换或更新第三方服务凭证。

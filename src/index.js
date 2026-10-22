@@ -1,3 +1,4 @@
+import { toolExecutionContext, toolResultFailed, collectNativeToolTrace } from "./tool-history.js";
 import { withCircadianState, circadianOptions } from "./circadian.js";
 import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore } from "./model-request-store.js";
@@ -62,7 +63,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1-tool-execution-history-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2227,6 +2228,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     error.statusCode = unavailable ? 503 : response.status === 429 ? 429 : response.status >= 500 ? response.status : 502;
     throw error;
   }
+  collectNativeToolTrace(data?.content, toolTrace);
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
@@ -2240,16 +2242,18 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const use of nativeToolUses.slice(0, 8)) {
       const entry = mcpToolMap.get(use.name);
       if (!entry) {
-        toolTrace.push({ name: use.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "MCP 工具不可用", succeeded: false });
+        toolTrace.push({ name: use.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "MCP 工具不可用", executed: false, succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
         continue;
       }
       if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
-        results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", executed: false, succeeded: false });
+        results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
+      let executed = false;
       try {
+        executed = true;
         const result = entry.internalCalendar
           ? await calendarTool(entry.tool.name, use.input || {})
           : entry.execute
@@ -2259,11 +2263,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: true });
-        results.push({ type: "tool_result", tool_use_id: use.id, content: output });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, executed: true, succeeded: !toolResultFailed(result) });
+        results.push({ type: "tool_result", tool_use_id: use.id, ...(toolResultFailed(result) ? { is_error: true } : {}), content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, executed, succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
@@ -2274,24 +2278,27 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     const results = [];
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
-      if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
+      if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", executed: false, succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
       if (!entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
+        toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", executed: false, succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
+      let args;
+      let executed = false;
       try {
-        const args = JSON.parse(call.function.arguments || "{}");
+        args = JSON.parse(call.function.arguments || "{}");
+        executed = true;
         const result = entry.internalCalendar ? await calendarTool(entry.tool.name, args) : entry.execute ? await entry.execute(args) : await callMcpTool(entry.server, entry.tool.name, args);
         if (entry.internalCalendar && ["calendar_create", "calendar_update", "calendar_delete", "calendar_comment"].includes(entry.tool.name)) {
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: true });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, executed: true, succeeded: !toolResultFailed(result) });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push({ name: entry.tool.name, arguments: args === undefined ? String(call.function.arguments || "").slice(0, 4000) : JSON.stringify(args).slice(0, 4000), result: output, executed, succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
@@ -3076,7 +3083,7 @@ async function generateReply({ input, worldBookInput = input, stickerContext = "
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   // The backend-owned prompt is canonical. Ignore legacy LUMI_SYSTEM_PROMPT
   // and client-supplied systemPrompt so old persona text cannot replace it.
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
+  const userModelContent = `${systemContext}${emotionDirective}${toolExecutionContext(thread.messages)}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
