@@ -1,3 +1,4 @@
+import {cacheInputTokens} from './usage-activity.js';
 import {readFile, writeFile, rename, mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
@@ -9,7 +10,10 @@ export function createModelRequestStore(directory) {
   let entries, loading, queue = Promise.resolve();
   const recent = new Map();
   const detailPath = id => join(detailDirectory, createHash('sha256').update(String(id)).digest('hex') + '.json');
-  const metadata = ({requestJSON,responseJSON,...record}) => record;
+  const metadata = ({requestJSON,responseJSON,...record}) => {
+    const normalized = cacheInputTokens({...record,responseJSON});
+    return {...record, ...(normalized === null ? {} : {cacheInputTokens: normalized})};
+  };
   async function load() {
     if (entries) return;
     if (!loading) loading = (async()=>{

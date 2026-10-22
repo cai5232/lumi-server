@@ -215,3 +215,7 @@ Murmur refreshes are serialized and cannot replace newer local emotion updates.
 ### Disabled diary and gallery
 
 Diary and shared-gallery features are disabled at the server boundary. Their endpoints return authenticated `410 feature_disabled`, chat requests cannot attach gallery IDs, and model replies cannot create or modify diary entries or collect photos. These capabilities are removed from the model prompt and explicitly marked unavailable. Existing stored records are preserved. Normal chat photo attachments and shared stickers remain available.
+
+### Usage calendar
+
+`GET /v1/usage/requests` retains `days`, `week`, and the latest 20 complete `requests`, and adds `activity` with Beijing calendar-day counts, input/output/cache tokens, summed duration, errors, and retained-log coverage. New index entries normalize Anthropic and OpenAI cache input denominators without changing existing token fields. Historical records with incomplete cache metadata are counted in `estimatedCacheRequests`. Monthly UI totals use all retained daily summaries rather than only the latest 20 request details. Existing weekly aggregates retain their original UTC-week and per-request cache-average definitions.

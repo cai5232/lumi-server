@@ -1,3 +1,4 @@
+import { usageActivity } from "./usage-activity.js";
 import { autonomousContactAllowed, hasAutonomousAction, mergeBackgroundSnapshots } from "./background-policy.js";
 import { toolExecutionContext, toolResultFailed, collectNativeToolTrace } from "./tool-history.js";
 import { withCircadianState, circadianOptions } from "./circadian.js";
@@ -64,7 +65,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1-tool-execution-history-v1-wake-emotion-consistency-v1-diary-gallery-disabled-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1-tool-execution-history-v1-wake-emotion-consistency-v1-diary-gallery-disabled-v1-usage-calendar-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -4025,6 +4026,7 @@ const server = createServer(async (req, res) => {
         .filter((item) => item.input > 0)
         .map((item) => Math.min(1, Math.max(0, item.cached / item.input)));
       return send(res, 200, {
+        activity: usageActivity(requests, now),
         days: Array.from({ length: Math.floor((today.getTime() - firstDay.getTime()) / 86_400_000) + 1 }, (_, offset) => {
           const date = new Date(firstDay.getTime() + offset * 86_400_000);
           const key = dayKey(date);
