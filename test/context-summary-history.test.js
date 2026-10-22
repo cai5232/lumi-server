@@ -1,6 +1,8 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import {join} from 'node:path';
+import {createHash, randomUUID} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {extractCompleteContextSummary, isNormalModelCompletion} from '../src/context-summary.js';
 
@@ -34,7 +36,12 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const summary = 'old-summary'.repeat(5000);
   const messages = [{id:'a',role:'user',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
   const calls = [];
-  Object.assign(context, {process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
+  const checkpointFiles = new Map();
+  Object.assign(context, {process:{env:{}}, console, join, createHash, randomUUID, dataDir:'/fixture',
+    readFile:async path => {if(!checkpointFiles.has(path)) throw Object.assign(new Error('missing'),{code:'ENOENT'});return checkpointFiles.get(path);},
+    mkdir:async()=>{}, writeFile:async(path,value)=>checkpointFiles.set(path,value),
+    rename:async(from,to)=>{checkpointFiles.set(to,checkpointFiles.get(from));checkpointFiles.delete(from);},
+    unlink:async path=>checkpointFiles.delete(path), messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
     extractCompleteContextSummary, isNormalModelCompletion});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);

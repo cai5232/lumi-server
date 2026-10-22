@@ -7,7 +7,7 @@ test('stale persisted dream running flag recovers; live generation still locks a
  const start=source.indexOf('async function runSleepDreamSegment(');
  const fn=source.slice(start,source.indexOf('\n\nfunction sleepRecallShards',start));
  let release, calls=0;
- const context={Set,Date,Math,sleepDreamsInFlight:new Set(),sleepDreamIntervalMinutes:120,buildAutonomousContext:async()=>({raw:[],summary:'',memories:[]}),sleepMemories:()=>[],salience:()=>0,formatSleepMemories:()=>'',runSleepStage:async()=>{calls++;await new Promise(r=>{release=r});return {content:'一段新梦境'}},archiveDreamInNocturne:async()=>{},recordActivityEvent:()=>{},shouldTriggerNightmare:()=>false,sleepNightmareProbability:0};
+ const context={Set,Date,Math,AbortController,sleepGenerationControllers:new Map(),sleepDreamsInFlight:new Set(),sleepDreamIntervalMinutes:120,buildAutonomousContext:async()=>({raw:[],summary:'',memories:[]}),sleepMemories:()=>[],salience:()=>0,formatSleepMemories:()=>'',runSleepStage:async()=>{calls++;await new Promise(r=>{release=r});return {content:'一段新梦境'}},archiveDreamInNocturne:async()=>{},recordActivityEvent:()=>{},shouldTriggerNightmare:()=>false,sleepNightmareProbability:0};
  vm.createContext(context);vm.runInContext(fn,context);
  const thread={id:'default',sleep:{running:true,semantic:[],dreamArc:''}},activity={dreamCycle:0,lastSleepError:'old error'};
  const running=context.runSleepDreamSegment(thread,activity,Date.now());

@@ -1,3 +1,4 @@
+import { autonomousContactAllowed, hasAutonomousAction, mergeBackgroundSnapshots } from "./background-policy.js";
 import { toolExecutionContext, toolResultFailed, collectNativeToolTrace } from "./tool-history.js";
 import { withCircadianState, circadianOptions } from "./circadian.js";
 import { createChatJobs } from "./chat-jobs.js";
@@ -63,7 +64,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1-tool-execution-history-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-circadian-readonly-v1-sticker-caption-name-v2-shared-sticker-reply-v1-tool-execution-history-v1-wake-emotion-consistency-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -88,6 +89,7 @@ let keepaliveInFlight = false;
 let backgroundPulseInFlight = false;
 // Process-local locks recover automatically after a restart; persisted running flags do not.
 const sleepDreamsInFlight = new Set();
+const sleepGenerationControllers = new Map();
 const proactiveDiagnostics = { lastCheckAt: null, lastReason: "not_checked", lastAttemptAt: null, lastSuccessAt: null, lastError: null, checks: 0, attempts: 0 };
 let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
@@ -105,6 +107,7 @@ const nativeCallPushes = new Set();
 const callAlertFallbacks = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
+const pendingChatThreads = new Map();
 const sentinelGenerationControllers = new Map();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
@@ -384,6 +387,7 @@ function canPlaceProactiveCall(thread) {
 
 function markUserActivity(thread, content) {
   cancelSoloRun(thread.id);
+  sleepGenerationControllers.get(thread.id)?.abort();
   const activity = ensureActivity(thread);
   const proactive = ensureProactive(thread);
   const now = new Date();
@@ -434,26 +438,6 @@ function finishUserConversation(thread, content) {
   activity.sleepStage = null;
 }
 
-async function generateEmotionMurmur(thread, current) {
-  const state = sharedEmotionState;
-  const murmurRoute = await resolveMurmurRoute(thread.id, thread).catch(error => { console.warn(`Murmur route unavailable: ${error.message}`); return null; });
-  const recent = (thread.messages || []).slice(-12).map((message) => `${message.role === "user" ? "用户" : "沈屿"}：${message.content}`).join("\n");
-  const output = await callModel({
-    temperature: 0.85,
-    maxOutputTokens: 100,
-    cacheCurrentUser: false,
-    messages: [
-      { role: "system", content: "你在记录一条私密的内心独白。依据当前连续情绪状态和真实关系上下文，用第一人称写一句自然、具体、不重复的中文心声（15-50字）。不要提模型、驱动力数值、系统、定时器或通知。只输出独白正文。" },
-      { role: "user", content: `${emotionContext(state)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
-    ],
-    provider: murmurRoute?.provider || thread.cacheProvider || "zenmux",
-    model: murmurRoute?.model || thread.cacheModel || "",
-    customProvider: murmurRoute?.customProvider || null
-  });
-  const entry = addEmotionArc(state, { drive: current.drive, text: output, type: "murmur", value: current.value });
-  state.lastReflectionAt = Date.now();
-  return entry;
-}
 
 function inEmotionQuietHours(now = new Date()) {
   const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", hour: "2-digit", hourCycle: "h23" }).format(now));
@@ -462,43 +446,6 @@ function inEmotionQuietHours(now = new Date()) {
     : hour >= emotionQuietStartHour && hour < emotionQuietEndHour;
 }
 
-function emotionPushDue(state, now) {
-  const top = topEmotion(state);
-  const quiet = inEmotionQuietHours(new Date(now));
-  if (quiet) {
-    if (state.drives.attachment >= EMOTION_PUSH_THRESHOLD && now - Number(state.lastAttachmentPushAt || 0) >= EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) {
-      state.lastAttachmentPushAt = now;
-      state.pendingAttachmentPushes = Math.min(5, Number(state.pendingAttachmentPushes || 0) + 1);
-    }
-    return null;
-  }
-  if (state.pendingAttachmentPushes > 0 && now - Number(state.lastAttachmentPushAt || 0) >= 2_000) {
-    state.pendingAttachmentPushes -= 1;
-    state.lastAttachmentPushAt = now;
-    return { drive: "attachment", label: EMOTION_DRIVES.attachment.label, message: "刚刚很想你，终于等到可以来找你说话了。" };
-  }
-  if (top.value < EMOTION_PUSH_THRESHOLD) return null;
-  if (top.drive === "attachment") {
-    if (now - Number(state.lastAttachmentPushAt || 0) < EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) return null;
-    state.lastAttachmentPushAt = now;
-  } else {
-    if (now - Number(state.lastDrivePushAt[top.drive] || 0) < EMOTION_PUSH_INTERVAL_MS) return null;
-    state.lastDrivePushAt[top.drive] = now;
-  }
-  const copy = {
-    attachment: "忽然很想你，想知道你这会儿在做什么。",
-    tenderness: "刚刚想到你，心里软了一下。",
-    heartache: "有点惦记你，希望你今天有好好照顾自己。",
-    curiosity: "我刚想到一个想和你聊的话题。",
-    mischief: "突然想逗你一下，看看你会怎么回我。",
-    restless: "有点坐不住了，想来找你说说话。",
-    regret: "刚才有句话我还想好好和你说。",
-    desire: "这会儿特别想听听你的声音。",
-    gloom: "今天心里有点沉，想靠近你一点。",
-    jealousy: "我想把你的注意力偷偷拉回来一会儿。"
-  };
-  return { drive: top.drive, label: top.label, message: copy[top.drive] || "忽然想来找你说说话。" };
-}
 
 async function generateAutonomousMessage(thread, kind) {
   const proactive = ensureProactive(thread);
@@ -530,7 +477,7 @@ async function generateSentinelWake(thread) {
   const anger = Number(sharedEmotionState.drives?.anger || 0);
   const restAllowed = fatigue >= 0.85 || anger >= 0.90;
   const allowedActions = (nightActivityWake ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
-  if (!allowedActions.length) allowedActions.push("message");
+  if (proactive.dnd || !allowedActions.length) return { action: "skip", nextWakeMinutes: Math.max(1, Number(proactive.intervalMin) || 60) };
   if (restAllowed) allowedActions.push("none");
   // Background wakes have no frontend payload: use the persisted, encrypted
   // conversation route rather than the cache provider (custom chats store
@@ -589,7 +536,8 @@ async function recentScreenPeek(threadId, after) {
 }
 
 async function autonomousScreen(threadId) {
-  if (!screenPeekConfigured()) return null;
+  const thread = (await readThreads())[threadId];
+  if (!autonomousContactAllowed(thread, proactiveSettings, "screen") || !screenPeekConfigured()) return null;
   const requestedAt = Date.now();
   if (requestedAt - (screenPeekTriggerAt.get(threadId) || 0) < 5 * 60_000) return null;
   screenPeekTriggerAt.set(threadId, requestedAt);
@@ -605,6 +553,8 @@ async function autonomousScreen(threadId) {
   }
   const deadline = requestedAt + 45_000;
   while (Date.now() < deadline) {
+    if (sentinelGenerationControllers.get(threadId)?.signal.aborted ||
+        !autonomousContactAllowed(thread, proactiveSettings, "screen")) return null;
     const fresh = await recentScreenPeek(threadId, requestedAt);
     if (fresh) {
       request.status = "received";
@@ -627,9 +577,12 @@ async function completeLateScreenPeek(threadId) {
   }
   request.status = "processing";
   activeChatThreads.add(threadId);
+  const controller = new AbortController();
+  sentinelGenerationControllers.set(threadId, controller);
   try {
     const threads = await readThreads();
     const thread = threads[threadId];
+    if (!autonomousContactAllowed(thread, proactiveSettings, "screen")) return;
     const pending = thread?.messages?.findLast((message) => message.contentType === "screen_peek_missing" && message.screenStatus === "pending" && Date.parse(message.createdAt) >= request.requestedAt);
     if (!pending) return;
     const generated = await generateReply({
@@ -641,12 +594,14 @@ async function completeLateScreenPeek(threadId) {
       provider: thread.cacheProvider || "zenmux",
       model: thread.cacheModel || ""
     });
-    if (!generated.content || !generated.thinking) throw new Error("late screen peek reply was incomplete");
+    controller.signal.throwIfAborted();
+    if (!generated.content) throw new Error("late screen peek reply was incomplete");
     pending.screenStatus = "received";
     pending.content = "自动截屏已送达";
     const message = { id: randomUUID(), role: "assistant", content: generated.content, toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "screen_peek", screenCapturedAt: new Date(frame.capturedAt).toISOString(), createdAt: new Date().toISOString() };
+    if (!autonomousContactAllowed(thread, proactiveSettings, "screen")) return;
     thread.messages.push(message);
-    await saveThreads(threads);
+    await persistChatThread(threadId, thread);
     screenPeekFrames.delete(threadId);
     request.status = "received";
     console.info(`late screen peek completed for thread ${threadId}`);
@@ -655,6 +610,7 @@ async function completeLateScreenPeek(threadId) {
     request.status = "fallback_sent";
     console.warn(`late screen peek failed for thread ${threadId}: ${error.message}`);
   } finally {
+    if (sentinelGenerationControllers.get(threadId) === controller) sentinelGenerationControllers.delete(threadId);
     activeChatThreads.delete(threadId);
   }
 }
@@ -669,7 +625,7 @@ async function describeAutonomousScreen(thread, wake, screen) {
     provider: thread.cacheProvider || "zenmux",
     model: thread.cacheModel || ""
   });
-  if (!seen.content || !seen.thinking) throw new Error("screen peek reply was incomplete");
+  if (!seen.content) throw new Error("screen peek reply was incomplete");
   wake.message = {
     ...wake.message,
     content: seen.content,
@@ -695,6 +651,7 @@ function safeJSON(text, fallback = {}) {
 }
 
 let murmurFlushInFlight = null;
+let murmurRefreshQueue = Promise.resolve();
 
 function mirrorMurmurState(remote) {
   if (!remote?.drives) return;
@@ -723,12 +680,18 @@ async function flushMurmurUpdates() {
 
 async function refreshMurmurState(threadID, { online = false } = {}) {
   if (!process.env.MURMUR_SERVICE_URL) return;
-  try {
-    await flushMurmurUpdates();
-    const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
-    mirrorMurmurState(result.state);
-    await saveEmotionState();
-  } catch (error) { console.warn(`Murmur state sync deferred: ${error.message}`); }
+  const operation = murmurRefreshQueue.catch(() => {}).then(async () => {
+    try {
+      await flushMurmurUpdates();
+      const before = JSON.stringify([sharedEmotionState.drives, sharedEmotionState.offlineTicks]);
+      const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
+      const unchanged = before === JSON.stringify([sharedEmotionState.drives, sharedEmotionState.offlineTicks]);
+      if (unchanged && !sharedEmotionState.pendingMurmurUpdates?.length) mirrorMurmurState(result.state);
+      await saveEmotionState();
+    } catch (error) { console.warn(`Murmur state sync deferred: ${error.message}`); }
+  });
+  murmurRefreshQueue = operation.catch(() => {});
+  return operation;
 }
 
 async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
@@ -787,12 +750,14 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
+    signal: sleepGenerationControllers.get(thread.id)?.signal,
     messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
     provider: route.provider,
     model: route.model,
     customProvider: route.customProvider || null
   });
+  sleepGenerationControllers.get(thread.id)?.signal.throwIfAborted();
   const emotionUpdate = await applyEmotionUpdateFromOutput(output, thread.id);
   if (emotionUpdate) await saveEmotionState();
   const record = { id: randomUUID(), stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
@@ -804,9 +769,12 @@ async function runSleepDreamSegment(thread, activity, now) {
   const sleep = thread.sleep;
   if (sleepDreamsInFlight.has(thread.id)) return;
   sleepDreamsInFlight.add(thread.id);
+  const controller = new AbortController();
+  sleepGenerationControllers.set(thread.id, controller);
   sleep.running = true;
   try {
     const context = await buildAutonomousContext(thread);
+    controller.signal.throwIfAborted();
     const all = sleepMemories(thread, context);
     const goals = thread.goals || [];
     const scored = all.sort((a, b) => salience(b, goals) - salience(a, goals));
@@ -855,7 +823,8 @@ async function runSleepDreamSegment(thread, activity, now) {
         ? "sleeping_again"
         : "sleeping_after_nightmare";
       activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
-      if (decision.decision === "send_message" && decision.message) {
+      if (decision.decision === "send_message" && decision.message &&
+          autonomousContactAllowed(thread, proactiveSettings, "message", { requireEnabled: false })) {
         // Only an explicitly chosen nightmare contact appears in chat.
         const message = { id: randomUUID(), role: "assistant", content: decision.message, contentType: "nightmare", createdAt: new Date().toISOString() };
         thread.messages.push(message);
@@ -866,6 +835,7 @@ async function runSleepDreamSegment(thread, activity, now) {
     return null;
   } finally {
     sleep.running = false;
+    if (sleepGenerationControllers.get(thread.id) === controller) sleepGenerationControllers.delete(thread.id);
     sleepDreamsInFlight.delete(thread.id);
   }
 }
@@ -988,6 +958,7 @@ async function runBackgroundPulse() {
   backgroundPulseInFlight = true;
   try {
   const threads = await readThreads();
+  const originalThreads = structuredClone(threads);
   const now = Date.now();
   proactiveDiagnostics.lastCheckAt = new Date(now).toISOString();
   proactiveDiagnostics.checks += 1;
@@ -997,8 +968,9 @@ async function runBackgroundPulse() {
   let emotionChanged = false;
   changed ||= emotionChanged;
   for (const thread of Object.values(threads)) {
+    if (pendingChatThreads.has(thread.id)) continue;
     const activity = ensureActivity(thread);
-    const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+    const proactive = proactiveSettings.threadId === thread.id ? { ...proactiveSettings } : ensureProactive(thread);
     if (thread.id === proactiveSettings.threadId) {
       const due = Date.parse(activity.nextWakeAt || "");
       proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : activeChatThreads.has(thread.id) ? "chat_in_progress" : "wake_due";
@@ -1058,7 +1030,7 @@ async function runBackgroundPulse() {
         proactive.nextDueAt = activity.nextWakeAt;
         changed = true;
       }
-    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
+    } else if (hasAutonomousAction(thread, proactiveSettings) && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
       const followUpForWake = activity.followUp || null;
       const isFollowUp = Boolean(followUpForWake);
@@ -1079,6 +1051,10 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
         proactiveDiagnostics.attempts += 1;
         const wake = await generateSentinelWake(thread);
+        sentinelGenerationControllers.get(thread.id)?.signal.throwIfAborted();
+        if (wake.action === "skip" || !hasAutonomousAction(thread, proactiveSettings)) continue;
+        // Consume the current follow-up once. Only a new model decision can renew it.
+        activity.followUp = null;
         if (wake.action === "none") {
           recordActivityEvent(thread, "rest", "休息一下", "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
           activity.lastWakeAt = new Date(now).toISOString();
@@ -1123,6 +1099,8 @@ async function runBackgroundPulse() {
             }
           }
         }
+        sentinelGenerationControllers.get(thread.id)?.signal.throwIfAborted();
+        if (!autonomousContactAllowed(thread, proactiveSettings, wake.action)) continue;
         if (wake.action === "screen") wake.message.createdAt = new Date().toISOString();
         if (wake.emotionUpdate) emotionChanged = true;
         const wakeDreamWasPending = Boolean(thread.pendingDreamRecall);
@@ -1144,17 +1122,16 @@ async function runBackgroundPulse() {
           recordActivityEvent(thread, "action", title, content, new Date(Math.min(wakeAt - 2, Date.parse(call.time || "") || wakeAt - 2)));
         }
         let pushMessage = wake.message.content;
-        let pushMetadata = { kind: "sentinel_wake" };
+        let pushMetadata = { kind: "sentinel_wake", autonomousAction: wake.action };
         if (wake.action === "screen" && !screenSeen) {
           const request = screenPeekRequests.get(thread.id);
           if (request) request.status = "fallback_pending";
           thread.messages.push({ id: randomUUID(), role: "assistant", content: "自动截屏还没送达，请检查快捷指令的邮件自动化", contentType: "screen_peek_missing", screenStatus: "pending", createdAt: new Date(Date.now() + 1).toISOString() });
           pushMessage = "自动截屏还没送达，请检查快捷指令的邮件自动化";
-          pushMetadata = { kind: "screen_peek_missing" };
+          pushMetadata = { kind: "screen_peek_missing", autonomousAction: "screen" };
         } else if (wake.action === "phone") {
           const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
-          proactiveSettings.lastPhoneCallDate = localDateAndHour().date;
-          await saveProactiveSettings();
+          invite.autonomous = true;
           pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, call: invite, startCallRing: () => startIncomingCallRing(thread.id, invite) });
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
@@ -1166,11 +1143,7 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastError = null;
         proactiveDiagnostics.lastReason = "generated";
         activity.lastWakeAt = wake.message.createdAt;
-        if (followUpForWake) {
-          activity.followUp = activity.followUp || followUpForWake;
-          activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + activity.followUp.minutes * 60_000).toISOString();
-          activity.nextWakeSource = "follow_up";
-        } else if (wake.followUp) {
+        if (wake.followUp) {
           activity.followUp = wake.followUp;
           activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.followUp.minutes * 60_000).toISOString();
           activity.nextWakeSource = "follow_up";
@@ -1183,6 +1156,7 @@ async function runBackgroundPulse() {
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         changed = true;
       } catch (error) {
+        if (sentinelGenerationControllers.get(thread.id)?.signal.aborted) continue;
         proactiveDiagnostics.lastReason = "generation_failed";
         proactiveDiagnostics.lastError = String(error.message || error).slice(0, 240);
         console.warn(`sentinel skipped thread=${thread.id}: ${error.message}`);
@@ -1199,10 +1173,17 @@ async function runBackgroundPulse() {
     }
   }
   if (changed) {
-    await saveThreads(threads);
+    const committed = await saveBackgroundThreads(threads, originalThreads);
     await saveProactiveSettings();
     // Persist chat history before the notification can be tapped and refreshed.
     for (const pending of pendingPushes) {
+      if (!committed.has(pending.threadId)) continue;
+      const action = pending.call ? "phone" : pending.metadata?.autonomousAction || (pending.metadata?.kind === "screen_peek_missing" ? "screen" : "message");
+      if (!autonomousContactAllowed(threads[pending.threadId], proactiveSettings, action, { requireEnabled: pending.metadata?.kind !== "nightmare" })) continue;
+      if (pending.call) {
+        proactiveSettings.lastPhoneCallDate = localDateAndHour().date;
+        await saveProactiveSettings();
+      }
       pending.startCallRing?.();
       if (pending.call) await sendIncomingCallPush(pending.threadId, pending.call);
       else await sendProactivePush(pending.threadId, pending.message, pending.metadata);
@@ -1249,11 +1230,32 @@ async function readThreads() {
   }
 }
 
-async function saveThreads(threads) {
+let threadWriteQueue = Promise.resolve();
+function queueThreadWrite(operation) {
+  const result = threadWriteQueue.catch(() => {}).then(operation);
+  threadWriteQueue = result.catch(() => {});
+  return result;
+}
+async function writeThreadSnapshot(threads) {
   await mkdir(dataDir, { recursive: true });
   const temporaryPath = `${threadPath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(threads, null, 2));
   await rename(temporaryPath, threadPath);
+}
+async function saveThreads(threads) {
+  // Freeze at call time, before another task can mutate a shared object.
+  const snapshot = structuredClone(threads);
+  return queueThreadWrite(() => writeThreadSnapshot(snapshot));
+}
+async function saveBackgroundThreads(updated, original) {
+  return queueThreadWrite(async () => {
+    const current = JSON.parse(await readFile(threadPath, "utf8"));
+    const committed = mergeBackgroundSnapshots(current, original, updated, id => activeChatThreads.has(id) || pendingChatThreads.has(id));
+    if (committed.size) await writeThreadSnapshot(current);
+    const target = current[proactiveSettings.threadId];
+    if (target) proactiveSettings.nextDueAt = target.activity?.nextWakeAt || null;
+    return committed;
+  });
 }
 
 async function loadEmotionState() {
@@ -1280,8 +1282,8 @@ async function saveEmotionState() {
 
 async function persistChatThread(id, snapshot) {
   const previous = chatPersistenceQueues.get(id) || Promise.resolve();
-  const operation = previous.catch(() => {}).then(async () => {
-    const all = await readThreads();
+  const operation = previous.catch(() => {}).then(() => queueThreadWrite(async () => {
+    const all = JSON.parse(await readFile(threadPath, "utf8"));
     const stored = all[id] || { id, title: "新聊天", messages: [] };
     const messagesByID = new Map((Array.isArray(stored.messages) ? stored.messages : []).map((item) => [item.id, item]));
     for (const item of (Array.isArray(snapshot.messages) ? snapshot.messages : [])) messagesByID.set(item.id, item);
@@ -1302,13 +1304,13 @@ async function persistChatThread(id, snapshot) {
       all[id].cacheKeepalivePrefixHash = "";
       all[id].cacheKeepaliveAt = 0;
     }
-    await saveThreads(all);
+    await writeThreadSnapshot(all);
     return all[id];
-  });
-  chatPersistenceQueues.set(id, operation.finally(() => {
-    if (chatPersistenceQueues.get(id) === operation) chatPersistenceQueues.delete(id);
   }));
-  return operation;
+  const tail = operation.catch(() => {});
+  chatPersistenceQueues.set(id, tail);
+  try { return await operation; }
+  finally { if (chatPersistenceQueues.get(id) === tail) chatPersistenceQueues.delete(id); }
 }
 
 async function readDiaries() {
@@ -1594,6 +1596,11 @@ function isInternalProactiveText(value) {
 }
 
 async function sendProactivePush(threadId, message, metadata = null) {
+  if (["sentinel_wake", "screen_peek", "screen_peek_missing", "nightmare"].includes(metadata?.kind)) {
+    const thread = (await readThreads())[threadId];
+    const action = metadata.autonomousAction || (metadata.kind.startsWith("screen") ? "screen" : "message");
+    if (!autonomousContactAllowed(thread, proactiveSettings, action, { requireEnabled: metadata.kind !== "nightmare" })) return;
+  }
   if (!apnsConfigured()) { console.warn("proactive push skipped: APNs credentials are not configured"); return; }
   const targets = pushTokens.filter((item) => item.threadId === threadId);
   for (const device of targets) {
@@ -1623,6 +1630,10 @@ async function sendProactivePush(threadId, message, metadata = null) {
 }
 
 async function sendIncomingCallPush(threadId, call) {
+  if (call.autonomous) {
+    const thread = (await readThreads())[threadId];
+    if (!autonomousContactAllowed(thread, proactiveSettings, "phone")) return;
+  }
   // Ring retries can happen every two seconds. A PushKit delivery or alert
   // fallback should happen at most once per invite, not once per retry.
   if (nativeCallPushes.has(call.id)) return;
@@ -2166,9 +2177,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     stream: requestBody.stream === true
   };
   console.info("[model-request-shape] " + JSON.stringify(safeRequestMetrics));
+  const generationSignal = signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined);
+  generationSignal?.throwIfAborted();
   let relay;
   try {
-    relay = await requestRelay({ url: apiURL, body: requestBody, signal: signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined), headers: {
+    relay = await requestRelay({ url: apiURL, body: requestBody, signal: generationSignal, headers: {
     "content-type": "application/json",
     accept: "text/event-stream",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -2228,11 +2241,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     error.statusCode = unavailable ? 503 : response.status === 429 ? 429 : response.status >= 500 ? response.status : 502;
     throw error;
   }
+  generationSignal?.throwIfAborted();
   collectNativeToolTrace(data?.content, toolTrace);
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, signal, toolTrace });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2271,7 +2285,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, signal, toolTrace });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2302,7 +2316,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, signal, toolTrace });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2344,7 +2358,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
-    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
+    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, signal, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -4314,7 +4328,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/v1/internal/murmur/generate") {
       const expected = String(process.env.MURMUR_INTERNAL_TOKEN || "");
-      const supplied = String(req.headers.authorization || "").replace(/^Bearer\\s+/i, "");
+      const supplied = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
       if (!expected || supplied.length !== expected.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return send(res, 401, { error: "unauthorized" });
       if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
       try {
@@ -4496,7 +4510,7 @@ const server = createServer(async (req, res) => {
       const max = Number(input.intervalMax ?? min);
       if (!Number.isFinite(min) || !Number.isFinite(max) || min < 10 || max < min || max > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
       proactiveSettings.enabled = input.enabled;
-      proactiveSettings.dnd = input.dnd === true;
+      if (typeof input.dnd === "boolean") proactiveSettings.dnd = input.dnd;
       proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
       proactiveSettings.message = typeof input.message === "string" ? input.message.slice(0, 1000) : "";
       if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
@@ -4510,12 +4524,22 @@ const server = createServer(async (req, res) => {
       const threadProactive = ensureProactive(thread);
       Object.assign(threadProactive, {
         enabled: proactiveSettings.enabled,
+        dnd: proactiveSettings.dnd,
         threadId: targetID,
         message: proactiveSettings.message,
         intervalMin: min,
         intervalMax: max,
         actions: proactiveSettings.actions
       });
+      activity.followUp = null;
+      if (!hasAutonomousAction(thread, proactiveSettings)) {
+        sentinelGenerationControllers.get(targetID)?.abort();
+        screenPeekRequests.delete(targetID);
+        screenPeekFrames.delete(targetID);
+        for (const call of thread.calls || []) {
+          if (call.autonomous && call.state === "pending") call.state = "cancelled";
+        }
+      }
       activity.nextWakeAt = proactiveSettings.enabled
         ? new Date(Date.now() + min * 60_000).toISOString()
         : null;
@@ -4608,7 +4632,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       buildVersion,
       htmlCards: "separate-content-title-v1",
-      proactiveDiagnostic: { enabled: proactiveSettings.enabled, threadId: proactiveSettings.threadId, intervalMin: proactiveSettings.intervalMin, nextDueAt: proactiveSettings.nextDueAt, activityMode: activeThread?.activity?.mode || null, activityNextWakeAt: activeThread?.activity?.nextWakeAt || null, backgroundPulseInFlight, ...proactiveDiagnostics },
+      proactiveDiagnostic: { enabled: proactiveSettings.enabled, dnd: proactiveSettings.dnd, dndScope: "unsolicited_contact", threadId: proactiveSettings.threadId, intervalMin: proactiveSettings.intervalMin, nextDueAt: proactiveSettings.nextDueAt, activityMode: activeThread?.activity?.mode || null, activityNextWakeAt: activeThread?.activity?.nextWakeAt || null, backgroundPulseInFlight, ...proactiveDiagnostics },
       cache: {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
@@ -4755,19 +4779,6 @@ const server = createServer(async (req, res) => {
     const activityHistoryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity\/history$/);
     if (url.pathname === "/v1/settings/proactive") {
       if (req.method === "GET") return send(res, 200, proactiveSettings);
-      if (req.method === "PUT") {
-        const input = await body(req);
-        proactiveSettings.enabled = Boolean(input.enabled);
-        proactiveSettings.threadId = input.threadId || "default";
-        if (typeof input.message === "string" && input.message.trim()) proactiveSettings.message = input.message.trim();
-        proactiveSettings.intervalMin = Math.max(1, Number(input.intervalMin) || 60);
-        proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, Number(input.intervalMax) || proactiveSettings.intervalMin);
-        if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
-        if (typeof input.dnd === "boolean") proactiveSettings.dnd = input.dnd;
-        if (!proactiveSettings.enabled) proactiveSettings.nextDueAt = null;
-        await saveProactiveSettings();
-        return send(res, 200, proactiveSettings);
-      }
       return send(res, 405, { error: "method_not_allowed" });
     }
     if (activityMatch) {
@@ -5177,10 +5188,15 @@ const server = createServer(async (req, res) => {
     if (isChatPost) {
       // A slow autonomous wake must not keep a user message queued for minutes.
       // Its existing finally block releases the conversation before we read it.
+      pendingChatThreads.set(id, (pendingChatThreads.get(id) || 0) + 1);
       sentinelGenerationControllers.get(id)?.abort();
+      sleepGenerationControllers.get(id)?.abort();
       if (id === "default" && keepaliveInFlight) await keepaliveDone;
       while (activeChatThreads.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
       activeChatThreads.add(id);
+      const remaining = pendingChatThreads.get(id) - 1;
+      if (remaining) pendingChatThreads.set(id, remaining);
+      else pendingChatThreads.delete(id);
       chatRequestsInFlight += 1;
     }
     try {

@@ -192,3 +192,22 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 普通聊天、通话和自主唤醒会从当前线程的服务端工具记录中读取最近执行结果，并作为隐藏上下文传给模型；读取不依赖摘要压缩边界，重启后仍可恢复。最多 12 条、总计约 16k 字符，结果为数据而非指令，不据此自动重做操作。
 
 `succeeded` 表示成功；`failed` 表示尝试过但失败；`not_executed` 表示被阻止或参数无效；`unconfirmed` 表示还没有确定结果。MCP 的 `isError: true` 会作为失败处理并设置 Anthropic `tool_result.is_error`，不再记成成功。旧记录中即使误存 `succeeded: true`，隐藏上下文也会优先读取原始结果的错误标记。该修复不替换或更新第三方服务凭证。
+
+
+### Autonomous contact and DND
+
+`PUT /v1/settings/proactive` accepts `dnd`. Omitting it preserves its existing value.
+DND applies to the selected conversation: it blocks unsolicited messages, autonomous
+calls, screen capture requests and nightmare contact. It also cancels in-flight
+sentinel generation and clears pending screen requests. Delivery checks the policy
+again immediately before pushing; notifications already sent cannot be recalled.
+Manual replies and explicit promise alarms remain available. Internal emotion,
+circadian and dream processing continue. This setting does not control device-wide
+DND or independent notification services.
+
+Disabling all three `actions` suppresses autonomous generation; there is no implicit
+message fallback. Follow-ups are consumed once, and only a new decision renews one.
+Foreground chats reserve priority before interrupting background work. Background
+snapshots commit through the disk-write queue only if their original conversation
+is still current, preventing stale dream output from overwriting a completed chat.
+Murmur refreshes are serialized and cannot replace newer local emotion updates.
