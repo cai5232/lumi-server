@@ -211,3 +211,7 @@ Foreground chats reserve priority before interrupting background work. Backgroun
 snapshots commit through the disk-write queue only if their original conversation
 is still current, preventing stale dream output from overwriting a completed chat.
 Murmur refreshes are serialized and cannot replace newer local emotion updates.
+
+### Disabled diary and gallery
+
+Diary and shared-gallery features are disabled at the server boundary. Their endpoints return authenticated `410 feature_disabled`, chat requests cannot attach gallery IDs, and model replies cannot create or modify diary entries or collect photos. These capabilities are removed from the model prompt and explicitly marked unavailable. Existing stored records are preserved. Normal chat photo attachments and shared stickers remain available.
