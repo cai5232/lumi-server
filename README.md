@@ -219,3 +219,5 @@ Diary and shared-gallery features are disabled at the server boundary. Their end
 ### Usage calendar
 
 `GET /v1/usage/requests` retains `days`, `week`, and the latest 20 complete `requests`, and adds `activity` with Beijing calendar-day counts, input/output/cache tokens, summed duration, errors, and retained-log coverage. New index entries normalize Anthropic and OpenAI cache input denominators without changing existing token fields. Historical records with incomplete cache metadata are counted in `estimatedCacheRequests`. Monthly UI totals use all retained daily summaries rather than only the latest 20 request details. Existing weekly aggregates retain their original UTC-week and per-request cache-average definitions.
+
+Usage overview clients can request `GET /v1/usage/requests?summary=1` to retrieve the same statistics and recent request metadata without prompt/response bodies. Full text remains available through authenticated `GET /v1/usage/requests/:id`, including legacy logs. The original endpoint without the query remains compatible. Overview reads the committed metadata index without waiting for large in-flight detail writes.

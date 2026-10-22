@@ -43,6 +43,26 @@ export function createModelRequestStore(directory) {
       });
       return queue;
     },
+    async readMetadata() {
+      // Overview needs only the last committed index, never the large detail files
+      // or an in-flight prompt write queue.
+      await load();
+      return entries.map(item => ({...item}));
+    },
+    async readDetail(id) {
+      await load();
+      const item = entries.find(entry => entry.id === id);
+      if (!item) return null;
+      if (recent.has(id)) return {...item, ...recent.get(id)};
+      if (item.detailStored) {
+        try { return {...item, ...JSON.parse(await readFile(detailPath(id), 'utf8'))}; }
+        catch(error) { if(error.code === 'ENOENT') return null; throw error; }
+      }
+      try {
+        const legacy = JSON.parse(await readFile(legacyPath, 'utf8')).requests || [];
+        return legacy.find(entry => entry.id === id) || null;
+      } catch(error) { if(error.code === 'ENOENT') return null; throw error; }
+    },
     async read() {
       await queue.catch(()=>{}); await load();
       const tail=entries.slice(-20), missingLegacy=tail.filter(item=>!item.detailStored&&!recent.has(item.id));
