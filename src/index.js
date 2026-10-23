@@ -5342,7 +5342,7 @@ const server = createServer(async (req, res) => {
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
       const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
-      if (foregroundPlan && !backgroundCompactionJobs.has(id)) {
+      if (foregroundPlan && !backgroundCompactionJobs.has(id) && Date.now() >= (compactionRetryAfter.get(id) || 0)) {
         try {
           const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
           if (applied) {
