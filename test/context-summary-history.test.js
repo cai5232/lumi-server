@@ -1,7 +1,10 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {readFile} from 'node:fs/promises';
+import {mkdtemp, mkdir, rename, unlink, writeFile, rm, readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {createHash, randomUUID} from 'node:crypto';
 import {extractCompleteContextSummary, isNormalModelCompletion} from '../src/context-summary.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
@@ -30,11 +33,13 @@ test('a multi-turn legacy history no longer multiplies a 20k summary', () => {
   assert.ok(cleaned.every((value, i) => value.endsWith(`第${i}轮`)));
 });
 
-test('token estimates and compaction batches use the same cleaned history', async () => {
+test('token estimates and compaction batches use the same cleaned history', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'lumi-history-'));
+  t.after(() => rm(dataDir, {recursive:true, force:true}));
   const summary = 'old-summary'.repeat(5000);
   const messages = [{id:'a',role:'user',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
   const calls = [];
-  Object.assign(context, {process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
+  Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
     extractCompleteContextSummary, isNormalModelCompletion});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);

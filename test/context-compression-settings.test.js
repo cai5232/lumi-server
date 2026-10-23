@@ -14,7 +14,7 @@ test('saved threshold persists and changes the actual compaction decision', asyn
     const options = { path: join(directory, 'settings.json'), contextLimitTokens: 200000, defaultTriggerRatio: 0.85 };
     const store = await openCompressionSettings(options);
     assert.equal(store.snapshot.triggerTokensEstimate, 170000);
-    const start = source.indexOf('function compactionPlan(thread) {');
+    const start = source.indexOf('function compactionPlan(');
     const plan = source.slice(start, source.indexOf('\nasync function compactContext(', start));
     const context = { compressionSettings: store, contextMessages: thread => thread.messages, messageTokens: messages => messages.length * 1000, preservedTailMinTurns: 10, preservedTailMaxTurns: 15, preservedTailTargetTokens: 20000 };
     vm.createContext(context); vm.runInContext(plan, context);

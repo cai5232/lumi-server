@@ -2605,6 +2605,38 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 
 // A failed compaction must not stall every subsequent chat message.
 const compactionRetryAfter = new Map();
+function compactionCooldownPath(id) {
+  return join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
+}
+
+async function compactionCoolingDown(id) {
+  if (Date.now() < (compactionRetryAfter.get(id) || 0)) return true;
+  try {
+    const saved = JSON.parse(await readFile(compactionCooldownPath(id), "utf8"));
+    const retryAt = Number(saved.retryAt || 0);
+    if (Number.isFinite(retryAt) && Date.now() < retryAt) {
+      compactionRetryAfter.set(id, retryAt);
+      return true;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") console.warn("[compaction] cooldown ignored: " + error.message);
+  }
+  return false;
+}
+
+async function delayCompactionRetry(id, retryAt) {
+  compactionRetryAfter.set(id, retryAt);
+  try {
+    await mkdir(dataDir, { recursive: true });
+    const path = compactionCooldownPath(id);
+    const temporaryPath = path + "." + randomUUID() + ".tmp";
+    try {
+      await writeFile(temporaryPath, JSON.stringify({ retryAt }));
+      await rename(temporaryPath, path);
+    } finally { await unlink(temporaryPath).catch(() => {}); }
+  } catch (error) { console.warn("[compaction] cooldown save failed: " + error.message); }
+}
+
 const compactionDiagnostics = new Map();
 function setCompactionDiagnostics(id, patch) {
   compactionDiagnostics.set(id, { ...(compactionDiagnostics.get(id) || {}), ...patch, updatedAt: new Date().toISOString() });
@@ -2714,6 +2746,9 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (!String(thread.contextSummary || "").trim()) {
     const sourceChars = chunks.reduce((total, part) => total + part.length, 0);
     if (sourceChars >= 12000 && summary.length > Math.max(5000, Math.floor(sourceChars * 0.8))) {
+      // This completed checkpoint cannot pass validation. Let the next attempt
+      // distill again instead of replaying the same rejected summary forever.
+      await unlink(checkpointPath).catch(() => {});
       throw new Error("distiller summary is too close to source length; refusing non-compression");
     }
   }
@@ -2775,13 +2810,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const threads = await readThreads();
         const snapshot = threads[id];
         if (!snapshot) return;
-        const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
-        try {
-          const saved = JSON.parse(await readFile(cooldownPath, "utf8"));
-          if (Date.now() < Number(saved.retryAt || 0)) return;
-        } catch (error) {
-          if (error?.code !== "ENOENT") console.warn("[compaction] cooldown ignored: " + error.message);
-        }
+        if (await compactionCoolingDown(id)) return;
         const plan = compactionPlan(snapshot);
         if (!plan) {
           setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
@@ -2808,8 +2837,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, snapshot);
         if (applied) {
           compactionRetryAfter.delete(id);
-          const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
-          await unlink(cooldownPath).catch(() => {});
+          await unlink(compactionCooldownPath(id)).catch(() => {});
           setCompactionDiagnostics(id, { status: "succeeded", completedAt: new Date().toISOString(), error: null });
           console.info("[compaction] background summary committed thread=" + id);
         } else {
@@ -2819,12 +2847,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         }
       } catch (error) {
         const retryAt = Date.now() + 10 * 60_000;
-        compactionRetryAfter.set(id, retryAt);
-        try {
-          await mkdir(dataDir, { recursive: true });
-          const cooldownPath = join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
-          await writeFile(cooldownPath, JSON.stringify({ retryAt }));
-        } catch (persistError) { console.warn("[compaction] cooldown save failed: " + persistError.message); }
+        await delayCompactionRetry(id, retryAt);
         setCompactionDiagnostics(id, { status: "failed", failedAt: new Date().toISOString(), retryAt: new Date(retryAt).toISOString(), error: String(error.message || error).slice(0, 500) });
         console.warn("[compaction] background attempt failed; will retry after cooldown: " +
           String(error.message || error).slice(0, 300));
@@ -5342,11 +5365,13 @@ const server = createServer(async (req, res) => {
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
       const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
-      if (foregroundPlan && !backgroundCompactionJobs.has(id) && Date.now() >= (compactionRetryAfter.get(id) || 0)) {
+      if (foregroundPlan && !backgroundCompactionJobs.has(id) && !(await compactionCoolingDown(id))) {
         try {
           const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
           if (applied) {
             await persistChatThread(id, threads[id]);
+            compactionRetryAfter.delete(id);
+            await unlink(compactionCooldownPath(id)).catch(() => {});
             console.info("[compaction] foreground summary committed thread=" + id);
             setCompactionDiagnostics(id, { status: "succeeded", mode: "foreground", completedAt: new Date().toISOString(), error: null });
           }
@@ -5355,7 +5380,7 @@ const server = createServer(async (req, res) => {
           console.warn("[compaction] foreground attempt failed: " + String(error.message || error).slice(0, 300));
           // Avoid a second expensive distillation of the same failed source
           // immediately after the chat reply.
-          compactionRetryAfter.set(id, Date.now() + 10 * 60_000);
+          await delayCompactionRetry(id, Date.now() + 10 * 60_000);
         }
       }
       generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });

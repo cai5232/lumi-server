@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {relayEndpoint,requestRelay} from '../src/relay-transport.js';
+import {removeMalformedAnthropicThinkingBlocks} from '../src/anthropic-messages.js';
 import {responseThinking} from '../src/response-thinking.js';
 const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
 const start=source.indexOf('async function callModel('),end=source.indexOf('\nasync function zenMuxSubscriptionUsage',start);
 for(const format of ['openai','anthropic'])test(`real callModel ${format} route keeps chosen endpoint, auth, usage and thinking without connecting unavailable MCP`,async()=>{
  let captured,usage;
- const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},relayEndpoint,responseThinking,
+ const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,
   mcpClientStore:{read:async()=>({servers:[{enabled:true,tools:[],name:'offline'}]})},modelToolsForServer:()=>[],
   connectPendingMcpServers:()=>{throw new Error('chat must not wait for MCP discovery')},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
   cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async()=>{},randomUUID:()=> 'test-id',modelRequestLogJSON:JSON.stringify,
