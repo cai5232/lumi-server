@@ -62,7 +62,8 @@ for (const format of ['openai', 'anthropic']) {
     };
     const start = async () => {
       const probe = createServer();
-      const port = await listen(probe);
+      const port = 20000 + Math.floor(Math.random() * 10000);
+      await new Promise((resolve, reject) => { probe.once('error', reject); probe.listen(port, '127.0.0.1', resolve); });
       await new Promise(resolve => probe.close(resolve));
       base = `http://127.0.0.1:${port}`;
       const target = `http://127.0.0.1:${providerPort}`;
