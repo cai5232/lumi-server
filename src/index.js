@@ -1,3 +1,4 @@
+import { createInstantCommandStore, parseInstantCommands, commandFeedbackText } from "./instant-commands.js";
 import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
@@ -34,6 +35,7 @@ const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const stickerStore = createStickerStore(dataDir);
+const instantCommands = createInstantCommandStore(dataDir);
 await duettoReady;
 const duettoPort = duettoServer.address().port;
 const musicService = createMusicService(dataDir);
@@ -3092,7 +3094,10 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   // The backend-owned prompt is canonical. Ignore legacy LUMI_SYSTEM_PROMPT
   // and client-supplied systemPrompt so old persona text cannot replace it.
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}\n\n${input}${foodDirective}`;
+  const commandFeedback = !proactive && !callMode ? await instantCommands.feedback(thread.id) : [];
+  const commandDirective = !callMode ? '\n<instant_commands>需要用户现在去做一件具体的事时，可在回复末尾附加隐藏标签 <countdown>{"title":"去喝水","minutes":1}</countdown>。不需要计时就省略 minutes。计时从发出指令时开始，最多24小时；用户完成后下一轮会收到真实用时反馈。只在自然需要时使用，不要每轮都下指令。标签不要放在代码块、speech、thinking 或 HTML 中。</instant_commands>' : '';
+  const commandFeedbackContext = commandFeedbackText(commandFeedback);
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${commandDirective}\n${commandFeedbackContext}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3252,6 +3257,12 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     cleanedRaw = drawer.content;
     if (drawer.items.length) await saveDrawerItems(thread.id, drawer.items);
   }
+  const parsedCommands = parseInstantCommands(stripPrivateReasoning(cleanedRaw).replace(/```[\s\S]*?(?:```|$)/g, "").replace(/<(speech|memory|diary_entry|diary_action|html)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/gi, ""));
+  cleanedRaw = parseInstantCommands(cleanedRaw).content;
+  const createdCommands = !callMode ? await instantCommands.add(thread.id, parsedCommands.items) : [];
+  for (const command of createdCommands) {
+    void sendProactivePush(thread.id, command.title, { kind: "instant_command", commandID: command.id }).catch(error => console.warn(`command push failed: ${error.message}`));
+  }
   const optionItems = callMode || proactive ? [] : extractOptionItems(cleanedRaw);
   const memoryMatch = cleanedRaw.match(/<memory>([\s\S]*?)<\/memory>/i);
   const userRemarkMatch = cleanedRaw.match(/<user_remark>([\s\S]*?)<\/user_remark>/i);
@@ -3288,6 +3299,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
   if (!content && diaryEntry) content = "嗯，我在。";
+  if (!content && parsedCommands.items.length) content = parsedCommands.items.map(item => item.title).join("；");
   if (emojiMoods.includes(emojiMood) && !isHTMLContent(content)) {
     const chosen = chooseEmojiFromMood(emojiMood, emojiCatalog[emojiMood], content);
     if (chosen) content = `${content} ${chosen}`;
@@ -3302,7 +3314,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -3970,6 +3982,18 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS") return send(res, 204, {});
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    const commandsRoute = url.pathname.match(/^\/v1\/chats\/([^/]+)\/commands(?:\/([^/]+)(?:\/(started|complete))?)?$/);
+    if (commandsRoute) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const threadID = decodeURIComponent(commandsRoute[1]);
+      const commandID = commandsRoute[2];
+      if (!commandID && req.method === "GET") return send(res, 200, { items: await instantCommands.list(threadID) });
+      const action = req.method === "DELETE" && !commandsRoute[3] ? "cancel"
+        : req.method === "POST" ? commandsRoute[3] : null;
+      if (!commandID || !action) return send(res, 405, { error: "method_not_allowed" });
+      const result = await instantCommands.act(threadID, commandID, action);
+      return send(res, result ? 200 : 404, result || { error: "command_not_found" });
+    }
     if (url.pathname === "/v1/stickers" || url.pathname.startsWith("/v1/stickers/")) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (req.method === "GET" && url.pathname === "/v1/stickers") {
@@ -5452,6 +5476,7 @@ const server = createServer(async (req, res) => {
       finishUserConversation(threads[id], messageText);
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
+      await instantCommands.acknowledge(id, generated.commandFeedbackIDs || []).catch(error => console.warn(`command feedback acknowledgement failed: ${error.message}`));
       // Fire and forget: the current reply is not delayed by distillation.
       scheduleBackgroundCompaction(id, selectedModel, customProvider);
       if (messageText && !images.length && !galleryImageIDs.length && generated.calendarEvents) {
