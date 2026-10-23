@@ -48,12 +48,25 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const hidden = {role:'assistant',content:'回复',precedingUserModelContent:messages[0].modelContent};
   assert.ok(context.messageTokens([hidden]) > context.messageTokens([{role:'assistant',content:'回复'}]));
   assert.ok(context.messageTokens([hidden]) < 150, 'hidden history is counted after summary deduplication');
+  const executed = [{name:'lookup', arguments:'{}', result:'verified tool output', succeeded:true}];
+  messages.push({id:'b',role:'assistant',content:'查到了',toolCalls:executed});
   const thread = {contextSummary:'当前摘要',messages};
-  await context.compactContext(thread, {olderMessages:messages,throughMessageId:'a'}, {model:'test',customProvider:{}});
+  await context.compactContext(thread, {olderMessages:messages,throughMessageId:'b'}, {model:'test',customProvider:{}});
   assert.equal(calls.length, 1);
   assert.ok(!JSON.stringify(calls).includes(summary));
   assert.ok(calls[0].messages[1].content.includes('当前摘要'));
   assert.ok(calls[0].messages[1].content.includes('原文'));
+  assert.ok(calls[0].messages[1].content.includes(JSON.stringify(executed)), 'compaction must receive the actual tool result');
   assert.equal(thread.contextSummary, '新摘要');
   assert.equal(messages[0].modelContent.includes(summary), true);
+});
+
+
+test('history preserves exact tool outcomes without treating a failed call as success', () => {
+  const calls = [{name:'lookup',arguments:'{}',result:'verified fact',succeeded:true},
+    {name:'send',arguments:'{}',result:'not executed',succeeded:false}];
+  const value = context.historicalModelContent('原始回复', calls);
+  assert.ok(value.startsWith('原始回复'));
+  assert.ok(value.includes(JSON.stringify(calls)));
+  assert.equal(context.historicalModelContent(value, calls), value);
 });
