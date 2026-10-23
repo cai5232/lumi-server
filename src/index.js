@@ -2582,9 +2582,9 @@ async function writeMemory(content, threadId) {
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
-function compactionPlan(thread) {
+function compactionPlan(thread, projectedInputTokens = 0) {
   const messages = contextMessages(thread);
-  const upstreamInputTokens = Number(thread.lastMeasuredInputTokens || 0);
+  const upstreamInputTokens = Math.max(Number(thread.lastMeasuredInputTokens || 0), Number(projectedInputTokens || 0));
   if (upstreamInputTokens < compressionSettings.snapshot.triggerTokensEstimate) return null;
   const tailTurns = [];
   let tailTokenCount = 0;
@@ -5334,6 +5334,30 @@ const server = createServer(async (req, res) => {
       const modelMessageContent = isStickerMessage
         ? stickerMessageForModel(input, catalogSticker)
         : userMessage.content;
+      // Compact before sending an oversized request, rather than waiting for the
+      // previous upstream usage to cross the threshold after the reply is sent.
+      // Estimate model-facing history including persisted per-turn context.
+      const projectedInputTokens = messageTokens(contextMessages(threads[id])) +
+        estimateTokens(threads[id].cacheSystem || "") +
+        estimateTokens(threads[id].contextSummary || "") +
+        estimateTokens(modelMessageContent) + 12000;
+      const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
+      if (foregroundPlan && !backgroundCompactionJobs.has(id)) {
+        try {
+          const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
+          if (applied) {
+            await persistChatThread(id, threads[id]);
+            console.info("[compaction] foreground summary committed thread=" + id);
+            setCompactionDiagnostics(id, { status: "succeeded", mode: "foreground", completedAt: new Date().toISOString(), error: null });
+          }
+        } catch (error) {
+          setCompactionDiagnostics(id, { status: "failed", mode: "foreground", failedAt: new Date().toISOString(), error: String(error.message || error).slice(0, 500) });
+          console.warn("[compaction] foreground attempt failed: " + String(error.message || error).slice(0, 300));
+          // Avoid a second expensive distillation of the same failed source
+          // immediately after the chat reply.
+          compactionRetryAfter.set(id, Date.now() + 10 * 60_000);
+        }
+      }
       generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
