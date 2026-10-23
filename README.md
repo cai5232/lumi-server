@@ -178,3 +178,16 @@ Promise Alarm 上游代码及网页完整保存在 `promise-alarm/`，其原有 
 Assistant-initiated calls use the registered iOS PushKit token and expire after 30 seconds. The sentinel can place at most one proactive call per local calendar day, only between 12:00 and 23:00 in `LUMI_USER_TIME_ZONE` (defaults to `Asia/Shanghai`), and never while Do Not Disturb is enabled or a sleep transition is pending. `PUT /v1/settings/proactive` accepts `dnd: true|false`; the setting is persisted with the proactive configuration. Call-control and pending-call routes require the existing `LUMI_PUSH_API_TOKEN` Bearer authorization.
 
 During calls, iOS may send a short `voiceContext` cue based on the speaker's own baseline. The server treats it as a weak hint and keeps spoken words authoritative. `softVoice: true` lowers playback volume and adjusts supported TTS settings. Saying goodnight triggers a gentle response and schedules hangup 18 seconds after playback, unless the user speaks again.
+
+## 即时指令
+
+普通聊天与自主联系可以在回复末尾产生隐藏的 `<countdown>{"title":"喝水","minutes":1}</countdown>` 标签；省略 `minutes` 时仅记录用时。指令从服务端发出时计时，最长 24 小时。状态保存在 `LUMI_DATA_DIR/instant-commands.json`，不需要 D1 或新增数据库。复用已注册的 APNs 发送新指令通知。
+
+原生客户端使用以下接口，均需要现有的 `LUMI_PUSH_API_TOKEN` Bearer 鉴权：
+
+- `GET /v1/chats/:threadID/commands`：待完成指令。
+- `POST /v1/chats/:threadID/commands/:id/started`：返回原始开始时间，不重置倒计时。
+- `POST /v1/chats/:threadID/commands/:id/complete`：记录完成用时并移出队列。
+- `DELETE /v1/chats/:threadID/commands/:id`：取消，不生成反馈。
+
+完成反馈按聊天隔离，注入下一轮普通聊天的动态尾部；回复持久保存后才确认消费，模型失败不会丢失反馈。该实现兼容 NEST 的标签格式，使用 Lumi 自有存储和 SwiftUI 界面，没有引入参考仓库的 Workers/D1 代码。
