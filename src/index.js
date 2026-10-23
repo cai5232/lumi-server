@@ -2708,6 +2708,15 @@ async function compactContext(thread, plan, { model, customProvider }) {
     summary = next;
     await saveCheckpoint(i + 1, summary);
   }
+  // Do not replace a shorter rolling context with a near-verbatim transcript.
+  // Only check the first distillation (no previous summary) to avoid penalizing
+  // later incremental batches that retain established long-term facts.
+  if (!String(thread.contextSummary || "").trim()) {
+    const sourceChars = chunks.reduce((total, part) => total + part.length, 0);
+    if (sourceChars >= 12000 && summary.length > Math.max(5000, Math.floor(sourceChars * 0.8))) {
+      throw new Error("distiller summary is too close to source length; refusing non-compression");
+    }
+  }
   // Commit atomically only after every chunk succeeds.
   thread.contextSummary = summary;
   thread.compactionCount = (thread.compactionCount || 0) + 1;
@@ -2783,9 +2792,16 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const oldBoundary = String(snapshot.compactedThroughMessageId || "");
         const completed = await compactContext(snapshot, plan, { model, customProvider });
         if (!completed) return;
-        // If the user is chatting, wait for a later turn rather than writing
-        // over the chat's concurrently-updated thread snapshot.
+        // A completed (and already paid-for) summary should not be discarded just
+        // because the next chat began during distillation. Wait for in-flight chat
+        // persistence to finish, keeping this job registered to avoid duplicate work.
+        for (let attempt = 0; activeChatThreads.has(id) && attempt < 90; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
         if (activeChatThreads.has(id)) {
+          // Preserve successful checkpoint for a subsequent retry; do not
+          // restart expensive upstream distillation immediately.
+          compactionRetryAfter.set(id, Date.now() + 2 * 60_000);
           setCompactionDiagnostics(id, { status: "deferred", reason: "chat_in_progress" });
           return;
         }
@@ -2797,6 +2813,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
           setCompactionDiagnostics(id, { status: "succeeded", completedAt: new Date().toISOString(), error: null });
           console.info("[compaction] background summary committed thread=" + id);
         } else {
+          compactionRetryAfter.set(id, Date.now() + 2 * 60_000);
           setCompactionDiagnostics(id, { status: "deferred", reason: "thread_changed_or_busy" });
           console.info("[compaction] summary commit deferred because thread changed or is busy: " + id);
         }
