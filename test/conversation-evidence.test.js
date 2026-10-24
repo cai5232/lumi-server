@@ -32,10 +32,16 @@ for (const format of ['openai', 'anthropic']) {
       let raw = '';
       req.setEncoding('utf8');
       for await (const chunk of req) raw += chunk;
-      res.writeHead(200, { 'content-type': 'application/json' });
+      res.setHeader('content-type', 'application/json');
       if (req.url.includes('/api/integrations/')) return res.end('{"related":""}');
       if (req.method === 'GET') return res.end('[]');
       const request = JSON.parse(raw);
+      // Match relays that expose Claude Messages but reject remote MCP beta.
+      if (format === 'anthropic' && (request.mcp_servers ||
+          request.tools?.some(tool => tool.type === 'mcp_toolset') || req.headers['anthropic-beta'])) {
+        res.statusCode = 400;
+        return res.end(JSON.stringify({ error: { message: 'Cross-protocol Claude requests do not support mcp_servers. Use the Claude native channel to preserve this control.' } }));
+      }
       seen.push(request);
       const last = request.messages.at(-1);
       const wantsTool = text(last).includes('RUN_TOOL');
