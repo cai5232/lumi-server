@@ -191,3 +191,12 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 - `DELETE /v1/chats/:threadID/commands/:id`：取消，不生成反馈。
 
 完成反馈按聊天隔离，注入下一轮普通聊天的动态尾部；回复持久保存后才确认消费，模型失败不会丢失反馈。该实现兼容 NEST 的标签格式，使用 Lumi 自有存储和 SwiftUI 界面，没有引入参考仓库的 Workers/D1 代码。
+
+## Solo controls and sleep inbox
+
+- `POST /v1/solo/trigger` requires the existing API token and an `Idempotency-Key`. It starts one private Solo run using the saved encrypted custom route, bypassing automatic desire/idle thresholds. Sleeping or busy conversations return 409. Repeating an accepted key never starts a second run, including across server restarts.
+- `GET/PUT /v1/settings/solo` also supports `cooldownMinutes` (5–1440; default 60). Existing clients may omit it. Automatic Solo still requires an idle, non-foreground conversation and sufficient desire; manual runs do not send a chat message.
+- A farewell keyword arms sleep after the configured silence delay (production default 60 minutes). Sleeping user messages are durably saved first. Each unique receipt has a 25% independent wake chance; the fifth receipt in that sleep session forces wake. Request retries never add a receipt or reroll the chance.
+- A silent receipt returns `replyDeferred: true` and a stable empty compatibility `assistantMessage`; this placeholder is never inserted into conversation history. Images use the existing durable attachment store.
+- Random/forced wake and natural wake all supply the complete sleeping inbox and the full latest sleep-session dreams to the model. Inbox IDs are acknowledged only after successful output; restart and failure preserve unanswered messages. Natural wake responds to an inbox even when proactive contact is disabled. New foreground sends cancel background generation and share its conversation persistence reservation.
+- `GET /v1/chats/:id/sleep?offset=0&limit=30` is authenticated and returns current activity, sleep policy, pending message count, and complete dream bodies with pagination. Dream text removes private emotion-update markup, not narrative. Ordinary dreams remain outside the visible chat transcript.
