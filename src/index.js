@@ -1,3 +1,4 @@
+import { sleepMessageDecision, sleepInbox, sleepInboxContext, fullDreamRecall, dreamRecords, cleanDreamContent, acknowledgeSleepInbox, validateSoloSettings } from "./sleep-inbox.js";
 import { loadChatImages, saveChatImages } from "./chat-images.js";
 import { createInstantCommandStore, parseInstantCommands, commandFeedbackText } from "./instant-commands.js";
 import { createChatJobs } from "./chat-jobs.js";
@@ -64,7 +65,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -95,7 +96,7 @@ let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
 const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
-const soloSettings = { enabled: true, mode: "mix", desireThreshold: 0.78, idleMinutes: 30, touchDecayMinutes: 30 };
+const soloSettings = { enabled: true, mode: "mix", desireThreshold: 0.78, idleMinutes: 30, touchDecayMinutes: 30, cooldownMinutes: 60 };
 let soloMetrics = [];
 const activeSoloRuns = new Map();
 const soloNextEligibleAt = new Map();
@@ -275,6 +276,7 @@ const sleepHours = Number(process.env.LUMI_SLEEP_HOURS || 5.5);
 const sleepNightmareProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_NIGHTMARE_PROBABILITY || 0.35)));
 const sleepReentryProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_REENTRY_PROBABILITY || 0.5)));
 const sleepDreamIntervalMinutes = Math.max(0.01, Number(process.env.LUMI_SLEEP_DREAM_INTERVAL_MINUTES || 120));
+const sleepReplyProbability = Math.max(0, Math.min(1, Number(process.env.LUMI_SLEEP_REPLY_PROBABILITY ?? 0.25)));
 const backgroundPulseIntervalMs = Math.max(100, Number(process.env.LUMI_BACKGROUND_PULSE_MS || 15_000));
 const emotionQuietStartHour = Number(process.env.LUMI_EMOTION_QUIET_START_HOUR || 16);
 const emotionQuietEndHour = Number(process.env.LUMI_EMOTION_QUIET_END_HOUR || 0);
@@ -298,7 +300,7 @@ const SLEEP_STAGE_PROMPTS = {
   },
   nightmare: {
     system: "你是噩梦阶段：受控的对抗性模拟器。放大真实失败模式，但必须给出可行的恢复路径。",
-    user: ({ trauma, competence }) => `近期记忆片段（可能没有明显负面内容）：\n${trauma}\n\n能力边界：${competence}\n\n请综合完整睡眠上下文、梦境感受、此刻状态和用户关系，自行选择下一步，不要把选择交给用户。严格输出以下两项：AI_DECISION: send_message 或 continue_sleep 或 sentinel；MESSAGE: 仅当选择 send_message 时，写一段可直接发给用户的自然中文消息，放进 <message>...</message>。不要把场景分析、恢复步骤或内部字段放进给用户的消息。`
+    user: ({ trauma, competence }) => `近期记忆片段（可能没有明显负面内容）：\n${trauma}\n\n能力边界：${competence}\n\n先在 <dream>...</dream> 中写出完整的第一人称噩梦正文，然后综合完整睡眠上下文、梦境感受、此刻状态和用户关系，自行选择下一步，不要把选择交给用户。随后严格输出以下两项：AI_DECISION: send_message 或 continue_sleep 或 sentinel；MESSAGE: 仅当选择 send_message 时，写一段可直接发给用户的自然中文消息，放进 <message>...</message>。不要把场景分析、恢复步骤或内部字段放进给用户的消息。`
   },
   lucid: {
     system: "你是清醒梦阶段。AI 知道自己在做梦，用安全的想象练习当前目标。",
@@ -340,6 +342,8 @@ function ensureActivity(thread) {
   }
   ensureProactive(thread);
   if (!thread.sleep) thread.sleep = { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null };
+  if (!Array.isArray(thread.sleepInboxIDs)) thread.sleepInboxIDs = [];
+  if (!Array.isArray(thread.sleep.dreams)) thread.sleep.dreams = [];
   if (!Array.isArray(thread.sleep.pendingDreams)) thread.sleep.pendingDreams = [];
   if (typeof thread.sleep.dreamArc !== "string") thread.sleep.dreamArc = "";
   if (!Object.prototype.hasOwnProperty.call(thread.sleep, "nightmare")) thread.sleep.nightmare = null;
@@ -398,7 +402,7 @@ function markUserActivity(thread, content) {
   activity.nextWakeAt = configured.enabled ? new Date(now.getTime() + interval * 60_000).toISOString() : null;
   activity.nextWakeSource = configured.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
-  activity.sleepPendingAt = isFarewell(content)
+  activity.sleepPendingAt = (isFarewell(content) || activity.sleepPendingAt)
     ? new Date(now.getTime() + sleepDelayMinutes * 60_000).toISOString()
     : null;
   activity.sleepStartedAt = null;
@@ -425,7 +429,7 @@ function finishUserConversation(thread, content) {
     : null;
   activity.nextWakeSource = proactive.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
-  activity.sleepPendingAt = isFarewell(content)
+  activity.sleepPendingAt = (isFarewell(content) || activity.sleepPendingAt)
     ? new Date(now + sleepDelayMinutes * 60_000).toISOString()
     : null;
   activity.sleepStartedAt = null;
@@ -788,15 +792,16 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
-    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${prompt.user(context)}` }],
+    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${sleepInboxContext(thread, { awake: false })}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
     provider: route.provider,
     model: route.model,
-    customProvider: route.customProvider || null
+    customProvider: route.customProvider || null,
+    signal: sentinelGenerationControllers.get(thread.id)?.signal
   });
   const emotionUpdate = await applyEmotionUpdateFromOutput(output, thread.id);
   if (emotionUpdate) await saveEmotionState();
-  const record = { id: randomUUID(), stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
+  const record = { id: randomUUID(), sessionId: thread.sleep.sessionId || null, stage, cycle, content: output, seedIds, createdAt: new Date().toISOString() };
   thread.sleep.dreams.push(record);
   return record;
 }
@@ -896,25 +901,15 @@ function isDreamRecallRequest(input) {
   return /梦境|做梦|梦见|昨晚.*梦|梦里|睡着.*梦|梦到/.test(String(input || ""));
 }
 
-function storedDreamRecall(thread) {
-  const records = (thread.sleep?.dreams || []).filter((item) => item.stage === "rem").slice(-2).reverse();
-  const shards = sleepRecallShards(records);
-  return shards.length
-    ? "<dream_recall source=\"stored_waking_memory\">可回忆的梦境残留碎片（不要当作完整记录；只有在相关时自然提起）：\\n" + shards.map((item) => `- ${item}`).join("\\n") + "\\n</dream_recall>"
-    : "";
-}
-
+function storedDreamRecall(thread) { return fullDreamRecall(thread); }
 
 async function finishSleepCycle(thread, activity, now) {
   const sleep = thread.sleep;
   const dreamRecords = sleep.dreams.filter((item) => item.createdAt >= activity.sleepStartedAt);
   const dreamCandidates = dreamRecords.filter((item) => item.stage === "rem");
   const recallShards = sleepRecallShards(dreamCandidates.slice(-2).reverse());
-  // 梦境仍然只留在睡眠内部；醒来时只把少量残留碎片放入下一次主模型请求的隐藏上下文。
-  // 不把完整梦境写进 thread.messages，也不在睡醒时另起模型请求重读整晚梦。
-  thread.pendingDreamRecall = recallShards.length
-    ? `<dream_recall source="waking_memory">醒来后残留的梦境碎片（不是完整梦境，不要机械复述；只有在你自己想提起时才自然表达）：\n${recallShards.map((item) => `- ${item}`).join("\n")}\n</dream_recall>`
-    : "";
+  thread.pendingDreamRecall = fullDreamRecall(thread);
+  activity.sleepReplyPending = sleepInbox(thread).length > 0;
   sleep.reflections.push({
     generatedBy: "sleep-state",
     dreamCount: dreamRecords.length,
@@ -926,11 +921,37 @@ async function finishSleepCycle(thread, activity, now) {
   activity.mode = "sentinel";
   activity.sleepStage = "awake";
   recordActivityEvent(thread, "wake", "醒来", recallShards.length ? `睡醒了，残留的梦境片段：${recallShards.join("；")}` : "睡醒了。", new Date(now));
-  const proactive = ensureProactive(thread);
+  const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   // Natural wake is itself the first sentinel wake. Do not wait for the
   // ordinary idle interval; the request will choose the next wake schedule.
   activity.nextWakeAt = proactive.enabled ? new Date(now).toISOString() : null;
   activity.nextWakeSource = proactive.enabled ? "sleep_wake" : null;
+}
+
+function deferredSleepResponse(userMessage, activity, updatedOptionMessage = null) {
+  return { userMessage: publicChatMessage(userMessage), assistantMessage: { id: userMessage.sleepReceiptID, role: "assistant", content: "", contentType: "sleep_deferred", createdAt: userMessage.createdAt }, updatedOptionMessage, replyDeferred: true, sleepUntil: activity.sleepUntil || null, memorySaved: false };
+}
+
+async function replyToSleepInbox(thread) {
+  const pending = sleepInbox(thread);
+  if (!pending.length) return null;
+  const route = await resolveMurmurRoute(thread.id, thread);
+  if (!route?.customProvider || !route.model) throw new Error("custom_model_route_unavailable_for_sleep_reply");
+  const generated = await generateReply({ input: "", thread, provider: route.provider, model: route.model, customProvider: route.customProvider, signal: sentinelGenerationControllers.get(thread.id)?.signal });
+  if (!generated.content?.trim() && !generated.htmlContent) throw new Error("empty_sleep_reply");
+  const message = { id: randomUUID(), role: "assistant", content: generated.content || "", thinking: generated.thinking, toolCalls: generated.toolCalls || [], modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: generated.htmlContent ? "mixed" : "text", htmlContent: generated.htmlContent, htmlTitle: generated.htmlTitle, sleepReplyToIDs: pending.map(message => message.id), createdAt: new Date().toISOString() };
+  thread.messages.push(message);
+  acknowledgeSleepInbox(thread, pending.map(message => message.id));
+  if (generated.dreamRecallConsumed) thread.pendingDreamRecall = "";
+  // Rebuild from the durable transcript on the next user turn, including every deferred receipt.
+  thread.cacheKeepaliveMessages = null;
+  thread.cacheKeepaliveAssistantContent = "";
+  thread.cacheKeepalivePrefixHash = "";
+  thread.cacheKeepaliveAt = 0;
+  thread.cacheSystem = generated.cacheSystem;
+  finishUserConversation(thread, "");
+  recordActivityEvent(thread, "wake_reply", "醒来后回复", `回应了睡眠期间的 ${pending.length} 条消息。`);
+  return message;
 }
 
 function cancelSoloRun(threadId) {
@@ -938,8 +959,9 @@ function cancelSoloRun(threadId) {
   if (run) { run.cancelled = true; run.controller.abort(); }
 }
 
-async function startSoloRun(thread, desire) {
+async function startSoloRun(thread, desire, { trigger = "desire_threshold_idle", requestId = null } = {}) {
   const run = { cancelled: false, startedAt: Date.now(), controller: new AbortController() };
+  let recorded = false;
   activeSoloRuns.set(thread.id, run);
   const mode = ["recall", "fantasy", "mix"].includes(soloSettings.mode) ? soloSettings.mode : "mix";
   const chord = topEmotion(sharedEmotionState);
@@ -973,13 +995,19 @@ async function startSoloRun(thread, desire) {
     if (run.cancelled) return;
     const elapsed = Math.max(1, Math.round((Date.now() - run.startedAt) / 1000));
     const completedAt = new Date().toISOString();
-    soloMetrics.push({ id: randomUUID(), threadId: thread.id, mode, trigger: "desire_threshold_idle", desire: Number(desire.toFixed(3)), chord: chord.drive, touchInfluence, durationSeconds: elapsed, completedAt, interrupted: false });
+    soloMetrics.push({ id: randomUUID(), threadId: thread.id, mode, trigger, requestId, desire: Number(desire.toFixed(3)), chord: chord.drive, touchInfluence, durationSeconds: elapsed, completedAt, interrupted: false });
     soloMetrics = soloMetrics.slice(-50);
+    recorded = true;
     await saveSoloMetrics();
     console.info(`[solo] private session completed for ${thread.id}; inner activity discarded`);
   } catch (error) {
     if (!run.cancelled) console.warn(`[solo] session failed: ${error.message}`);
   } finally {
+    if (!recorded) {
+      soloMetrics.push({ id: randomUUID(), threadId: thread.id, mode, trigger, requestId, desire, chord: chord.drive, touchInfluence, durationSeconds: Math.max(1, Math.round((Date.now() - run.startedAt) / 1000)), completedAt: new Date().toISOString(), interrupted: run.cancelled, outcome: run.cancelled ? "interrupted" : "failed", error: run.cancelled ? null : "模型请求未完成，请检查线路。" });
+      soloMetrics = soloMetrics.slice(-50);
+      await saveSoloMetrics().catch(error => console.warn(`solo result save failed: ${error.message}`));
+    }
     if (activeSoloRuns.get(thread.id) === run) activeSoloRuns.delete(thread.id);
   }
 }
@@ -997,21 +1025,38 @@ async function runBackgroundPulse() {
   // Emotion is request-driven. The background pulse must not mutate or reflect it while idle.
   let emotionChanged = false;
   changed ||= emotionChanged;
-  for (const thread of Object.values(threads)) {
+  for (const cachedThread of Object.values(threads)) {
+    const threadId = cachedThread.id;
+    if (activeChatThreads.has(threadId)) continue;
+    activeChatThreads.add(threadId);
+    sentinelGenerationControllers.set(threadId, new AbortController());
+    let threadChanged = false;
+    let thread;
+    try {
+    thread = (await readThreads())[threadId] || cachedThread;
+    if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
     if (thread.id === proactiveSettings.threadId) {
       const due = Date.parse(activity.nextWakeAt || "");
-      proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : activeChatThreads.has(thread.id) ? "chat_in_progress" : "wake_due";
+      proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : "wake_due";
+    }
+    if (activity.mode !== "sleeping" && activity.sleepReplyPending && sleepInbox(thread).length && !(Date.parse(thread.sleepInboxRetryAt || "") > now)) {
+      try {
+        const reply = await replyToSleepInbox(thread);
+        if (reply) pendingPushes.push({ threadId: thread.id, message: reply.content, metadata: { kind: "sleep_reply" } });
+      } catch (error) { thread.sleepInboxRetryAt = new Date(now + 60_000).toISOString(); activity.lastSleepError = "醒来后的回复尚未完成，将重试。"; }
+      threadChanged = true;
+      continue;
     }
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
     const desire = Number(sharedEmotionState?.drives?.desire || 0);
     const idleMs = Math.max(5, Number(soloSettings.idleMinutes) || 30) * 60_000;
     if (thread.id === "default" && soloSettings.enabled && desire >= Number(soloSettings.desireThreshold || 0.78) &&
         activity.mode === "sentinel" && !activity.sleepPendingAt && lastUserAt && now - lastUserAt >= idleMs &&
-        !(soloNextEligibleAt.get(thread.id) > now) && !activeChatThreads.has(thread.id) && !activeSoloRuns.has(thread.id) &&
+        !(soloNextEligibleAt.get(thread.id) > now) && !activeSoloRuns.has(thread.id) &&
         !(foregroundThreads.get(thread.id) > now)) {
-      soloNextEligibleAt.set(thread.id, now + Math.max(idleMs, 60 * 60_000));
+      soloNextEligibleAt.set(thread.id, now + Math.max(idleMs, soloSettings.cooldownMinutes * 60_000));
       void startSoloRun(thread, desire);
     }
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
@@ -1020,10 +1065,13 @@ async function runBackgroundPulse() {
       activity.mode = "sleeping";
       activity.sleepStartedAt = new Date(now).toISOString();
       activity.sleepUntil = new Date(now + sleepHours * 3_600_000).toISOString();
-      activity.nextDreamAt = new Date(now + sleepDreamIntervalMinutes * 60_000).toISOString();
+      activity.nextDreamAt = new Date(now).toISOString();
       activity.dreamCycle = 0;
       activity.sleepStage = "n1_drift";
       recordActivityEvent(thread, "sleep", "进入睡眠", "开始睡觉了。", new Date(now));
+      activity.sleepMessageCount = 0;
+      activity.sleepReplyPending = false;
+      thread.sleep.sessionId = randomUUID();
       thread.sleep.dreamArc = "";
       thread.pendingDreamRecall = "";
       thread.sleep.nightmare = null;
@@ -1032,20 +1080,28 @@ async function runBackgroundPulse() {
       const nextInterval = Math.max(1, Number(proactive.intervalMin) || 60);
       activity.nextWakeAt = proactive.enabled ? new Date(Date.parse(activity.sleepUntil) + nextInterval * 60_000).toISOString() : null;
       activity.nextWakeSource = proactive.enabled ? "settings" : null;
-      changed = true;
+      // The countdown is observable immediately, even if the first dream takes minutes.
+      await persistChatThread(thread.id, thread);
+      threadChanged = true;
     }
     if (activity.mode === "sleeping") {
       if (activity.sleepUntil && Date.parse(activity.sleepUntil) <= now) {
         try {
           await finishSleepCycle(thread, activity, now);
           proactive.nextDueAt = activity.nextWakeAt;
+          if (activity.sleepReplyPending) {
+            try {
+              const reply = await replyToSleepInbox(thread);
+              if (reply) pendingPushes.push({ threadId: thread.id, message: reply.content, metadata: { kind: "sleep_reply" } });
+            } catch (error) { thread.sleepInboxRetryAt = new Date(now + 60_000).toISOString(); activity.lastSleepError = "醒来后的回复尚未完成，将重试。"; }
+          }
         } catch (error) {
           console.warn(`sleep reflection failed: ${error.message}`);
           activity.lastSleepError = String(error.message).slice(0, 500);
           activity.sleepUntil = new Date(now + 5 * 60_000).toISOString();
           activity.sleepStage = "reflection_retry";
         }
-        changed = true;
+        threadChanged = true;
       } else if (activity.nextDreamAt && Date.parse(activity.nextDreamAt) <= now && !sleepDreamsInFlight.has(thread.id)) {
         try {
           const nightmarePush = await runSleepDreamSegment(thread, activity, now);
@@ -1057,9 +1113,9 @@ async function runBackgroundPulse() {
           activity.sleepStage = "dream_retry";
         }
         proactive.nextDueAt = activity.nextWakeAt;
-        changed = true;
+        threadChanged = true;
       }
-    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now && !activeChatThreads.has(thread.id)) {
+    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now) {
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
       const followUpForWake = activity.followUp || null;
       const isFollowUp = Boolean(followUpForWake);
@@ -1069,12 +1125,10 @@ async function runBackgroundPulse() {
         activity.nextWakeAt = new Date(lastActivityAt + 30 * 60_000).toISOString();
         activity.nextWakeSource = "ai";
         proactive.nextDueAt = activity.nextWakeAt;
-        changed = true;
+        threadChanged = true;
         continue;
       }
-      if (activeChatThreads.has(thread.id)) continue;
-      activeChatThreads.add(thread.id);
-      sentinelGenerationControllers.set(thread.id, new AbortController());
+
       try {
         proactiveDiagnostics.lastReason = "generating";
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
@@ -1089,7 +1143,7 @@ async function runBackgroundPulse() {
           proactiveDiagnostics.lastSuccessAt = new Date(now).toISOString();
           proactiveDiagnostics.lastError = null;
           proactiveDiagnostics.lastReason = "resting_for_high_fatigue_or_anger";
-          changed = true;
+          threadChanged = true;
           continue;
         }
         // The autonomous turn can include an email MCP action. Persist its exact
@@ -1182,7 +1236,7 @@ async function runBackgroundPulse() {
         }
         proactive.nextDueAt = activity.nextWakeAt;
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
-        changed = true;
+        threadChanged = true;
       } catch (error) {
         proactiveDiagnostics.lastReason = "generation_failed";
         proactiveDiagnostics.lastError = String(error.message || error).slice(0, 240);
@@ -1192,15 +1246,22 @@ async function runBackgroundPulse() {
         activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
         activity.nextWakeSource = "ai";
         proactive.nextDueAt = activity.nextWakeAt;
-        changed = true;
+        threadChanged = true;
       } finally {
         sentinelGenerationControllers.delete(thread.id);
-        activeChatThreads.delete(thread.id);
+
+      }
+    }
+    } finally {
+      try {
+        if (threadChanged && thread) { await persistChatThread(threadId, thread); changed = true; }
+      } finally {
+        sentinelGenerationControllers.delete(threadId);
+        activeChatThreads.delete(threadId);
       }
     }
   }
   if (changed) {
-    await saveThreads(threads);
     await saveProactiveSettings();
     // Persist chat history before the notification can be tapped and refreshed.
     for (const pending of pendingPushes) {
@@ -1387,9 +1448,10 @@ async function loadSoloData() {
     soloMetrics = Array.isArray(saved) ? saved.slice(-50) : [];
     for (const item of soloMetrics) {
       const completedAt = Date.parse(item.completedAt || "");
-      if (item.threadId && Number.isFinite(completedAt)) soloNextEligibleAt.set(item.threadId, Math.max(soloNextEligibleAt.get(item.threadId) || 0, completedAt + 60 * 60_000));
+      if (item.threadId && Number.isFinite(completedAt)) soloNextEligibleAt.set(item.threadId, Math.max(soloNextEligibleAt.get(item.threadId) || 0, completedAt + Math.max(5, Number(soloSettings.cooldownMinutes) || 60) * 60_000));
     }
   } catch (error) { if (error?.code !== "ENOENT") console.warn(`solo metrics unavailable: ${error.message}`); }
+  soloSettings.cooldownMinutes = Math.min(1440, Math.max(5, Number(soloSettings.cooldownMinutes) || 60));
   soloSettings.enabled = soloSettings.enabled !== false;
   soloSettings.mode = ["recall", "fantasy", "mix"].includes(soloSettings.mode) ? soloSettings.mode : "mix";
   soloSettings.desireThreshold = Math.min(0.98, Math.max(0.5, Number(soloSettings.desireThreshold) || 0.78));
@@ -1578,7 +1640,7 @@ function extractThinkingText(value) {
 }
 
 function publicChatMessage(value) {
-  const { modelContent, modelImageIDs, requestId, ...message } = value;
+  const { modelContent, modelImageIDs, requestId, requestFingerprint, sleepReceiptID, ...message } = value;
   if (message.role === "assistant" && !message.thinking && modelContent) message.thinking = extractThinkingText(modelContent);
   return message;
 }
@@ -2222,7 +2284,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       const backupModels = await listProviderModels(backup);
       const fallbackModel = backup.model || backupModels[0] || requestedModel;
       if (fallbackModel) {
-        return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
+        return callModel({ signal, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
       }
     }
     const unavailable = /auth_unavailable|no auth available|service has been disabled|PERMISSION_DENIED/i.test(providerError);
@@ -2235,7 +2297,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2272,7 +2334,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2300,7 +2362,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2342,7 +2404,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
-    return callModel({ messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -2930,7 +2992,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null }) {
   await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -2996,7 +3058,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const retrieved = memories.length
     ? `<core_memories source="memory_core" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</core_memories>`
     : "";
-  const relevantMessages = contextMessages(thread);
+  const relevantMessages = [...new Map([...contextMessages(thread), ...sleepInbox(thread)].map(message => [message.id, message])).values()].sort((a,b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   const historicalImages = new Map(await Promise.all(relevantMessages.filter(message => message.role === "user" && message.modelImageIDs?.length).map(async message => [message.id, await loadChatImages(dataDir, message.modelImageIDs)])));
   const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
@@ -3103,9 +3165,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const engawaDirective = engawaEnabled
     ? "<available_feature name=\"engawa\">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>\n"
     : "";
-  const dreamRecall = (proactive || isDreamRecallRequest(input))
-    ? (typeof thread?.pendingDreamRecall === "string" && thread.pendingDreamRecall ? thread.pendingDreamRecall : storedDreamRecall(thread))
-    : "";
+  const dreamRecall = thread.pendingDreamRecall || ((proactive || isDreamRecallRequest(input)) ? storedDreamRecall(thread) : "");
+  const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
   const proactiveDirective = proactive
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
@@ -3130,7 +3191,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const commandFeedback = !proactive && !callMode ? await instantCommands.feedback(thread.id) : [];
   const commandDirective = !callMode ? '\n<instant_commands>需要用户现在去做一件具体的事时，可在回复末尾附加隐藏标签 <countdown>{"title":"去喝水","minutes":1}</countdown>。不需要计时就省略 minutes。计时从发出指令时开始，最多24小时；用户完成后下一轮会收到真实用时反馈。只在自然需要时使用，不要每轮都下指令。标签不要放在代码块、speech、thinking 或 HTML 中。</instant_commands>' : '';
   const commandFeedbackContext = commandFeedbackText(commandFeedback);
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${commandDirective}\n${commandFeedbackContext}\n\n${input}${foodDirective}`;
+  const userModelContent = `${systemContext}${emotionDirective}\n\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${commandDirective}\n${commandFeedbackContext}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3155,7 +3216,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   // Text-only snapshots cannot substitute for attachments or executed tool results.
   const historyHasEvidence = relevantMessages.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length);
-  const exactCachedPrefix = !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const exactCachedPrefix = !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -3207,7 +3268,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   let measuredInputTokens = 0;
   const performedToolCalls = [];
   let raw = await callModel({
-    toolTrace: performedToolCalls,
+    toolTrace: performedToolCalls, signal,
     // Calls use the same model output settings as ordinary chats; do not add a
     // separate call-specific token ceiling.
     maxOutputTokens: undefined,
@@ -3244,7 +3305,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // model one structured chance to correct it through the same executor.
       foodToolUsed = true;
       cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: "上一条外卖/饮食工具调用格式无效，没有执行任何操作。请不要输出工具标签；如仍需操作，按 <food_tool>{\"name\":\"工具名\",\"arguments\":{...}}</food_tool> 输出一条有效调用，否则直接正常回复。" }];
-      raw = await callModel({ toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+      raw = await callModel({ signal, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
       continue;
     }
     if (!request || typeof request.name !== "string") {
@@ -3273,7 +3334,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     }
     performedToolCalls.push({ name: request.name, arguments: JSON.stringify(request.arguments || {}).slice(0, 4000), result: String(result).slice(0, 12000), succeeded });
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
-    raw = await callModel({ toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+    raw = await callModel({ signal, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
   const traceStart = raw.indexOf("<lumi_tool_calls>");
   const traceEnd = traceStart < 0 ? -1 : raw.indexOf("</lumi_tool_calls>", traceStart);
@@ -4514,19 +4575,40 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/settings/solo" && req.method === "GET") return send(res, 200, { ...soloSettings, running: activeSoloRuns.size > 0 });
     if (url.pathname === "/v1/settings/solo" && req.method === "PUT") {
       const input = await body(req);
-      const threshold = Number(input.desireThreshold);
-      const idleMinutes = Number(input.idleMinutes);
-      const touchDecayMinutes = Number(input.touchDecayMinutes);
-      if (typeof input.enabled !== "boolean" || !["recall", "fantasy", "mix"].includes(input.mode) ||
-          !Number.isFinite(threshold) || threshold < 0.5 || threshold > 0.98 ||
-          !Number.isInteger(idleMinutes) || idleMinutes < 5 || idleMinutes > 1440 ||
-          !Number.isInteger(touchDecayMinutes) || touchDecayMinutes < 5 || touchDecayMinutes > 180) {
-        return send(res, 400, { error: "invalid_solo_settings" });
+      const settings = validateSoloSettings(input, soloSettings);
+      if (!settings) return send(res, 400, { error: "invalid_solo_settings" });
+      Object.assign(soloSettings, settings);
+      for (const metric of soloMetrics) {
+        const at = Date.parse(metric.completedAt || "");
+        if (metric.threadId && Number.isFinite(at)) soloNextEligibleAt.set(metric.threadId, at + Math.max(soloSettings.idleMinutes, soloSettings.cooldownMinutes) * 60_000);
       }
-      Object.assign(soloSettings, { enabled: input.enabled, mode: input.mode, desireThreshold: threshold, idleMinutes, touchDecayMinutes });
       if (!soloSettings.enabled) for (const threadId of activeSoloRuns.keys()) cancelSoloRun(threadId);
       await saveSoloSettings();
       return send(res, 200, { ...soloSettings, running: activeSoloRuns.size > 0 });
+    }
+    if (url.pathname === "/v1/solo/trigger" && req.method === "POST") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const requestId = String(req.headers["idempotency-key"] || "");
+      if (!/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) return send(res, 400, { error: "idempotency_key_required" });
+      const id = "default";
+      if (activeChatThreads.has(id)) return send(res, 409, { error: "conversation_busy" });
+      activeChatThreads.add(id);
+      try {
+        const thread = (await readThreads())[id];
+        if (!thread) return send(res, 404, { error: "chat_not_found" });
+        const activity = ensureActivity(thread);
+        if ((thread.soloManualRequestIDs || []).includes(requestId)) return send(res, 202, { accepted: true, requestId, duplicate: true });
+        if (activeSoloRuns.has(id)) return send(res, 409, { error: "solo_already_running" });
+        if (activity.mode === "sleeping" || activity.sleepPendingAt) return send(res, 409, { error: "sleep_in_progress" });
+        const route = await resolveMurmurRoute(id, thread);
+        if (!route?.customProvider || !route.model) return send(res, 409, { error: "custom_model_route_unavailable" });
+        thread.soloManualRequestIDs = [...(thread.soloManualRequestIDs || []), requestId].slice(-50);
+        await persistChatThread(id, thread);
+        const desire = Number(sharedEmotionState?.drives?.desire || 0);
+        soloNextEligibleAt.set(id, Date.now() + Math.max(soloSettings.idleMinutes, soloSettings.cooldownMinutes) * 60_000);
+        void startSoloRun(thread, desire, { trigger: "manual", requestId });
+        return send(res, 202, { accepted: true, requestId, duplicate: false });
+      } finally { activeChatThreads.delete(id); }
     }
     if (url.pathname === "/v1/solo/metrics" && req.method === "GET") {
       const limit = Math.max(1, Math.min(50, Number(url.searchParams.get("limit") || 50)));
@@ -4679,6 +4761,7 @@ const server = createServer(async (req, res) => {
       const activeThread = (await readThreads()).default;
       return send(res, 200, {
       ok: true,
+      sleepInboxVersion: "v2",
       buildVersion,
       htmlCards: "separate-content-title-v1",
       proactiveDiagnostic: { enabled: proactiveSettings.enabled, threadId: proactiveSettings.threadId, intervalMin: proactiveSettings.intervalMin, nextDueAt: proactiveSettings.nextDueAt, activityMode: activeThread?.activity?.mode || null, activityNextWakeAt: activeThread?.activity?.nextWakeAt || null, backgroundPulseInFlight, ...proactiveDiagnostics },
@@ -4842,6 +4925,17 @@ const server = createServer(async (req, res) => {
         return send(res, 200, proactiveSettings);
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    const sleepReadMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/sleep$/);
+    if (sleepReadMatch && req.method === "GET") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const thread = (await readThreads())[decodeURIComponent(sleepReadMatch[1])];
+      if (!thread) return send(res, 404, { error: "chat_not_found" });
+      const activity = ensureActivity(thread);
+      const records = dreamRecords(thread).sort((a,b) => b.createdAt.localeCompare(a.createdAt));
+      const offset = Math.max(0, Number(url.searchParams.get("offset")) || 0);
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 30));
+      return send(res, 200, { activity, pendingMessages: sleepInbox(thread).length, replyProbability: sleepReplyProbability, forceWakeMessages: 5, delayMinutes: sleepDelayMinutes, durationHours: sleepHours, serverTime: new Date().toISOString(), dreams: records.slice(offset, offset + limit), totalDreams: records.length, nextOffset: offset + limit < records.length ? offset + limit : null });
     }
     if (activityMatch) {
       const id = decodeURIComponent(activityMatch[1]);
@@ -5336,6 +5430,18 @@ const server = createServer(async (req, res) => {
         const previousIndex = threads[id].messages.findIndex((message) => message.role === "user" && message.requestId === requestId);
         if (previousIndex >= 0) {
           const userMessage = threads[id].messages[previousIndex];
+          if (userMessage.requestFingerprint && userMessage.requestFingerprint !== createHash("sha256").update(JSON.stringify(input)).digest("hex")) return send(res, 409, { error: "idempotency_key_reused" });
+          if (userMessage.sleepDeferred && userMessage.sleepReplyMessageID) {
+            const answered = threads[id].messages.find(message => message.id === userMessage.sleepReplyMessageID);
+            if (answered) {
+              const replay = { userMessage: publicChatMessage(userMessage), assistantMessage: publicChatMessage(answered), memorySaved: false };
+              return input.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
+            }
+          }
+          if (userMessage.sleepDeferred) {
+            const replay = deferredSleepResponse(userMessage, ensureActivity(threads[id]));
+            return input.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
+          }
           const assistantMessage = threads[id].messages[previousIndex + 1];
           if (assistantMessage?.role !== "assistant") return send(res, 409, { error: "incomplete_previous_request" });
           const updatedOptionMessage = threads[id].messages[previousIndex - 1]?.role === "assistant" ? threads[id].messages[previousIndex - 1] : null;
@@ -5375,15 +5481,15 @@ const server = createServer(async (req, res) => {
       }
       const result = (async () => {
       const messageText = String(input.content || "").trim();
-      markUserActivity(threads[id], messageText);
+      const incomingActivity = ensureActivity(threads[id]);
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
-      const storedUserMessage = { ...userMessage, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
+      const storedUserMessage = { ...userMessage, requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       if (images.length) storedUserMessage.modelImageIDs = await saveChatImages(dataDir, images);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
-      const calendarContext = await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
+      const calendarContext = incomingActivity.mode === "sleeping" ? { text: "" } : await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
       // Save the frontend-selected route before generation, including failed turns.
       // Otherwise a new relay timing out leaves background jobs on the old route.
@@ -5401,6 +5507,30 @@ const server = createServer(async (req, res) => {
       const modelMessageContent = isStickerMessage
         ? stickerMessageForModel(input, catalogSticker)
         : userMessage.content;
+      if (incomingActivity.mode === "sleeping") {
+        storedUserMessage.sleepReceiptID = randomUUID();
+        storedUserMessage.sleepDeferred = true;
+        storedUserMessage.sleepReplyStatus = "pending";
+        storedUserMessage.modelContent = modelMessageContent;
+        threads[id].messages.push(storedUserMessage);
+        threads[id].sleepInboxIDs.push(storedUserMessage.id);
+        incomingActivity.sleepMessageCount = (Number(incomingActivity.sleepMessageCount) || 0) + 1;
+        const expired = incomingActivity.sleepUntil && Date.parse(incomingActivity.sleepUntil) <= Date.now();
+        const decision = expired ? "natural" : sleepMessageDecision({ sleeping: true, count: incomingActivity.sleepMessageCount, roll: Math.random(), probability: sleepReplyProbability });
+        if (decision === "defer") {
+          incomingActivity.lastUserActivityAt = storedUserMessage.createdAt;
+          await persistChatThread(id, threads[id]);
+          return deferredSleepResponse(storedUserMessage, incomingActivity, updatedOptionMessage);
+        }
+        await finishSleepCycle(threads[id], incomingActivity, Date.now());
+        incomingActivity.sleepWakeReason = decision;
+        recordActivityEvent(threads[id], "wake", decision === "forced" ? "被连续消息叫醒" : decision === "random" ? "听见消息醒来" : "自然醒来", `睡眠期间累计收到 ${incomingActivity.sleepMessageCount} 条消息。`);
+        // Persist the waking decision and inbox before generation; a failed model call cannot eat receipts.
+        await persistChatThread(id, threads[id]);
+      }
+      markUserActivity(threads[id], messageText);
+      const sleepReplyIDs = sleepInbox(threads[id]).map(message => message.id);
+      const storedDuringSleep = threads[id].messages.some(message => message.id === storedUserMessage.id);
       // Compact before sending an oversized request, rather than waiting for the
       // previous upstream usage to cross the threshold after the reply is sent.
       // Estimate model-facing history including persisted per-turn context.
@@ -5427,10 +5557,10 @@ const server = createServer(async (req, res) => {
           await delayCompactionRetry(id, Date.now() + 10 * 60_000);
         }
       }
-      generated = await generateReply({ input: `${modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
-      storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
+      if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
       threads[id].cacheSystem = generated.cacheSystem;
       threads[id].cacheRequestedSystemPrompt = typeof input.systemPrompt === "string" ? input.systemPrompt : "";
       const selectedConfig = selectedProvider === "custom" ? null : providerConfig(selectedProvider, selectedModel);
@@ -5499,7 +5629,11 @@ const server = createServer(async (req, res) => {
         contentType: "gallery_collected",
         createdAt: new Date(Date.now() + index + 1).toISOString()
       }));
-      threads[id].messages.push(storedUserMessage, assistantMessage, ...galleryMessages);
+      if (storedDuringSleep) storedUserMessage.sleepReplyMessageID = assistantMessage.id;
+      if (!storedDuringSleep) threads[id].messages.push(storedUserMessage);
+      threads[id].messages.push(assistantMessage, ...galleryMessages);
+      if (sleepReplyIDs.length) acknowledgeSleepInbox(threads[id], sleepReplyIDs);
+      if (generated.dreamRecallConsumed) threads[id].pendingDreamRecall = "";
       capturePromiseAlarm(id, messageText, visibleContent, generated.promiseAlarmDecision);
       // Keep the model's diary decision inside the same durable record as its
       // chat history. diaries.json remains a backwards-compatible mirror only.
@@ -5625,7 +5759,7 @@ setInterval(async () => {
     } finally { sleepRadioRunning = false; }
   } catch (error) { console.warn("sleep radio scheduler failed: " + String(error.message || error)); }
 }, 20_000);
-server.listen(port, () => console.log(`Lumi server listening on :${port}`));
+server.listen(port, () => console.log(`Lumi server listening on :${server.address().port}`));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     stopPromiseAlarm();
