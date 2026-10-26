@@ -144,6 +144,20 @@ test("per-device cooldown and concurrency limit prevent burst generation", async
   } finally { release?.(); await f.close(); }
 });
 
+test("manual force bypasses cooldown but keeps the service request budget", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.service.handle(observeRequest(f.device))).status, 200);
+    assert.equal((await f.service.handle(observeRequest(f.device))).status, 429);
+    const forced = observeRequest(f.device);
+    forced.body.force = true;
+    assert.equal((await f.service.handle(forced)).status, 200);
+    const invalid = observeRequest(f.device);
+    invalid.body.force = "true";
+    assert.equal((await f.service.handle(invalid)).status, 400);
+  } finally { await f.close(); }
+});
+
 test("malformed model JSON fails closed and is not repaired or repeated for the same event", async () => {
   let calls = 0;
   const f = await fixture(async () => { calls += 1; return '```json\n{"shouldSpeak":true}\n```'; });

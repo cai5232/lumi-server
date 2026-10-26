@@ -157,9 +157,10 @@ export function createDesktopCompanionService({ dataDir, pairingToken = () => ""
 
   async function observe(request) {
     const input = request.body;
-    if (!input || Object.keys(input).some(key => !["deviceId", "eventId", "observation"].includes(key)) || !validId(input.deviceId) || !validId(input.eventId)) {
+    if (!input || Object.keys(input).some(key => !["deviceId", "eventId", "observation", "force"].includes(key)) || !validId(input.deviceId) || !validId(input.eventId) || (input.force !== undefined && typeof input.force !== "boolean")) {
       return { status: 400, body: { error: "invalid_request" } };
     }
+    const force = input.force === true;
     const observation = validateObservation(input.observation);
     if (!observation || !observation.appName || !observation.bundleIdentifier) return { status: 400, body: { error: "invalid_observation" } };
     const device = await deviceFor(request.headers, input.deviceId);
@@ -181,7 +182,7 @@ export function createDesktopCompanionService({ dataDir, pairingToken = () => ""
       const recent = state.events.filter(event => event.deviceId === device.id && Date.parse(event.generatedAt) > timestamp - 60 * 60_000);
       const today = state.events.filter(event => event.deviceId === device.id && Date.parse(event.generatedAt) > timestamp - 24 * 60 * 60_000);
       const last = recent.reduce((latest, event) => Math.max(latest, Date.parse(event.generatedAt) || 0), 0);
-      if (timestamp - last < MIN_INTERVAL_MS) return { kind: "cooldown" };
+      if (!force && timestamp - last < MIN_INTERVAL_MS) return { kind: "cooldown" };
       if (recent.length >= HOURLY_LIMIT || today.length >= DAILY_LIMIT) return { kind: "budget" };
       inFlightDevices.add(device.id);
       state.events.push({ id: eventKey, fingerprint, deviceId: device.id, conversationId: device.conversationId, observedAt: observation.observedAt, generatedAt: new Date(timestamp).toISOString(), appName: observation.appName, eventType: "observation", content: "", reasonCode: "", deliveryStatus: "pending" });
