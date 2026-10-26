@@ -201,9 +201,17 @@ export function createDesktopCompanionService({ dataDir, pairingToken = () => ""
     if (reservation.kind === "busy") return { status: 409, body: { error: "device_request_in_progress" } };
 
     try {
-      const raw = await generate({ conversationId: device.conversationId, observation });
-      const decision = normalizeDecision(raw);
+      const raw = await generate({ conversationId: device.conversationId, observation, force });
+      let decision = normalizeDecision(raw);
       if (!decision) throw new Error("invalid_structured_output");
+      if (force && !decision.shouldSpeak) {
+        decision = {
+          ...decision,
+          shouldSpeak: true,
+          content: "我跟上你现在看的这一段了，继续吧，我就在旁边。",
+          reasonCode: "manual_force_fallback"
+        };
+      }
       await onContext({ conversationId: device.conversationId, observation, decision, generatedAt: new Date(now()).toISOString() });
       const result = await mutate(state => {
         const event = state.events.find(item => item.id === eventKey);
