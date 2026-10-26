@@ -71,7 +71,7 @@ function normalizeDecision(raw) {
   return { shouldSpeak: value.shouldSpeak, content, suggestedNextCheckSeconds, reasonCode };
 }
 
-export function createDesktopCompanionService({ dataDir, pairingToken = () => "", generate, now = () => Date.now(), isSecure = () => false }) {
+export function createDesktopCompanionService({ dataDir, pairingToken = () => "", generate, onContext = async () => {}, now = () => Date.now(), isSecure = () => false }) {
   const storePath = join(dataDir, "desktop-companion.json");
   const inFlightDevices = new Set();
   let mutationQueue = Promise.resolve();
@@ -203,6 +203,7 @@ export function createDesktopCompanionService({ dataDir, pairingToken = () => ""
       const raw = await generate({ conversationId: device.conversationId, observation });
       const decision = normalizeDecision(raw);
       if (!decision) throw new Error("invalid_structured_output");
+      await onContext({ conversationId: device.conversationId, observation, decision, generatedAt: new Date(now()).toISOString() });
       const result = await mutate(state => {
         const event = state.events.find(item => item.id === eventKey);
         if (!event) throw new Error("event_reservation_lost");

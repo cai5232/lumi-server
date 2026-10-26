@@ -16,7 +16,7 @@ npm run dev
 - `LUMI_MODEL_API_URL`：OpenAI 兼容的 Chat Completions 完整地址
 - `LUMI_MODEL_API_KEY`：模型服务 API Key
 - `LUMI_MODEL_NAME`：模型名称
-- `LUMI_SYSTEM_PROMPT`：可选的默认系统提示词；客户端发送的 `systemPrompt` 会优先使用
+- 系统提示词：普通聊天和桌面伴读共用后端的规范系统提示词；桌面伴读额外附加 JSON 决策格式约束，不覆盖人物提示词
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在部署平台挂载持久化 Volume 到 `/data`
 - `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
 - 上下文压缩：以上游上一条请求实际输入 Token 数为依据，达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 后，在下一条普通聊天请求中单独调用摘要模型压缩较早历史；默认窗口 `200000`、触发比例 `0.85`（约 170k）。保留最近至少 `10` 轮、最多 `15` 轮完整对话，并以约 `20000` token 为尾部目标；摘要模型默认使用当前聊天模型，也可通过 `LUMI_COMPACTION_MODEL` 单独指定。电话和主动提醒请求不触发压缩。
@@ -136,6 +136,7 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
 - `GET /v1/chats/:id/emotion/state|arc|history|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
+- `POST /v1/companion/devices`、`POST /v1/companion/observe`、`DELETE /v1/companion/devices/:id`：macOS 桌面伴读配对与观察接口，使用独立的 `LUMI_DESKTOP_COMPANION_PAIR_TOKEN` 配对；观察按设备绑定的 Lumi 会话和自定义模型路由生成。最近一次经过敏感信息过滤的屏幕文本、窗口标题和弹幕会作为该会话的隐藏模型上下文保存最多 6 小时，到期清理，不写入可见聊天记录或桌面事件日志
 
 ### Promise Alarm 约定提醒
 
