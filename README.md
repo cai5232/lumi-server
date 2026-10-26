@@ -136,7 +136,7 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
 - `GET /v1/chats/:id/emotion/state|arc|history|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
-- `POST /v1/companion/devices`、`POST /v1/companion/observe`、`DELETE /v1/companion/devices/:id`：macOS 桌面伴读配对与观察接口，使用独立的 `LUMI_DESKTOP_COMPANION_PAIR_TOKEN` 配对；观察按设备绑定的 Lumi 会话和自定义模型路由生成。最近一次经过敏感信息过滤的屏幕文本、窗口标题和弹幕会作为该会话的隐藏模型上下文保存最多 6 小时，到期清理，不写入可见聊天记录或桌面事件日志
+- `POST /v1/companion/devices`、`POST /v1/companion/observe`、`DELETE /v1/companion/devices/:id`：macOS 桌面伴读配对与观察接口，使用独立的 `LUMI_DESKTOP_COMPANION_PAIR_TOKEN` 配对；观察按设备绑定的 Lumi 会话和自定义模型路由生成。观察请求可带 `force: true` 跳过两分钟冷却，仍受并发和请求预算限制。最近一次经过敏感信息过滤的屏幕文本、窗口标题和弹幕会作为该会话的隐藏模型上下文保存最多 6 小时，到期清理，不写入可见聊天记录或桌面事件日志
 
 ### Promise Alarm 约定提醒
 
