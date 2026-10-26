@@ -87,6 +87,27 @@ test("observation stores no screen text and duplicate event IDs never call the m
   } finally { await f.close(); }
 });
 
+test("successful observations hand filtered screen context and generated danmaku to the bound chat", async () => {
+  let context;
+  const dataDir = await mkdtemp(join(tmpdir(), "lumi-desktop-companion-"));
+  try {
+    const service = createDesktopCompanionService({
+      dataDir, pairingToken,
+      generate: async () => JSON.stringify({ shouldSpeak: true, content: "这段弹幕跟你看的内容正好接上了。", suggestedNextCheckSeconds: 600, reasonCode: "contextual_comment" }),
+      onContext: async value => { context = value; }
+    });
+    const paired = await service.handle({ method: "POST", path: "/v1/companion/devices", secure, headers: { authorization: `Bearer ${pairingToken}` }, body: { conversationId: "default" } });
+    const value = observation({ selectedText: "联系 jane@example.com about the book" });
+    const response = await service.handle(observeRequest(paired.body, randomUUID(), value));
+    assert.equal(response.status, 200);
+    assert.equal(context.conversationId, "default");
+    assert.equal(context.observation.selectedText.includes("jane@example.com"), false);
+    assert.equal(context.observation.selectedText.includes("[已过滤]"), true);
+    assert.equal(context.decision.content, response.body.content);
+    assert.ok(context.generatedAt);
+  } finally { await rm(dataDir, { recursive: true, force: true }); }
+});
+
 test("events are scoped to the paired conversation and unexpected fields are rejected", async () => {
   let conversationId = "";
   const f = await fixture(async args => {
