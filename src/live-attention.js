@@ -73,16 +73,17 @@ export function buildLiveAttentionContext({ messages = [], events = [], now = Da
       : event)
     .filter(event => !(event.status === "completion_unknown" && validTime(event.eventAt) && now - Date.parse(event.eventAt) > 7 * 86_400_000))
     .slice(-MAX_EVENTS);
+  const escapeXML = value => String(value).replace(/[&<>"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]);
   const lines = active.map(event => {
-    const when = event.eventAt ? `；事项时间 ${event.eventAt}` : "";
+    const when = event.eventAt ? `；事项时间 ${escapeXML(event.eventAt)}` : "";
     const state = event.status === "completion_unknown"
       ? "已过计划时间，是否完成未知；不得视为仍在进行，也不得自动顺延"
       : "仍有效";
-    return `- [${event.id}] ${event.fact}（${state}${when}；来源 ${event.sourceAt}）`;
+    return `- [${escapeXML(event.id)}] ${escapeXML(event.fact)}（${state}${when}；来源 ${escapeXML(event.sourceAt)}）`;
   });
   const sourceAt = new Date(now).toISOString();
   const updateRule = allowUpdates
-    ? `本轮若用户明确确认了事项发生、计划、纠正、完成或取消，在最终回复末尾附加隐藏标签 <live_attention_update>{"upsert":[{"id":"稳定事项ID","fact":"简短、具体的事实或计划","status":"active或completion_unknown","sourceAt":"${sourceAt}","eventAt":"绝对 ISO 日期/时间或 null","expiresAt":"绝对 ISO 时间或 null"}],"retire":[{"id":"要退出的原事项ID","status":"completed、cancelled 或 superseded","sourceAt":"${sourceAt}"}]}</live_attention_update>。只写本条用户消息直接支持的新增或变化；没有变化就省略标签。提问、假设、建议、助手自己说的话、检索到的旧材料都不能建立或更新事项。相对日期先依据这轮上下文换算为绝对北京时间；不能确定就留空，不能猜。完成/取消/被新事实替代的事项放入 retire；纠正要 supersede 旧项并新增修正后的项。不要把过去计划自动顺延。不要照抄旧更新标签作为证据。`
+    ? `本轮若用户明确确认了事项发生、计划、纠正、完成或取消，在最终回复末尾附加隐藏标签 <live_attention_update>{"upsert":[{"id":"稳定事项ID","fact":"简短、具体的事实或计划","status":"active|completion_unknown","sourceAt":"${sourceAt}","eventAt":"绝对 ISO 日期/时间或 null","expiresAt":"绝对 ISO 时间或 null"}],"retire":[{"id":"要退出的原事项ID","status":"completed|cancelled|superseded","sourceAt":"${sourceAt}"}]}</live_attention_update>。只写本条用户消息直接支持的新增或变化；没有变化就省略标签。提问、假设、建议、助手自己说的话、检索到的旧材料都不能建立或更新事项。相对日期先依据这轮上下文换算为绝对北京时间；不能确定就留空，不能猜。完成/取消/被新事实替代的事项放入 retire；纠正要 supersede 旧项并新增修正后的项。不要把过去计划自动顺延。不要照抄旧更新标签作为证据。`
     : "本轮没有新的用户确认；不要创建、延后、完成或改写事项。";
   return {
     sourceAt,
