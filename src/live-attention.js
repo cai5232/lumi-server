@@ -68,6 +68,10 @@ export function buildLiveAttentionContext({ messages = [], events = [], now = Da
 
   const active = (Array.isArray(events) ? events : [])
     .filter(event => event && LIVE.has(event.status) && (!event.expiresAt || !validTime(event.expiresAt) || Date.parse(event.expiresAt) > now))
+    .map(event => event.status === "active" && validTime(event.eventAt) && Date.parse(event.eventAt) < now
+      ? { ...event, status: "completion_unknown" }
+      : event)
+    .filter(event => !(event.status === "completion_unknown" && validTime(event.eventAt) && now - Date.parse(event.eventAt) > 7 * 86_400_000))
     .slice(-MAX_EVENTS);
   const lines = active.map(event => {
     const when = event.eventAt ? `；事项时间 ${event.eventAt}` : "";
