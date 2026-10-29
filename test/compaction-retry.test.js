@@ -62,11 +62,11 @@ test('a truncated later batch preserves history and resumes only the unfinished 
 });
 
 function installForeground(context, compactContext) {
-  const gateStart = source.indexOf('      if (foregroundPlan &&');
+  const gateStart = source.indexOf('      if (foregroundPlan)');
   const gateEnd = source.indexOf('\n      generated = await generateReply', gateStart);
   Object.assign(context, { foregroundPlan: {}, backgroundCompactionJobs: new Set(), id: 'default',
     threads: { default: {} }, selectedModel: 'test', customProvider: {},
-    persistChatThread: async () => {}, compactContext });
+    persistChatThread: async () => {}, compactContext, projectedInputTokens:0, contextLimitTokens:200000 });
   vm.runInContext(`async function foreground() { ${source.slice(gateStart, gateEnd)} }`, context);
 }
 
@@ -76,7 +76,7 @@ function cooldownPath(context) {
 
 test('foreground respects a persisted background cooldown after process restart', async t => {
   const restarted = await harness(t, () => {});
-  await writeFile(cooldownPath(restarted), JSON.stringify({ retryAt: Date.now() + 600000 }));
+  await writeFile(cooldownPath(restarted), JSON.stringify({ retryAt: Date.now() + 600000, routeSignature: restarted.compactionRouteSignature("test", {}) }));
   let calls = 0;
   installForeground(restarted, async () => { calls++; throw Error('unexpected summary request'); });
   await restarted.foreground();
@@ -97,4 +97,42 @@ test('foreground failure persists cooldown and a new process honors it', async t
   installForeground(restarted, fail);
   await restarted.foreground();
   assert.equal(calls, 1, 'restart must not bypass a foreground failure cooldown');
+});
+
+
+test('changing the model or route bypasses only the old route cooldown', async t => {
+ const context = await harness(t, () => {});
+ let calls = 0;
+ installForeground(context, async () => { calls++; throw Error('old relay failure'); });
+ await context.foreground();
+ await context.foreground();
+ assert.equal(calls, 1);
+ context.selectedModel = 'replacement-model';
+ await context.foreground();
+ assert.equal(calls, 2, 'new model can distill immediately');
+ await context.foreground();
+ assert.equal(calls, 2, 'failed replacement retains its own cooldown');
+ const restarted = await harness(t, () => {});
+ restarted.dataDir = context.dataDir;
+ installForeground(restarted, async () => { calls++; throw Error('new relay failure'); });
+ restarted.selectedModel = 'replacement-model';
+ await restarted.foreground();
+ assert.equal(calls, 2, 'same-route cooldown survives restart');
+ restarted.customProvider = {url:'https://replacement.test/v1',key:'new-key',apiFormat:'anthropic'};
+ await restarted.foreground();
+ assert.equal(calls, 3, 'new endpoint or credential can recover immediately');
+});
+
+test('oversized foreground sends surface the actual summary error and report cooldown', async t => {
+ const context = await harness(t, () => {});
+ let calls = 0;
+ installForeground(context, async () => { calls++; throw Error('HTTP 400: invalid fallback target'); });
+ context.threads.default.lastMeasuredInputTokens = 600000;
+ await assert.rejects(context.foreground(), error => error.statusCode===503 && /invalid fallback target/.test(error.message));
+ await assert.rejects(context.foreground(), /invalid fallback target/);
+ assert.equal(calls, 1);
+ const diagnostic = vm.runInContext('compactionDiagnostics.get("default")', context);
+ assert.equal(diagnostic.status,'cooldown');
+ assert.ok(diagnostic.retryAt);
+ assert.match(diagnostic.error,/invalid fallback target/);
 });

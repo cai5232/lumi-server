@@ -108,7 +108,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2725,17 +2725,32 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 
 // A failed compaction must not stall every subsequent chat message.
 const compactionRetryAfter = new Map();
+const compactionRetryRoutes = new Map();
+function compactionRouteSignature(model, customProvider) {
+  return createHash("sha256").update(JSON.stringify([process.env.LUMI_COMPACTION_MODEL || model,
+    customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
+}
 function compactionCooldownPath(id) {
   return join(dataDir, "compaction-cooldown-" + createHash("sha256").update(String(id)).digest("hex").slice(0, 24) + ".json");
 }
 
-async function compactionCoolingDown(id) {
-  if (Date.now() < (compactionRetryAfter.get(id) || 0)) return true;
+async function compactionCoolingDown(id, routeSignature = "") {
+  if (Date.now() < (compactionRetryAfter.get(id) || 0) &&
+      (!routeSignature || compactionRetryRoutes.get(id) === routeSignature)) return true;
   try {
     const saved = JSON.parse(await readFile(compactionCooldownPath(id), "utf8"));
+    // A newly selected model, endpoint, protocol or credential can recover now.
+    // Legacy cooldowns have no route identity and are rechecked once on upgrade.
+    if (routeSignature && saved.routeSignature !== routeSignature) {
+      compactionRetryAfter.delete(id);
+      compactionRetryRoutes.delete(id);
+      return false;
+    }
     const retryAt = Number(saved.retryAt || 0);
     if (Number.isFinite(retryAt) && Date.now() < retryAt) {
       compactionRetryAfter.set(id, retryAt);
+      compactionRetryRoutes.set(id, saved.routeSignature || "");
+      setCompactionDiagnostics(id, { status: "cooldown", retryAt: new Date(retryAt).toISOString(), error: saved.error || null });
       return true;
     }
   } catch (error) {
@@ -2744,17 +2759,25 @@ async function compactionCoolingDown(id) {
   return false;
 }
 
-async function delayCompactionRetry(id, retryAt) {
+async function delayCompactionRetry(id, retryAt, routeSignature = "", error = "") {
   compactionRetryAfter.set(id, retryAt);
+  compactionRetryRoutes.set(id, routeSignature);
   try {
     await mkdir(dataDir, { recursive: true });
     const path = compactionCooldownPath(id);
     const temporaryPath = path + "." + randomUUID() + ".tmp";
     try {
-      await writeFile(temporaryPath, JSON.stringify({ retryAt }));
+      await writeFile(temporaryPath, JSON.stringify({ retryAt, routeSignature, error: String(error).slice(0, 500) }));
       await rename(temporaryPath, path);
     } finally { await unlink(temporaryPath).catch(() => {}); }
   } catch (error) { console.warn("[compaction] cooldown save failed: " + error.message); }
+}
+
+function logCompactionWait(id, reason) {
+  const retryAt = compactionRetryAfter.get(id);
+  const until = retryAt ? new Date(retryAt).toISOString() : "";
+  setCompactionDiagnostics(id, { status: reason, ...(until ? { retryAt: until } : {}) });
+  console.info(`[compaction] skipped thread=${id} reason=${reason}${until ? " retryAt=" + until : ""}`);
 }
 
 const compactionDiagnostics = new Map();
@@ -2904,8 +2927,8 @@ async function commitBackgroundCompaction(id, previousSummary, previousBoundary,
 }
 
 function scheduleBackgroundCompaction(id, model, customProvider) {
-  if (!id || !model || !customProvider || backgroundCompactionJobs.has(id) ||
-      Date.now() < (compactionRetryAfter.get(id) || 0)) return;
+  if (!id || !model || !customProvider || backgroundCompactionJobs.has(id)) return;
+  const routeSignature = compactionRouteSignature(model, customProvider);
   backgroundCompactionJobs.add(id);
   setImmediate(() => {
     void (async () => {
@@ -2913,13 +2936,14 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const threads = await readThreads();
         const snapshot = threads[id];
         if (!snapshot) return;
-        if (await compactionCoolingDown(id)) return;
+        if (await compactionCoolingDown(id, routeSignature)) { logCompactionWait(id, "cooldown"); return; }
         const plan = compactionPlan(snapshot);
         if (!plan) {
           setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
           return;
         }
         setCompactionDiagnostics(id, { status: "running", lastAttemptAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate, sourceMessageCount: plan.olderMessages.length, error: null });
+        compactionRetryRoutes.set(id, routeSignature);
         const oldSummary = String(snapshot.contextSummary || "");
         const oldBoundary = String(snapshot.compactedThroughMessageId || "");
         const completed = await compactContext(snapshot, plan, { model, customProvider });
@@ -2950,7 +2974,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         }
       } catch (error) {
         const retryAt = Date.now() + 10 * 60_000;
-        await delayCompactionRetry(id, retryAt);
+        await delayCompactionRetry(id, retryAt, routeSignature, error.message || error);
         setCompactionDiagnostics(id, { status: "failed", failedAt: new Date().toISOString(), retryAt: new Date(retryAt).toISOString(), error: String(error.message || error).slice(0, 500) });
         console.warn("[compaction] background attempt failed; will retry after cooldown: " +
           String(error.message || error).slice(0, 300));
@@ -5605,22 +5629,41 @@ const server = createServer(async (req, res) => {
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
       const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
-      if (foregroundPlan && !backgroundCompactionJobs.has(id) && !(await compactionCoolingDown(id))) {
-        try {
-          const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
-          if (applied) {
-            await persistChatThread(id, threads[id]);
-            compactionRetryAfter.delete(id);
-            await unlink(compactionCooldownPath(id)).catch(() => {});
-            console.info("[compaction] foreground summary committed thread=" + id);
-            setCompactionDiagnostics(id, { status: "succeeded", mode: "foreground", completedAt: new Date().toISOString(), error: null });
+      if (foregroundPlan) {
+        let foregroundCompacted = false;
+        const routeSignature = compactionRouteSignature(selectedModel, customProvider);
+        if (backgroundCompactionJobs.has(id)) {
+          logCompactionWait(id, "running");
+        } else if (await compactionCoolingDown(id, routeSignature)) {
+          logCompactionWait(id, "cooldown");
+        } else {
+          try {
+            const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
+            if (applied) {
+              foregroundCompacted = true;
+              await persistChatThread(id, threads[id]);
+              compactionRetryAfter.delete(id);
+              compactionRetryRoutes.delete(id);
+              await unlink(compactionCooldownPath(id)).catch(() => {});
+              console.info("[compaction] foreground summary committed thread=" + id);
+              setCompactionDiagnostics(id, { status: "succeeded", mode: "foreground", completedAt: new Date().toISOString(), error: null });
+            }
+          } catch (error) {
+            const retryAt = Date.now() + 10 * 60_000;
+            setCompactionDiagnostics(id, { status: "failed", mode: "foreground", failedAt: new Date().toISOString(), retryAt: new Date(retryAt).toISOString(), error: String(error.message || error).slice(0, 500) });
+            console.warn("[compaction] foreground attempt failed: " + String(error.message || error).slice(0, 300));
+            await delayCompactionRetry(id, retryAt, routeSignature, error.message || error);
           }
-        } catch (error) {
-          setCompactionDiagnostics(id, { status: "failed", mode: "foreground", failedAt: new Date().toISOString(), error: String(error.message || error).slice(0, 500) });
-          console.warn("[compaction] foreground attempt failed: " + String(error.message || error).slice(0, 300));
-          // Avoid a second expensive distillation of the same failed source
-          // immediately after the chat reply.
-          await delayCompactionRetry(id, Date.now() + 10 * 60_000);
+        }
+        // Surface the actual summary failure instead of replacing it with an
+        // unrelated generic context-limit message on every subsequent send.
+        if (Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens &&
+            !foregroundCompacted) {
+          const diagnostic = compactionDiagnostics.get(id);
+          if (diagnostic?.status !== "succeeded") {
+            const reason = diagnostic?.error || "压缩任务正在运行，请稍后重试。";
+            throw Object.assign(new Error(`上下文压缩尚未完成：${reason}${diagnostic?.retryAt ? " 同一线路重试时间：" + diagnostic.retryAt + "；切换可用模型或线路可立即重试。" : ""}`), { statusCode: 503, code: "context_compaction_required" });
+          }
         }
       }
       generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
