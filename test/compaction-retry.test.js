@@ -28,6 +28,11 @@ test('a rejected non-compressing checkpoint is discarded so a later retry can re
     content: `<context_summary>${++calls === 1 ? 'x'.repeat(15000) : 'concise facts'}</context_summary>`,
     finishReason: 'stop'
   }));
+  // Isolate final checkpoint validation from the distiller's own length guard.
+  context.distillContextBatch = async (call, input) => {
+    const result = await call(input);
+    return {summary:extractCompleteContextSummary(result.content),finishReason:result.finishReason};
+  };
   const thread = { id: 'retry', messages: [], cacheKeepaliveMessages: ['old-prefix'] };
   const plan = { olderMessages: [{ id: 'old', role: 'user', content: 's'.repeat(16000) }], throughMessageId: 'old' };
   await assert.rejects(context.compactContext(thread, plan, { model: 'test', customProvider: {} }), /non-compression/);
@@ -43,7 +48,7 @@ test('a truncated later batch preserves history and resumes only the unfinished 
   let calls = 0;
   const context = await harness(t, async () => {
     calls++;
-    return { content: '<context_summary>facts</context_summary>', finishReason: calls === 2 ? 'max_tokens' : 'stop' };
+    return { content: '<context_summary>facts</context_summary>', finishReason: calls === 2 || calls === 3 ? 'max_tokens' : 'stop' };
   });
   context.process.env.LUMI_COMPACT_CHUNK_CHARS = '4000';
   const messages = [{ id: 'long', role: 'user', content: 's'.repeat(6000) }];
@@ -55,7 +60,7 @@ test('a truncated later batch preserves history and resumes only the unfinished 
   assert.equal(thread.compactedThroughMessageId, 'before');
   assert.deepEqual(thread.cacheKeepaliveMessages, ['prefix']);
   await context.compactContext(thread, plan, { model: 'test', customProvider: {} });
-  assert.equal(calls, 3, 'successful first batch must not incur a second model request');
+  assert.equal(calls, 4, 'successful first batch must not incur a second model request; only the unfinished batch retries');
   assert.equal(JSON.stringify(messages), original);
   assert.equal(thread.compactedThroughMessageId, 'long');
   assert.equal(thread.cacheKeepaliveMessages, null);
