@@ -108,7 +108,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2232,6 +2232,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Reserve at least 1024 tokens for the visible answer; small-output tasks
   // such as calendar extraction should not send an unusable thinking budget.
   const nativeThinkingBudget = Math.min(configuredThinkingBudget, outputTokenLimit - 1024);
+  // Sonnet 5.5 uses between_tools for text without up-front thinking.
+  // Newer Opus/Fable/Mythos models cannot disable thinking at all.
+  const quietThinking = /claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model)
+    ? { thinking: { type: "between_tools" } }
+    : /claude[-_/]?(?:opus|fable|mythos)(?:[-_.]?5|[-_.]?preview)/i.test(model)
+      ? {} : { thinking: { type: "disabled" } };
   let requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
@@ -2243,7 +2249,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             ? message.content
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(disableThinkingRetry ? { thinking: { type: "disabled" } }
+        ...(disableThinkingRetry ? quietThinking
           : nativeThinkingEnabled && nativeThinkingBudget >= 1024 ? { thinking: { type: "enabled", budget_tokens: nativeThinkingBudget } } : {}),
         ...((nativeMailMcp || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
           ...((nativeMailMcp || nativeRemoteMcpServers.length) ? {
@@ -2728,7 +2734,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["concise-distiller-v1", process.env.LUMI_COMPACTION_MODEL || model,
+  return createHash("sha256").update(JSON.stringify(["concise-distiller-v2", process.env.LUMI_COMPACTION_MODEL || model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
