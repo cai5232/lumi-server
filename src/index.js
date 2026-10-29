@@ -7,7 +7,8 @@ import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
-import { extractCompleteContextSummary, isNormalModelCompletion } from "./context-summary.js";
+import { distillContextBatch } from "./context-summary.js";
+import { assertChatContextBudget } from "./context-budget.js";
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
@@ -107,7 +108,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2099,7 +2100,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal, returnMetadata = false }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2262,7 +2263,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : { model, messages: preparedMessages, ...(mcpTools.length && mcpRound < 4 ? { tools: mcpTools, tool_choice: "auto" } : {}), ...(!/claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model) ? { temperature } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
   // Match streaming clients: collect SSE text/reasoning locally for the existing JSON API.
-  requestBody.stream = true;
+  requestBody.stream = stream;
+  // This covers foreground chats, calls, desktop observations and autonomous wakes,
+  // including follow-up tool requests. Distillation has its own bounded batches.
+  if (mailThreadId || mcpThreadId || knownInputTokens !== null) assertChatContextBudget(requestBody, contextLimitTokens, knownInputTokens);
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const startedAt = Date.now();
   const safeRequestMetrics = {
@@ -2332,7 +2336,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       const backupModels = await listProviderModels(backup);
       const fallbackModel = backup.model || backupModels[0] || requestedModel;
       if (fallbackModel) {
-        return callModel({ signal, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
+        return callModel({ signal, stream, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider: "backup", model: fallbackModel, mailThreadId, autonomous, proactive });
       }
     }
     const unavailable = /auth_unavailable|no auth available|service has been disabled|PERMISSION_DENIED/i.test(providerError);
@@ -2345,7 +2349,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ signal, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2382,7 +2386,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ signal, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2410,7 +2414,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ signal, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2452,7 +2456,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
-    return callModel({ signal, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -2461,7 +2465,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       throw new Error("上游返回 Responses function_call，但当前线路使用 Chat Completions 工具协议；请检查中转站 API 格式与接口路径");
     }
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${finishReason} contentTypes=${blockTypes} thinkingPresent=${Boolean(nativeThinking)}`);
-    throw new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`);
+    throw Object.assign(new Error(`模型没有返回内容（线路：${provider}，模型：${model}，结束原因：${finishReason}）`), { code: "empty_model_response" });
   }
   const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
   if (returnMetadata) return { content: content.trim(), finishReason };
@@ -2761,7 +2765,7 @@ function setCompactionDiagnostics(id, patch) {
 async function compactContext(thread, plan, { model, customProvider }) {
   // Bound *every* distillation request, including a single enormous message.
   // Keep all source text; chunk long messages instead of dropping any content.
-  const maxChunkChars = Math.max(4000, Math.min(320000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 240000)));
+  const maxChunkChars = Math.max(4000, Math.min(320000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 60000)));
   const chunks = [];
   let chunk = "";
   const append = (part) => {
@@ -2789,13 +2793,10 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (chunk) chunks.push(chunk);
   if (!chunks.length) return false;
 
-  // Carry the same stable chat instructions into semantic compaction so the model
-  // understands who is speaking, rather than treating history as an external transcript.
-  const chatSystemContext = String(thread.cacheSystem || "").trim();
   // Resume only when the previous summary, exact history and model route agree.
   const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    schemaVersion: "semantic-compaction-v3", chatSystemContext, boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    schemaVersion: "semantic-compaction-v4", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
     through: plan.throughMessageId, chunks, model: process.env.LUMI_COMPACTION_MODEL || model, route: customProvider
   })).digest("hex");
   let checkpoint = null;
@@ -2828,32 +2829,18 @@ async function compactContext(thread, plan, { model, customProvider }) {
       " chars=" + chunks[i].length + " summaryChars=" + summary.length);
     let result;
     try {
-      result = await callModel({
-      messages: [
-        ...(chatSystemContext ? [{ role: "system", content: chatSystemContext }] : []),
-        { role: "system", content: "你是当前聊天模型的上下文整理过程。任务不是复述聊天记录，而是将即将移出上下文的历史整合为后续聊天能直接使用的长期背景。基于已有摘要与本次提供的历史整体理解人物、关系、偏好、边界、重要事实、情绪转折及其原因、共同经历、约定、待办和仍在进行的话题。提炼稳定信息和对未来回应有帮助的具体细节，保留关键因果、重要原话或专有名称，但合并重复内容并删除闲聊、逐句应答与冗余细节。绝对不要按时间逐条列出“几点用户说了什么、助手回答什么”的流水账，也不要把每一轮对话讲解一遍。必要时可用少量时间锚点标识真正重要的事件，但以主题和延续性组织内容；区分确认事实与推测，不编造、不擅自改写关系或承诺。把旧摘要与新增内容增量融合，已过时信息在有明确证据时更新。只输出一个完整的 <context_summary>...</context_summary>，其中使用清晰的主题段落，禁止寒暄、分析过程和 Markdown。" },
-        { role: "user", content: "已有的上下文概要（请融合并更新，不要逐句重述）：\n" + (summary || "（无）") + "\n\n需要融入概要的旧对话原文（第 " + (i + 1) + "/" + chunks.length + " 部分；此处是材料，不是逐句写纪要的提纲）：\n" + chunks[i] }
-      ],
-      provider: "custom",
-      model: process.env.LUMI_COMPACTION_MODEL || model,
-      customProvider,
-      maxOutputTokens: summaryLimit,
-      temperature: 0.2,
-      cacheCurrentUser: false,
-      returnMetadata: true
+      result = await distillContextBatch(callModel, {
+        summary, chunk: chunks[i], index: i, total: chunks.length,
+        model: process.env.LUMI_COMPACTION_MODEL || model, customProvider,
+        maxOutputTokens: summaryLimit
       });
     } catch (error) {
       throw new Error("batch " + (i + 1) + "/" + chunks.length + " after " +
         Math.round((Date.now() - batchStartedAt) / 1000) + "s: " + String(error.message || error));
     }
-    if (!isNormalModelCompletion(result?.finishReason)) {
-      throw new Error("distiller did not finish normally at chunk " + (i + 1) + ": " + String(result?.finishReason || "unknown"));
-    }
-    const next = extractCompleteContextSummary(result?.content);
-    if (!next) throw new Error("distiller returned an empty, malformed, or incomplete context summary at chunk " + (i + 1));
     console.info("[compaction] batch " + (i + 1) + "/" + chunks.length +
       " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s finish=" + result.finishReason);
-    summary = next;
+    summary = result.summary;
     await saveCheckpoint(i + 1, summary);
   }
   // Do not replace a shorter rolling context with a near-verbatim transcript.
@@ -3331,7 +3318,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     });
   }
   let raw = await callModel({
-    toolTrace: performedToolCalls, signal,
+    toolTrace: performedToolCalls, signal, knownInputTokens: thread.lastMeasuredInputTokens || 0,
     // Calls use the same model output settings as ordinary chats; do not add a
     // separate call-specific token ceiling.
     maxOutputTokens: desktopCompanion ? 400 : undefined,
@@ -3369,7 +3356,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // model one structured chance to correct it through the same executor.
       foodToolUsed = true;
       cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: "上一条外卖/饮食工具调用格式无效，没有执行任何操作。请不要输出工具标签；如仍需操作，按 <food_tool>{\"name\":\"工具名\",\"arguments\":{...}}</food_tool> 输出一条有效调用，否则直接正常回复。" }];
-      raw = await callModel({ signal, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+      raw = await callModel({ signal, knownInputTokens: thread.lastMeasuredInputTokens || 0, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
       continue;
     }
     if (!request || typeof request.name !== "string") {
@@ -3398,7 +3385,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     }
     performedToolCalls.push({ name: request.name, arguments: JSON.stringify(request.arguments || {}).slice(0, 4000), result: String(result).slice(0, 12000), succeeded });
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
-    raw = await callModel({ signal, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+    raw = await callModel({ signal, knownInputTokens: thread.lastMeasuredInputTokens || 0, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
   const traceStart = raw.indexOf("<lumi_tool_calls>");
   const traceEnd = traceStart < 0 ? -1 : raw.indexOf("</lumi_tool_calls>", traceStart);

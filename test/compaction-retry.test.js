@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { extractCompleteContextSummary, isNormalModelCompletion } from '../src/context-summary.js';
+import { extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch } from '../src/context-summary.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const start = source.indexOf('const compactionRetryAfter = new Map();');
@@ -16,7 +16,7 @@ async function harness(t, callModel) {
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const context = { dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
     process: { env: {} }, console, callModel, historicalModelContent: value => value,
-    extractCompleteContextSummary, isNormalModelCompletion };
+    extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch };
   vm.createContext(context);
   vm.runInContext(source.slice(start, end), context);
   return context;

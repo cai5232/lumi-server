@@ -5,7 +5,7 @@ import {mkdtemp, mkdir, rename, unlink, writeFile, rm, readFile} from 'node:fs/p
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash, randomUUID} from 'node:crypto';
-import {extractCompleteContextSummary, isNormalModelCompletion} from '../src/context-summary.js';
+import {extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch} from '../src/context-summary.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const context = {};
@@ -41,7 +41,7 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const calls = [];
   Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
-    extractCompleteContextSummary, isNormalModelCompletion});
+    extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
   vm.runInContext(source.slice(source.indexOf('async function compactContext('), source.indexOf('\nconst backgroundCompactionJobs')), context);
   assert.ok(context.messageTokens(messages) < 100);

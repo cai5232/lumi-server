@@ -201,3 +201,10 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 - A silent receipt returns `replyDeferred: true` and a stable empty compatibility `assistantMessage`; this placeholder is never inserted into conversation history. Images use the existing durable attachment store.
 - Random/forced wake and natural wake all supply the complete sleeping inbox and the full latest sleep-session dreams to the model. Inbox IDs are acknowledged only after successful output; restart and failure preserve unanswered messages. Natural wake responds to an inbox even when proactive contact is disabled. New foreground sends cancel background generation and share its conversation persistence reservation.
 - `GET /v1/chats/:id/sleep?offset=0&limit=30` is authenticated and returns current activity, sleep policy, pending message count, and complete dream bodies with pagination. Dream text removes private emotion-update markup, not narrative. Ordinary dreams remain outside the visible chat transcript.
+
+
+### 压缩异常恢复
+
+摘要使用独立的整理提示词，不重复注入聊天人物提示词和其中的旧摘要。默认按最多 60,000 字符分批（可用 `LUMI_COMPACT_CHUNK_CHARS` 调整）；空响应或缺少完整摘要标签时，在同一模型线路上以非流式请求修复一次。额度、鉴权及网络错误不会作为格式问题重复调用。只有完整成功的批次才保存检查点，全部完成后才提交新摘要，原始聊天记录始终保留。
+
+聊天、通话、桌面伴读和自主唤醒发送模型请求前，会检查上一轮实测输入与当前请求估算（含系统背景及工具定义）。超过 `LUMI_CONTEXT_LIMIT` 时返回明确的压缩未完成错误，不再继续发送巨量历史。触发阈值与失败后的冷却仍沿用现有设置；线路额度恢复或切换到可用线路后，下一次普通聊天会按冷却状态重试压缩。
