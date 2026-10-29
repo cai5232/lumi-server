@@ -10,7 +10,7 @@ test('counts hidden system, history, tools and tool results in the outgoing requ
 
 test('cached tokens are still input and measured usage cannot be hidden by a low text estimate', () => {
  const body = {messages:[{role:'user',content:'small'}]};
- assert.throws(() => assertChatContextBudget(body, 200000, 591813), /591813/);
+ assert.throws(() => assertChatContextBudget(body, 200000, 600000), /600000/);
  assert.doesNotThrow(() => assertChatContextBudget(body, 200000, 0));
 });
 

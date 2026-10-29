@@ -54,7 +54,7 @@ for (const format of ['openai', 'anthropic']) test(`oversized ${format} chat is 
   cacheMessages: messages => messages, assertChatContextBudget, contextLimitTokens: 200000,
   requestRelay: async () => { calls++; throw Error('must not reach upstream'); } };
  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
- for (const knownInputTokens of [0, 591813]) {
+ for (const knownInputTokens of [0, 600000]) {
   await assert.rejects(context.callModel({ provider: 'custom', model: 'chosen',
    customProvider: {url:'https://relay.test/v1',key:'test',apiFormat:format}, mcpThreadId: 'default',
    knownInputTokens, messages: [{role:'user',content: knownInputTokens ? 'small local estimate' : '大'.repeat(200001)}] }),
