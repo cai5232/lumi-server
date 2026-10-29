@@ -28,6 +28,12 @@ for(const format of ['openai','anthropic'])test(`real callModel ${format} route 
  if(format==='anthropic') {
   await context.callModel({provider:'custom',model:'claude-test',customProvider:{url:'https://custom.test/v1',key:'test-key',apiFormat:'anthropic'},messages:[{role:'user',content:'summarize'}],disableThinkingRetry:true,returnMetadata:true});
   assert.equal(captured.body.thinking.type,'disabled','summary requests must explicitly disable default provider thinking');
+  for(const [summaryModel,mode] of [['anthropic/claude-sonnet-5.5','between_tools'],['claude-sonnet-5-5','between_tools'],['claude-opus-5-5-thinking',null]]) {
+   await context.callModel({provider:'custom',model:summaryModel,customProvider:{url:'https://custom.test/v1',key:'test-key',apiFormat:'anthropic'},messages:[{role:'user',content:'summarize'}],disableThinkingRetry:true,returnMetadata:true});
+   assert.equal(captured.body.thinking?.type||null,mode);
+   if(mode==='between_tools') assert.deepEqual(captured.body.thinking,{type:'between_tools'});
+  }
+
  }
 
 });
