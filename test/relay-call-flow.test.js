@@ -4,12 +4,13 @@ import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
 import {relayEndpoint,requestRelay} from '../src/relay-transport.js';
 import {removeMalformedAnthropicThinkingBlocks} from '../src/anthropic-messages.js';
+import {assertChatContextBudget} from '../src/context-budget.js';
 import {responseThinking} from '../src/response-thinking.js';
 const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
 const start=source.indexOf('async function callModel('),end=source.indexOf('\nasync function zenMuxSubscriptionUsage',start);
 for(const format of ['openai','anthropic'])test(`real callModel ${format} route keeps chosen endpoint, auth, usage and thinking without connecting unavailable MCP`,async()=>{
  let captured,usage;
- const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,
+ const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
   mcpClientStore:{read:async()=>({servers:[{enabled:true,tools:[],name:'offline'}]})},modelToolsForServer:()=>[],
   connectPendingMcpServers:()=>{throw new Error('chat must not wait for MCP discovery')},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
   cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async()=>{},randomUUID:()=> 'test-id',modelRequestLogJSON:JSON.stringify,
@@ -44,4 +45,20 @@ test('real callModel identifies disabled upstream credentials and preserves upst
    return true;
   });
  }
+});
+
+for (const format of ['openai', 'anthropic']) test(`oversized ${format} chat is blocked before contacting the relay`, async () => {
+ let calls = 0;
+ const context = { URL, console, process: { env: {} }, relayEndpoint, removeMalformedAnthropicThinkingBlocks,
+  mcpClientStore: { read: async () => ({ servers: [] }) }, calendarTools: [], foodTools: [], ENGAWA_SERVER_ID: 'engawa',
+  cacheMessages: messages => messages, assertChatContextBudget, contextLimitTokens: 200000,
+  requestRelay: async () => { calls++; throw Error('must not reach upstream'); } };
+ vm.createContext(context); vm.runInContext(source.slice(start, end), context);
+ for (const knownInputTokens of [0, 591813]) {
+  await assert.rejects(context.callModel({ provider: 'custom', model: 'chosen',
+   customProvider: {url:'https://relay.test/v1',key:'test',apiFormat:format}, mcpThreadId: 'default',
+   knownInputTokens, messages: [{role:'user',content: knownInputTokens ? 'small local estimate' : '大'.repeat(200001)}] }),
+   error => error.code === 'context_compaction_required' && error.statusCode === 503);
+ }
+ assert.equal(calls, 0);
 });
