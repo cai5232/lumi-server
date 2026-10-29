@@ -55,3 +55,37 @@ test('empty responses recover once but quota errors never cause extra paid retri
  await assert.rejects(distillContextBatch(async () => {calls++;return {content:'<context_summary>unfinished',finishReason:'end_turn'}},input), /after format retry/);
  assert.equal(calls,2);
 });
+
+
+test('max_tokens retries the same full material with a smaller summary target, never accepting partial output', async () => {
+ const {distillContextBatch} = await import('../src/context-summary.js');
+ const calls=[];
+ const result=await distillContextBatch(async request=>{
+  calls.push(request);
+  return calls.length===1 ? {content:'<context_summary>partial-not-to-reuse',finishReason:'max_tokens'}
+   : {content:'<context_summary>complete concise facts</context_summary>',finishReason:'end_turn'};
+ },{summary:'all previous facts',chunk:'all new original material',index:1,total:8,model:'selected',customProvider:{},maxOutputTokens:25000});
+ assert.equal(result.summary,'complete concise facts');
+ assert.equal(calls.length,2);
+ assert.ok(calls[0].messages[1].content.includes('6000'));
+ assert.ok(calls[1].messages[1].content.includes('3000'));
+ for(const request of calls){
+  assert.ok(request.messages[1].content.includes('all previous facts'));
+  assert.ok(request.messages[1].content.includes('all new original material'));
+  assert.ok(!JSON.stringify(request).includes('partial-not-to-reuse'));
+  assert.equal(request.maxOutputTokens,25000,'do not solve runaway summaries by raising paid output budget');
+  assert.equal(request.disableThinkingRetry,true);
+ }
+});
+
+test('a complete but growing summary is refined before it can inflate the next batch', async () => {
+ const {distillContextBatch} = await import('../src/context-summary.js');
+ let calls=0;
+ const result=await distillContextBatch(async()=>({content:`<context_summary>${++calls===1?'x'.repeat(7000):'merged facts'}</context_summary>`,finishReason:'stop'}),
+ {summary:'previous facts',chunk:'new facts',index:0,total:2,model:'selected',customProvider:{},maxOutputTokens:25000});
+ assert.equal(result.summary,'merged facts');assert.equal(calls,2);
+ calls=0;
+ await assert.rejects(distillContextBatch(async()=>{calls++;return {content:'<context_summary>partial',finishReason:'max_tokens'}},
+ {summary:'previous facts',chunk:'new facts',index:0,total:2,model:'selected',customProvider:{},maxOutputTokens:25000}), /after concise retry/);
+ assert.equal(calls,2,'persistent truncation must stop without committing partial facts');
+});

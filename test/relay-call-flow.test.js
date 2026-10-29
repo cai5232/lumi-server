@@ -25,6 +25,11 @@ for(const format of ['openai','anthropic'])test(`real callModel ${format} route 
  assert.equal(captured.url,format==='anthropic'?'https://custom.test/v1/messages':'https://custom.test/v1/chat/completions');
  if(format==='anthropic'){assert.equal(captured.headers['x-api-key'],'test-key');assert.equal(captured.body.messages[0].role,'user');assert.equal(captured.body.system[0].text,'设定')}
  else assert.equal(captured.body.messages[0].role,'system');
+ if(format==='anthropic') {
+  await context.callModel({provider:'custom',model:'claude-test',customProvider:{url:'https://custom.test/v1',key:'test-key',apiFormat:'anthropic'},messages:[{role:'user',content:'summarize'}],disableThinkingRetry:true,returnMetadata:true});
+  assert.equal(captured.body.thinking.type,'disabled','summary requests must explicitly disable default provider thinking');
+ }
+
 });
 test('public messages exclude persisted context while retaining actual saved thinking',()=>{
  const start=source.indexOf('function publicChatMessage('),end=source.indexOf('\nfunction stripInternalContextMarkup',start);

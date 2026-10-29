@@ -108,7 +108,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 200_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || 0.85)));
@@ -2243,7 +2243,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
             ? message.content
             : [{ type: "text", text: String(message.content || "") }]),
         messages: preparedMessages.filter((message) => message.role !== "system"),
-        ...(nativeThinkingEnabled && nativeThinkingBudget >= 1024 ? { thinking: { type: "enabled", budget_tokens: nativeThinkingBudget } } : {}),
+        ...(disableThinkingRetry ? { thinking: { type: "disabled" } }
+          : nativeThinkingEnabled && nativeThinkingBudget >= 1024 ? { thinking: { type: "enabled", budget_tokens: nativeThinkingBudget } } : {}),
         ...((nativeMailMcp || nativeRemoteMcpServers.length || anthropicLocalTools.length) ? {
           ...((nativeMailMcp || nativeRemoteMcpServers.length) ? {
             mcp_servers: [
@@ -2727,7 +2728,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify([process.env.LUMI_COMPACTION_MODEL || model,
+  return createHash("sha256").update(JSON.stringify(["concise-distiller-v1", process.env.LUMI_COMPACTION_MODEL || model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
@@ -2983,6 +2984,30 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
       }
     })();
   });
+}
+
+// Resume saved work after a rollout without requiring another oversized chat.
+// Only threads with both a paid checkpoint and their own saved custom route qualify.
+async function resumeInterruptedCompactions() {
+  const threads = await readThreads();
+  const routes = await readMurmurRoutes();
+  for (const thread of Object.values(threads)) {
+    if (!compactionPlan(thread)) continue;
+    const exact = [routes[thread.id], thread.modelRoute].some(route => route?.provider === "custom" && route.customProvider);
+    if (!exact) continue;
+    const path = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id)).digest("hex").slice(0, 24) + ".json");
+    try {
+      const checkpoint = JSON.parse(await readFile(path, "utf8"));
+      if (!Number.isInteger(checkpoint.nextIndex) || checkpoint.nextIndex < 1 || typeof checkpoint.summary !== "string") continue;
+    } catch (error) {
+      if (error?.code !== "ENOENT") console.warn("[compaction] recovery checkpoint ignored: " + error.message);
+      continue;
+    }
+    const route = await resolveMurmurRoute(thread.id, thread);
+    if (!route?.customProvider || !route.model) continue;
+    console.info("[compaction] startup recovery scheduled thread=" + thread.id);
+    scheduleBackgroundCompaction(thread.id, route.model, route.customProvider);
+  }
 }
 
 function chooseEmojiFromMood(mood, faces, reply) {
@@ -5869,6 +5894,7 @@ setInterval(async () => {
   } catch (error) { console.warn("sleep radio scheduler failed: " + String(error.message || error)); }
 }, 20_000);
 server.listen(port, () => console.log(`Lumi server listening on :${server.address().port}`));
+void resumeInterruptedCompactions().catch(error => console.warn("[compaction] startup recovery failed: " + error.message));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     stopPromiseAlarm();
