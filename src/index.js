@@ -2,7 +2,7 @@ import { sleepMessageDecision, sleepInbox, sleepInboxContext, fullDreamRecall, d
 import { loadChatImages, saveChatImages } from "./chat-images.js";
 import { createInstantCommandStore, parseInstantCommands, commandFeedbackText } from "./instant-commands.js";
 import { createChatJobs } from "./chat-jobs.js";
-import { createModelRequestStore } from "./model-request-store.js";
+import { createModelRequestStore, modelRequestLogJSON } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
@@ -1465,13 +1465,6 @@ async function recordModelRequest(record) {
   return modelRequestStore.append(record);
 }
 
-function modelRequestLogJSON(value) {
-  return JSON.stringify(value, (_key, item) => {
-    if (typeof item !== "string") return item;
-    return item.replace(/data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+/gi, "[image attachment omitted]");
-  });
-}
-
 async function loadProactiveSettings() {
   await mkdir(dataDir, { recursive: true });
   try { Object.assign(proactiveSettings, JSON.parse(await readFile(proactiveSettingsPath, "utf8"))); }
@@ -2100,7 +2093,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2295,7 +2288,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   try {
     relay = await requestRelay({ url: apiURL, body: requestBody, signal: signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined), headers: {
     "content-type": "application/json",
-    accept: "text/event-stream",
+    accept: stream ? "text/event-stream" : "application/json",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
     ...(nativeAnthropic ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01", ...((nativeMailMcp || nativeRemoteMcpServers.length) ? { "anthropic-beta": "mcp-client-2025-11-20" } : {}) } : {})
     } });
@@ -2356,7 +2349,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2393,7 +2386,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2421,7 +2414,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, proactive, toolTrace });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2461,9 +2454,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       .map((block) => typeof block === "string" ? block : block?.text || block?.content || "")
       .join("")
     : typeof rawContent === "string" ? rawContent : "";
-  if (!content.trim() && nativeAnthropic && requestBody.thinking && !disableThinkingRetry) {
-    console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || "unknown"}; retrying once without extended thinking`);
-    return callModel({ signal, stream, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: true, proactive, toolTrace, returnMetadata });
+  if (!content.trim() && !emptyResponseRetried && !responseOutput.some(item => item?.type === "function_call")) {
+    console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || data?.choices?.[0]?.finish_reason || "unknown"}; retrying once as JSON on the same route`);
+    return callModel({ signal, stream: false, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -4240,9 +4233,15 @@ const server = createServer(async (req, res) => {
       }
       return send(res, 405, { error: "method_not_allowed" });
     }
+    const modelRequestDetailMatch = url.pathname.match(/^\/v1\/usage\/requests\/([^/]+)$/);
+    if (req.method === "GET" && modelRequestDetailMatch) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const record = await modelRequestStore.detail(decodeURIComponent(modelRequestDetailMatch[1]));
+      return record ? send(res, 200, record) : send(res, 404, { error: "not_found" });
+    }
     if (req.method === "GET" && url.pathname === "/v1/usage/requests") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
-      const requests = await modelRequestStore.read();
+      const requests = await modelRequestStore.read({ includeDetails: url.searchParams.get("summary") === "0" });
       const now = new Date();
       const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
       const dayKey = (date) => date.toISOString().slice(0, 10);
@@ -4882,6 +4881,8 @@ const server = createServer(async (req, res) => {
       const activeThread = (await readThreads()).default;
       return send(res, 200, {
       ok: true,
+      requestLogVersion: "summary-details-no-images-v1",
+      emptyResponseRecovery: "same-route-json-once-v1",
       sleepInboxVersion: "v2",
       buildVersion,
       htmlCards: "separate-content-title-v1",

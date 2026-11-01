@@ -73,3 +73,29 @@ for (const format of ['openai', 'anthropic']) test(`oversized ${format} chat is 
  }
  assert.equal(calls, 0);
 });
+
+for(const format of ['anthropic','openai'])for(const recover of [true,false])test(`${format} empty reply retries once as JSON and ${recover?'recovers':'stops after two attempts'}`,async()=>{
+ const attempts=[],records=[],usage=[];
+ const controller=new AbortController();
+ const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
+  mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
+  cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async record=>records.push(record),randomUUID:()=>String(records.length),modelRequestLogJSON:JSON.stringify,
+  cacheUsage:()=>({read:0,created:0}),cacheStats:{modelCalls:0,cacheReadTokens:0,cacheWriteTokens:0},saveCacheStats:async()=>{},
+  requestRelay:options=>requestRelay({...options,fetchImpl:async(url,request)=>{
+   assert.equal(request.headers.authorization,'Bearer test-key');
+   assert.equal(url,`https://retry-${format}-${recover}.test/v1/${format==='anthropic'?'messages':'chat/completions'}`);
+   const body=JSON.parse(request.body);attempts.push(body);
+   assert.equal(request.headers.accept,body.stream?'text/event-stream':'application/json');
+   const text=recover&&attempts.length===2?'恢复后的正文':'';
+   return new Response(JSON.stringify(format==='anthropic'
+    ?{content:[{type:'text',text}],stop_reason:'end_turn',usage:{input_tokens:123,output_tokens:text?8:0}}
+    :{choices:[{message:{content:text},finish_reason:'stop'}],usage:{prompt_tokens:123,completion_tokens:text?8:0}}));
+  }})};
+ vm.createContext(context);vm.runInContext(source.slice(start,end),context);
+ const promise=context.callModel({provider:'custom',model:'claude-opus-test',customProvider:{url:`https://retry-${format}-${recover}.test/v1`,key:'test-key',apiFormat:format},messages:[{role:'user',content:'原始问题'}],signal:controller.signal,returnMetadata:true,onUsage:value=>usage.push(value)});
+ if(recover){const result=await promise;assert.equal(result.content,'恢复后的正文');assert.equal(result.finishReason,format==='anthropic'?'end_turn':'stop');}
+ else await assert.rejects(promise,error=>error.code==='empty_model_response');
+ assert.equal(attempts.length,2);assert.equal(records.length,2);assert.equal(usage.length,2);
+ assert.equal(attempts[0].stream,true);assert.equal(attempts[1].stream,false);
+ assert.deepEqual(attempts[1].messages,attempts[0].messages);assert.equal(attempts[1].model,attempts[0].model);
+});
