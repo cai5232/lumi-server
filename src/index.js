@@ -5054,37 +5054,6 @@ const server = createServer(async (req, res) => {
       signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
       await saveSentinelActivity(signals);
       console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} retained_events=${signals.events.length} context_window=10 proactive_enabled=${Number(proactiveSettings.enabled)}`);
-      if (!duplicate && proactiveSettings.enabled) {
-        const threads = await readThreads();
-        const thread = threads[proactiveSettings.threadId] || threads.default;
-        if (thread) {
-          const activity = ensureActivity(thread);
-          const quietFor = now - (Date.parse(activity.lastUserActivityAt || "") || 0);
-          if (activity.mode !== "sleeping" && !activity.sleepPendingAt && !proactiveSettings.dnd) {
-            const recentCount = signals.events.filter(event => now - Date.parse(event.createdAt) < 60 * 60_000).length;
-            const multiplier = recentCount >= 5 ? 0.6 : recentCount >= 3 ? 0.8 : recentCount >= 1 ? 0.9 : 1;
-            const baseline = Date.parse(activity.lastUserActivityAt || "") || now;
-            const dueAt = baseline + Math.max(1, Number(proactiveSettings.intervalMin) || 60) * multiplier * 60_000;
-            const localHour = Number(new Intl.DateTimeFormat("en-US", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(new Date(now)));
-            const nightGuard = localHour >= 1 && localHour < 5 && quietFor >= 30 * 60_000 &&
-              proactiveSettings.actions?.message !== false &&
-              now - (Date.parse(activity.lastNightAppWakeAt || "") || 0) >= 30 * 60_000;
-            const currentDueAt = Date.parse(activity.nextWakeAt || "");
-            if (nightGuard) {
-              activity.lastNightAppWakeAt = new Date(now).toISOString();
-              activity.nightActivityWakeUntil = new Date(now + 30 * 60_000).toISOString();
-              activity.nextWakeAt = new Date(now).toISOString();
-              activity.nextWakeSource = "activity";
-            } else if (!Number.isFinite(currentDueAt) || dueAt < currentDueAt) {
-              activity.nextWakeAt = new Date(dueAt).toISOString();
-              activity.nextWakeSource = "activity";
-            }
-            proactiveSettings.nextDueAt = activity.nextWakeAt;
-            await saveThreads(threads);
-            await saveProactiveSettings();
-          }
-        }
-      }
       return send(res, 200, { ok: true, deduplicated: duplicate, ...(await appControl.check(app)) });
     }
     const activityMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity$/);
