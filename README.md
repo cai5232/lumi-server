@@ -46,6 +46,8 @@ Lumi 只保存所选 App 名称和接收时间，最多保留 7 天；主动唤�
 
 把独立部署的 Engawa MCP 地址填入 `ENGAWA_MCP_URL`，例如 `https://engawa.example.zeabur.app/mcp`。Lumi 后端会自动把“檐廊 Engawa”加入 iOS 的“设置 → MCP 工具”，可以在那里启用或关闭；不需要在手机里保存服务凭证。
 
+模型可以把檐廊找到的图片带回聊天：先调用 `apod` 获取天文照片，或用 `daily_art` 按关键词寻找画作，再调用 `lumi_engawa_share_photo`，传入实际返回的图片地址及可选的心情/说明。同一轮最多四张，服务端会生成包含图片、文字和来源的卡片；日常聊天与自主唤醒都支持，现有 iOS App 点开卡片即可查看。图片由原网站加载，原站不可访问时可尝试卡片里的来源链接；APOD 当天是视频时不会当成照片发送。
+
 聊天和自主唤醒只会向模型开放 `web_read`、`rss_read`、`shelf`、`shelf_suggest`、`sky_tonight`、`apod`、`daily_art`、`arxiv_new`、`daily_poem`、`on_this_day` 和 `hobby_corner`。书架与兴趣的增删工具仍可在 MCP 设置中手动调用。Engawa 的 HTTP 服务不带内置认证；部署前请确认 Zeabur 服务访问策略，避免把可写的 MCP 端点交给不受信任的调用方。Lumi 到 Engawa 的请求只使用公开 HTTPS 地址。
 
 `PORT` 由 Zeabur 自动注入，不需要手动填写。

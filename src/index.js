@@ -35,6 +35,7 @@ import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
 import { createStickerStore, stickerMessageForModel } from "./stickers.js";
 import { createDesktopCompanionService } from "./desktop-companion.js";
 import { applyLiveAttentionUpdate, buildLiveAttentionContext } from "./live-attention.js";
+import { ENGAWA_PHOTO_TOOL, engawaPhotoTool, engawaPhotoCandidates, shareEngawaPhoto, engawaPhotoCard } from "./engawa-photos.js";
 
 const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
@@ -2175,6 +2176,10 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `${server.name}: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
     }
   }
+  if (mcpThreadId && mcpServers.some(server => server.id === ENGAWA_SERVER_ID)) {
+    mcpToolMap.set(ENGAWA_PHOTO_TOOL, { tool: engawaPhotoTool, engawaPhoto: true, execute: args => shareEngawaPhoto(toolTrace, args) });
+    mcpTools.push({ type: "function", function: { name: ENGAWA_PHOTO_TOOL, description: engawaPhotoTool.description, parameters: engawaPhotoTool.inputSchema } });
+  }
   if (mcpThreadId) {
     const tool = { name: "surf_web_and_save", description: "直接通过 Lumi 服务器联网搜索公开网页，整理简短见闻并保存到聊天抽屉。仅在当前问题需要新鲜/外部信息，或自主唤醒时你自然好奇时调用；不要每轮搜索，不搜索用户个人或健康、财务、账户信息。", inputSchema: { type: "object", properties: { topic: { type: "string", description: "简短的公开知识搜索主题" } }, required: ["topic"], additionalProperties: false } };
     mcpToolMap.set("lumi_surf_web_and_save", {
@@ -2215,7 +2220,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool)
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
@@ -2378,7 +2383,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: true });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, use.input || {}) } : {}) });
         results.push({ type: "tool_result", tool_use_id: use.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
@@ -2406,11 +2411,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: true });
+        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, args) } : {}) });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push({ name: entry.tool.name, arguments: String(call.function.arguments || "").slice(0, 4000), result: output, succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
@@ -3246,7 +3251,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const engawaEnabled = proactive && mailSettings.servers.some(server => server.id === ENGAWA_SERVER_ID && server.enabled);
   const engawaDirective = engawaEnabled
-    ? "<available_feature name=\"engawa\">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>\n"
+    ? "<available_feature name=\"engawa\">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。看到想带给言言看的图，可以先用 apod 取得天文照片，或 daily_art 按关键词找画作，再调用 lumi_engawa_share_photo，原样填写图片地址和想说的话；服务端会把真实图片与来源放进可打开看大图的卡片，不必每次都带图，不要编造图片地址。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>\n"
     : "";
   const dreamRecall = thread.pendingDreamRecall || ((proactive || isDreamRecallRequest(input)) ? storedDreamRecall(thread) : "");
   const sleepingMessages = sleepInboxContext(thread);
@@ -3508,6 +3513,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
   if (htmlBlock) content = htmlBlock.content;
+  const photoCard = !callMode ? engawaPhotoCard(toolCalls, content) : null;
   const memorySaved = memoryContent ? await writeMemory(memoryContent, thread.id) : false;
   const speechText = speechMatch ? stripOptionMarkers(spokenReply(speechMatch[1])) : "";
   // Preserve the exact provider text for the next request's cache prefix. The
@@ -3516,7 +3522,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: htmlBlock?.htmlContent || null, htmlTitle: htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
