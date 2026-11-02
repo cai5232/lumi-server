@@ -23,7 +23,7 @@ export async function saveChatImages(dataDir, images) {
 }
 
 export async function loadChatImages(dataDir, ids = []) {
-  const images = await Promise.all(ids.slice(0, 4).map(async id => {
+  const images = await Promise.all(ids.slice(0, 22).map(async id => {
     if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) return null;
     try { return await readFile(join(dataDir, 'chat-images', id), 'utf8'); }
     catch (error) {
