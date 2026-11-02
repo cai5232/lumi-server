@@ -38,9 +38,9 @@ Coolify 部署时，将 `LUMI_DATA_DIR` 设为 `/data`，并把持久化 Volume 
 
 ## 手机 App 活动（可选）
 
-iPhone「快捷指令」可在所选 App 打开时调用 `POST /v1/sentinel/events`，JSON 请求体：`{"app":"X","timeZone":"America/New_York"}`。请求头用 `Authorization: Bearer 你的 SENTINEL_INGEST_TOKEN`。令牌只在 Zeabur 服务环境变量和你自己的快捷指令里设置，不要放进共享链接。
+iPhone「快捷指令」可在所选 App 打开时调用 `POST /v1/sentinel/events`，JSON 请求体：`{"app":"X","timeZone":"America/New_York"}`。请求头用 `Authorization: Bearer 你的 SENTINEL_INGEST_TOKEN`。令牌只放在 Coolify 服务环境变量和你自己的快捷指令里，不要放进共享链接。
 
-Lumi 只保存所选 App 名称和接收时间，最多保留 7 天；主动唤醒会把最近活动作为聊天背景，并按近一小时活动量适度缩短间隔。凌晨 1:00–5:00 的活动只在主动联系已启用、用户至少 30 分钟没有给 Lumi 发消息、且勿扰/睡眠未开启时安排短消息；不会因 App 活动拨电话。停用快捷指令自动化即可停止上报。
+每次打开所选 App 时，快捷指令只向后端发送 App 名称和时区；后端保存名称与接收时间，最多保留 7 天。这一步不调用 AI、不生成回复，也不更改自主唤醒时间，因此不会因打开 App 额外消耗模型 Token。之后沈屿按原有计划自主唤醒时，才会读取最近活动作为聊天背景，并自行决定是否提起。停用快捷指令自动化即可停止上报。
 
 ## 檐廊 Engawa MCP
 
