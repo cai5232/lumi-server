@@ -3270,7 +3270,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
   const proactiveDirective = proactive
-    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
