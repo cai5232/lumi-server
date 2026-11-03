@@ -3287,7 +3287,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
   const configuredApps = !callMode ? await appControl.get() : { apps: [], autonomous: false };
-  const appControlDirective = configuredApps.apps.length ? `\n<available_feature name="app_control">用户已自愿设置快捷指令应用限制。可用 lumi_app_control 查询、设置或解除任意指定 App；当前名单为 ${configuredApps.apps.join("、")}。新增 App 时必须告知用户需在手机建立对应自动化。${configuredApps.autonomous ? "用户允许你在自主活动中自行决定何时调整。" : "仅在用户提出要求时调整。"}这是打开后跳回 Lumi，不是系统级锁；快捷指令是否已在手机上配置无法由此确认。调用失败时如实说明。</available_feature>` : "";
+  const appControlDirective = configuredApps.apps.length ? `\n<available_feature name="app_control">用户已自愿设置快捷指令应用限制。可用 lumi_app_control 查询、设置或解除任意指定 App；当前名单为 ${configuredApps.apps.join("、")}。新增 App 时必须告知用户需在手机建立对应自动化。${configuredApps.autonomous ? "用户允许你在自主唤醒中自行决定锁定或解除应用；决定执行时必须在本轮实际调用 lumi_app_control，收到成功结果后才能说已锁定或已解除。历史 recorded_tool_results 只是过去记录，不能复制成当前结果，也不能代替本轮工具调用。" : "仅在用户提出要求时调整。"}这是打开后跳回 Lumi，不是系统级锁；快捷指令是否已在手机上配置无法由此确认。调用失败时如实说明。不要输出 recorded_tool_results 或手写工具返回值。</available_feature>` : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   // The backend-owned prompt is canonical. Ignore legacy LUMI_SYSTEM_PROMPT
   // and client-supplied systemPrompt so old persona text cannot replace it.
@@ -3471,6 +3471,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const liveAttentionUpdate = applyLiveAttentionUpdate(cleanedRaw, thread.liveAttentionEvents || [], { sourceAt: liveAttentionContext.sourceAt });
   if (!proactive && !callMode && !desktopCompanion && thread) thread.liveAttentionEvents = liveAttentionUpdate.events;
   cleanedRaw = liveAttentionUpdate.cleanText;
+  cleanedRaw = cleanedRaw.replace(/<recorded_tool_results\b[^>]*>[\s\S]*?(?:<\/recorded_tool_results>|$)/gi, "").trim();
   // Tool protocol is always private. This also covers models that stop after
   // emitting a call instead of returning a user-facing message.
   cleanedRaw = cleanedRaw.replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
