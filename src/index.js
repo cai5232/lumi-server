@@ -450,7 +450,7 @@ function markUserActivity(thread, content) {
   activity.nextWakeAt = configured.enabled ? new Date(now.getTime() + interval * 60_000).toISOString() : null;
   activity.nextWakeSource = configured.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
-  activity.sleepPendingAt = (isFarewell(content) || activity.sleepPendingAt)
+  activity.sleepPendingAt = isFarewell(content)
     ? new Date(now.getTime() + sleepDelayMinutes * 60_000).toISOString()
     : null;
   activity.sleepStartedAt = null;
@@ -477,7 +477,7 @@ function finishUserConversation(thread, content) {
     : null;
   activity.nextWakeSource = proactive.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
-  activity.sleepPendingAt = (isFarewell(content) || activity.sleepPendingAt)
+  activity.sleepPendingAt = isFarewell(content)
     ? new Date(now + sleepDelayMinutes * 60_000).toISOString()
     : null;
   activity.sleepStartedAt = null;
@@ -1087,7 +1087,7 @@ async function runBackgroundPulse() {
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
     if (thread.id === proactiveSettings.threadId) {
       const due = Date.parse(activity.nextWakeAt || "");
-      proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : "wake_due";
+      proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : activity.sleepPendingAt ? "waiting_for_sleep" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : "wake_due";
     }
     if (activity.mode !== "sleeping" && activity.sleepReplyPending && sleepInbox(thread).length && !(Date.parse(thread.sleepInboxRetryAt || "") > now)) {
       try {
