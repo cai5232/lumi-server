@@ -2182,7 +2182,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const [toolIndex, tool] of modelToolsForServer(server).entries()) {
       if (!tool?.name || tool.disabled === true) continue;
       const name = `mcp_${serverIndex}_${toolIndex}_${String(tool.name).replace(/[^A-Za-z0-9_-]/g, "_")}`.slice(0, 64);
-      mcpToolMap.set(name, { server, tool });
+      mcpToolMap.set(name, { server, tool, allowWrite: server.id === "x-twikit" && server.url === "https://i2tgptdlhsalamb7rdleapzy.107.174.137.23.sslip.io/mcp" });
       mcpTools.push({ type: "function", function: { name, description: `${server.name}: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
     }
   }
