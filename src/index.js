@@ -1085,6 +1085,13 @@ async function runBackgroundPulse() {
     if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+    // Repair pending-bedtime flags retained by older chat handlers.
+    const latestUserMessage = thread.messages?.findLast(message => message.role === "user");
+    if (activity.mode === "sentinel" && activity.sleepPendingAt && latestUserMessage && !isFarewell(latestUserMessage.content)) {
+      activity.sleepPendingAt = null;
+      threadChanged = true;
+      console.info(`sentinel_stale_sleep_cleared thread=${thread.id} next_wake=${activity.nextWakeAt}`);
+    }
     if (thread.id === proactiveSettings.threadId) {
       const due = Date.parse(activity.nextWakeAt || "");
       proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : activity.sleepPendingAt ? "waiting_for_sleep" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : "wake_due";
