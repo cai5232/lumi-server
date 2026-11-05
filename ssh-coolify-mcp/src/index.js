@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { Client } from 'ssh2';
 
 const port = Number(process.env.PORT || 8788);
@@ -76,7 +77,10 @@ function sshDiagnostic(check) {
   if (!command) throw new Error('不支持的只读诊断项');
   const host = requireEnv('SSH_HOST');
   const expectedFingerprint = requireEnv('SSH_HOST_FINGERPRINT').replace(/^SHA256:/, '');
-  const privateKey = requireEnv('SSH_PRIVATE_KEY').replace(/\\n/g, '\n');
+  const keyPath = String(process.env.SSH_PRIVATE_KEY_PATH || '').trim();
+  const privateKey = keyPath
+    ? readFileSync(keyPath, 'utf8')
+    : requireEnv('SSH_PRIVATE_KEY').replace(/\\n/g, '\n');
   const parsedPort = Number(process.env.SSH_PORT || 22);
   if (!Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) throw new Error('SSH_PORT 无效');
   return new Promise((resolve, reject) => {

@@ -48,12 +48,14 @@ SSH_HOST=<VPS hostname>
 SSH_PORT=22
 SSH_USER=lumiops
 SSH_HOST_FINGERPRINT=SHA256:<pinned host-key fingerprint>
-SSH_PRIVATE_KEY=<private key, multiline secret>
+SSH_PRIVATE_KEY_PATH=/run/secrets/lumi-vps-mcp
 COOLIFY_API_URL=https://<your-coolify-domain>
 COOLIFY_READ_API_TOKEN=<read:sensitive token>
 COOLIFY_DEPLOY_API_TOKEN=<deploy-only token>
 COOLIFY_ALLOWED_APP_UUIDS=<comma-separated exact application UUIDs>
 ```
+
+For the Coolify service, mount the host key file read-only at `/run/secrets/lumi-vps-mcp`. The image's `node` user is in GID 1001 (`mcpkey`); set the host file owner to `root:1001` and mode to `0440`. The service reads the file only when running the fixed SSH diagnostics. `SSH_PRIVATE_KEY` remains supported for local development, but prefer the mounted secret file in production.
 
 If the Coolify API is reachable from the service over a trusted private network, `COOLIFY_API_URL` may use its internal HTTP address; otherwise use HTTPS. The API token is sent only to this fixed URL. The service does not accept a URL or arbitrary resource target from tool arguments.
 
