@@ -88,3 +88,22 @@ test('exact token thresholds below 50 percent persist without rounding', async (
     }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('new default uses a 380k context limit and starts compression at 300k', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'lumi-compression-default-'));
+  try {
+    const store = await openCompressionSettings({ path: join(directory, 'settings.json'), contextLimitTokens: 380_000, defaultTriggerRatio: 300_000 / 380_000 });
+    assert.equal(store.snapshot.contextLimitTokens, 380_000);
+    assert.equal(store.snapshot.triggerTokensEstimate, 300_000);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('the previous 170k default migrates to the new 300k default', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'lumi-compression-migrate-'));
+  const path = join(directory, 'settings.json');
+  try {
+    await writeFile(path, JSON.stringify({ triggerTokens: 170_000 }));
+    const store = await openCompressionSettings({ path, contextLimitTokens: 380_000, defaultTriggerRatio: 300_000 / 380_000, legacyDefaultTriggerTokens: 170_000 });
+    assert.equal(store.snapshot.triggerTokensEstimate, 300_000);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
