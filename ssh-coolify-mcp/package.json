@@ -1,0 +1,10 @@
+{
+  "name": "lumi-vps-coolify-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Restricted SSH diagnostics and Coolify operations for Lumi over MCP Streamable HTTP",
+  "scripts": { "start": "node src/index.js" },
+  "dependencies": { "ssh2": "^1.16.0" },
+  "engines": { "node": ">=22.5.0" }
+}

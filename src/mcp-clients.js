@@ -87,6 +87,19 @@ export class McpClientStore {
         headers: { Authorization: `Bearer ${neteaseMcpToken}` }, tools: [], connectedAt: null
       }])[0]);
     }
+    const vpsMcpURL = String(process.env.LUMI_VPS_MCP_URL || '').trim();
+    const vpsMcpToken = String(process.env.LUMI_VPS_MCP_TOKEN || '').trim();
+    if (vpsMcpURL && vpsMcpToken) {
+      const existing = settings.servers.find(server => server.id === 'lumi-vps');
+      const next = normalizeMcpServers([{
+        id: 'lumi-vps', name: 'VPS 与 Coolify', enabled: existing?.enabled !== false,
+        url: vpsMcpURL, transport: 'streamable-http',
+        headers: { Authorization: `Bearer ${vpsMcpToken}` }, tools: existing?.tools || [],
+        connectedAt: existing?.connectedAt || null
+      }])[0];
+      if (existing) Object.assign(existing, next);
+      else settings.servers.push(next);
+    }
     return settings;
   }
   async save(input) {

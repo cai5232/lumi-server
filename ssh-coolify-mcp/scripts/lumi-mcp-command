@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# Installed root-owned on the VPS and forced from authorized_keys.
+# The SSH user has no sudo and no docker-group membership.
+case "${SSH_ORIGINAL_COMMAND:-}" in
+  'lumi-mcp uptime') exec /usr/bin/uptime ;;
+  'lumi-mcp disk') exec /usr/bin/df -h ;;
+  'lumi-mcp memory') exec /usr/bin/free -h ;;
+  'lumi-mcp failed_services') exec /usr/bin/systemctl --failed --no-pager ;;
+  'lumi-mcp recent_errors') exec /usr/bin/journalctl -p err --since '30 minutes ago' --no-pager -n 80 ;;
+  *) echo 'Command not allowed' >&2; exit 126 ;;
+esac
