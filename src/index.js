@@ -1,3 +1,4 @@
+import { callFocusTool, finishFocusJob, focusPhoneAvailable, focusTools, handleFocusMcp, pollFocusJob } from "./focus-mcp.js";
 import { createAppControlStore } from "./app-control.js";
 import { readNote, readNoteImage } from "./xiaohongshu.js";
 import { sleepMessageDecision, sleepInbox, sleepInboxContext, fullDreamRecall, dreamRecords, cleanDreamContent, acknowledgeSleepInbox, validateSoloSettings } from "./sleep-inbox.js";
@@ -2104,7 +2105,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", focusAuthorized = false, mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2206,6 +2207,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         : tool.inputSchema;
       mcpToolMap.set(name, { tool, execute: (args) => executeMailTool(tool.name, args, mailThreadId, autonomous), allowWrite: true });
       mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}${tool.name === "mail_send" && autonomous ? " 自主唤醒时只能发送给默认邮箱" : ""}`, parameters: schema && typeof schema === "object" ? schema : { type: "object", properties: {} } } });
+    }
+  }
+  if (mcpThreadId && focusAuthorized && !autonomous && focusPhoneAvailable()) {
+    for (const tool of focusTools) {
+      mcpToolMap.set(tool.name, { tool, allowWrite: true, execute: args => callFocusTool(tool.name, args) });
+      mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
     }
   }
   const appControlSettings = mcpThreadId ? await appControl.get() : { apps: [], autonomous: false };
@@ -2374,7 +2381,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, focusAuthorized, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2411,7 +2418,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, focusAuthorized, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2439,7 +2446,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, focusAuthorized, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2481,7 +2488,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && !emptyResponseRetried && !responseOutput.some(item => item?.type === "function_call")) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || data?.choices?.[0]?.finish_reason || "unknown"}; retrying once as JSON on the same route`);
-    return callModel({ signal, stream: false, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, returnMetadata });
+    return callModel({ signal, stream: false, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, focusAuthorized, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -3100,7 +3107,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false }) {
+async function generateReply({ focusAuthorized = false, input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3406,6 +3413,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     autonomous: proactive,
     mailThreadId: desktopCompanion ? "" : thread.id,
     mcpThreadId: desktopCompanion ? "" : thread.id,
+    focusAuthorized,
     proactive,
     onUsage: (usage) => {
       const { read: cachedRead, created: cachedWrite } = cacheUsage(usage);
@@ -4534,6 +4542,26 @@ const server = createServer(async (req, res) => {
       }
     }
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
+    if (url.pathname === "/v1/focus/mcp") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      const response = await handleFocusMcp(await body(req));
+      if (response === null) { res.writeHead(202); return res.end(); }
+      return send(res, 200, response);
+    }
+    if (url.pathname === "/v1/focus/device/poll" || url.pathname === "/v1/focus/device/finish") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      const input = await body(req);
+      if (typeof input.deviceID !== "string" || !/^[a-f0-9-]{36}$/i.test(input.deviceID)) {
+        return send(res, 400, { error: "invalid_device_id" });
+      }
+      if (url.pathname.endsWith("/poll")) return send(res, 200, { job: pollFocusJob(input.deviceID) });
+      if (typeof input.id !== "string" || typeof input.ok !== "boolean" || typeof input.message !== "string") {
+        return send(res, 400, { error: "invalid_result" });
+      }
+      return send(res, 200, { ok: finishFocusJob(input.deviceID, input.id, input.ok, input.message.slice(0, 300)) });
+    }
     if (url.pathname === "/v1/mcp/servers") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (req.method === "GET") return send(res, 200, await mcpSettingsResponse());
@@ -5741,7 +5769,7 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider, focusAuthorized: !storedDuringSleep && pushRequestAuthorized(req) });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
