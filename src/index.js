@@ -2210,13 +2210,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   const appControlSettings = mcpThreadId ? await appControl.get() : { apps: [], autonomous: false };
   if (mcpThreadId && appControlSettings.apps.length && (!autonomous || appControlSettings.autonomous)) {
-    const tool = { name: "lumi_app_control", description: "查看或调整任意指定 App 的自动跳回限制。可以新增 App 名称；仅已在手机配置自动化的 App 能实际跳回。不是系统级锁，用户可随时解除。", inputSchema: { type: "object", properties: { action: { type: "string", enum: ["status", "block", "unblock"] }, app: { type: "string" }, minutes: { type: "number", description: "限制时长（分钟），省略表示直到手动解除" } }, required: ["action"], additionalProperties: false } };
-    mcpToolMap.set(tool.name, { tool, appControlTool: true, allowWrite: true, execute: async args => {
-      if (args.action === "status") return appControl.get();
-      if (!["block", "unblock"].includes(args.action)) throw new Error("invalid_action");
-      return appControl.set({ app: args.app, blocked: args.action === "block", minutes: args.minutes ?? null }, { autonomous });
-    } });
-    mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+    const appControlTools = [
+      { name: "lumi_lock_app", description: "限制指定 App 并在设定时长后自动解除。每次调用都必须自行选择 minutes（1–1440 分钟）；根据用户要求或近期使用情况决定合适时长，不能省略或设为永久。", inputSchema: { type: "object", properties: { app: { type: "string", minLength: 1, description: "与 iPhone 快捷指令自动化中设置的 App 名称一致" }, minutes: { type: "integer", minimum: 1, maximum: 1440, description: "由 AI 根据当前情境决定的限制时长" } }, required: ["app", "minutes"], additionalProperties: false }, execute: args => appControl.set({ app: args.app, blocked: true, minutes: args.minutes }, { autonomous }) },
+      { name: "lumi_unlock_app", description: "立即解除指定 App 的限制；调用后会从当前受限列表中移除。", inputSchema: { type: "object", properties: { app: { type: "string", minLength: 1, description: "与锁定时相同的 App 名称" } }, required: ["app"], additionalProperties: false }, execute: args => appControl.set({ app: args.app, blocked: false }, { autonomous }) },
+      { name: "lumi_app_control_status", description: "查询当前已配置的 App 及其限制状态。", inputSchema: { type: "object", properties: {}, additionalProperties: false }, execute: () => appControl.get() }
+    ];
+    for (const tool of appControlTools) {
+      mcpToolMap.set(tool.name, { tool, appControlTool: true, allowWrite: tool.name !== "lumi_app_control_status", execute: tool.execute });
+      mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+    }
   }
   const foodToolsEnabled = Boolean(mcpThreadId && messages.some((message) =>
     typeof message.content === "string" && message.content.includes('<available_feature name="food_notebook">')));
@@ -3294,7 +3296,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `\n\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
   const configuredApps = !callMode ? await appControl.get() : { apps: [], autonomous: false };
-  const appControlDirective = configuredApps.apps.length ? `\n<available_feature name="app_control">用户已自愿设置快捷指令应用限制。可用 lumi_app_control 查询、设置或解除任意指定 App；当前名单为 ${configuredApps.apps.join("、")}。新增 App 时必须告知用户需在手机建立对应自动化。${configuredApps.autonomous ? "用户允许你在自主唤醒中自行决定锁定或解除应用；决定执行时必须在本轮实际调用 lumi_app_control，收到成功结果后才能说已锁定或已解除。历史 recorded_tool_results 只是过去记录，不能复制成当前结果，也不能代替本轮工具调用。" : "仅在用户提出要求时调整。"}这是打开后跳回 Lumi，不是系统级锁；快捷指令是否已在手机上配置无法由此确认。调用失败时如实说明。不要输出 recorded_tool_results 或手写工具返回值。</available_feature>` : "";
+  const appControlDirective = configuredApps.apps.length ? `\n<available_feature name="app_control">用户已自愿设置快捷指令应用限制。工具分别为 lumi_lock_app、lumi_unlock_app、lumi_app_control_status；当前登记的 App：${configuredApps.apps.join("、")}。${configuredApps.autonomous ? "用户允许你在自主唤醒时根据近期使用记录自主选 App 和限制时长。需要锁定时，必须调用 lumi_lock_app 并明确填写 minutes（1–1440）；根据使用情况选一个合适时长，不用固定时间表，也不能省略时长。需要解除时必须调用 lumi_unlock_app。" : "仅在用户提出要求时调整；用户没说时长时，你仍可根据情境选择 minutes（1–1440）。"}工具可新增 App 名称，但只有手机已经为该 App 设置“打开 App 时”快捷指令自动化才会生效。限制到时后自动解除；也可随时用解锁工具解除。只有本轮工具返回成功后才能说已锁定或已解除。工具调用失败时如实说明，不要假装执行。</available_feature>` : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
   // The backend-owned prompt is canonical. Ignore legacy LUMI_SYSTEM_PROMPT
   // and client-supplied systemPrompt so old persona text cannot replace it.
