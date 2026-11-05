@@ -2217,7 +2217,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   const focusWake = apnsConfigured() ? wakeFocusPhone : undefined;
   const focusCanWake = Boolean(focusWake && focusBackgroundAvailable());
-  if (mcpThreadId && (autonomous ? focusCanWake : focusAuthorized && (focusPhoneAvailable() || focusCanWake))) {
+  if (mcpThreadId && (autonomous ? focusCanWake : focusAuthorized)) {
     for (const tool of focusTools) {
       if (autonomous && tool.name !== "lock_app") continue;
       mcpToolMap.set(tool.name, { tool, focusTool: true, allowWrite: true, execute: args => callFocusTool(tool.name, args, { autonomous, wake: focusWake }) });
@@ -3300,7 +3300,7 @@ async function generateReply({ focusAuthorized = false, input, worldBookInput = 
   const calendarDirective = !proactive && !callMode
     ? `\n\n<calendar_decision_instructions>若用户这条消息明确说了与她本人有关的已确定未来安排，在正常回复末尾附加隐藏标签 <calendar_events>{"events":[{"title":"简短标题","starts_at":"带时区ISO时间或YYYY-MM-DD","ends_at":"可选时间","precision":"time或day","confidence":0.0}]}</calendar_events>。当前时间：${new Intl.DateTimeFormat("zh-CN",{timeZone:process.env.LUMI_CALENDAR_TIMEZONE||"Asia/Shanghai",dateStyle:"full",timeStyle:"short"}).format(new Date())}。忽略假设、建议、他人安排、重复习惯及已发生事项，不补充未说出的细节。没有确定安排时不要输出标签。</calendar_decision_instructions>`
     : "";
-  const focusDirective = !callMode && apnsConfigured() && focusBackgroundAvailable()
+  const focusDirective = !callMode && (focusAuthorized || (apnsConfigured() && focusBackgroundAvailable()))
     ? "\n<focus_control>当本轮可用 lock_app 时，可以用它在 iPhone 上系统锁定其他 App。用户已在手机明确开启自主专注时，你可以在自主唤醒中自行选择目标和时长。只有当前确有专注需要才调用。用户要求解除限制时调用 unlock_app；锁定或解锁均必须依赖本轮手机成功回执，不得只用文字声称操作成功，超时或失败要如实说明。</focus_control>"
     : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
