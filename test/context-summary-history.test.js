@@ -70,3 +70,15 @@ test('history preserves exact tool outcomes without treating a failed call as su
   assert.ok(value.includes(JSON.stringify(calls)));
   assert.equal(context.historicalModelContent(value, calls), value);
 });
+
+
+test('compaction uses the chat persona, model, recent context and emotional section', async () => {
+  const { CHAT_SYSTEM_PROMPT } = await import('../src/chat-system-prompt.js');
+  let request;
+  await distillContextBatch(async value => { request = value; return {content:'<context_summary>【情感与关系】\n- 她很开心</context_summary>', finishReason:'stop'}; },
+    {summary:'旧摘要', chunk:'较早聊天', recentContext:'近期聊天', index:0, total:1, model:'chat-model', customProvider:{}, maxOutputTokens:1000});
+  assert.ok(request.messages[0].content.startsWith(CHAT_SYSTEM_PROMPT));
+  for (const text of ['情感层必须保留', '【情感与关系】', '-今天她的情绪状态', '- 有没有争吵或和解', '- 有没有说过值得记住的话']) assert.ok(request.messages[0].content.includes(text));
+  for (const text of ['旧摘要','较早聊天','近期聊天']) assert.ok(request.messages[1].content.includes(text));
+  assert.equal(request.model, 'chat-model');
+});
