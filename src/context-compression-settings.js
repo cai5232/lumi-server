@@ -6,14 +6,18 @@ export function validCompressionRatio(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0.5 && value <= 0.95;
 }
 
-export async function openCompressionSettings({ path, contextLimitTokens, defaultTriggerRatio }) {
+export async function openCompressionSettings({ path, contextLimitTokens, defaultTriggerRatio, legacyDefaultTriggerTokens = null }) {
   const minimumTriggerTokens = 1;
   const maximumTriggerTokens = Number.MAX_SAFE_INTEGER;
   const validTokens = value => Number.isSafeInteger(value) && value >= minimumTriggerTokens && value <= maximumTriggerTokens;
   let triggerTokens = Math.floor(contextLimitTokens * defaultTriggerRatio);
   try {
     const saved = JSON.parse(await readFile(path, 'utf8'));
-    if (validTokens(saved.triggerTokens)) triggerTokens = saved.triggerTokens;
+    if (validTokens(saved.triggerTokens)) {
+      triggerTokens = saved.triggerTokens === legacyDefaultTriggerTokens
+        ? Math.floor(contextLimitTokens * defaultTriggerRatio)
+        : saved.triggerTokens;
+    }
     else if (validCompressionRatio(saved.triggerRatio)) triggerTokens = Math.floor(contextLimitTokens * saved.triggerRatio);
   } catch (error) {
     if (error.code !== 'ENOENT') console.warn('Context compression settings could not be loaded; using the configured default.');
@@ -38,3 +42,4 @@ export async function openCompressionSettings({ path, contextLimitTokens, defaul
     }
   };
 }
+

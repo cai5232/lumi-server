@@ -19,7 +19,7 @@ npm run dev
 - 系统提示词：普通聊天和桌面伴读共用后端的规范系统提示词；桌面伴读额外附加 JSON 决策格式约束，不覆盖人物提示词
 - `LUMI_DATA_DIR`：建议设为 `/data`，并在部署平台挂载持久化 Volume 到 `/data`
 - `SENTINEL_INGEST_TOKEN`：快捷指令上报所选 App 的独立 Bearer 口令；不配置时该接口拒绝请求
-- 上下文压缩：以上游上一条请求实际输入 Token 数为依据，达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 后，在下一条普通聊天请求中单独调用摘要模型压缩较早历史；默认窗口 `200000`、触发比例 `0.85`（约 170k）。保留最近至少 `10` 轮、最多 `15` 轮完整对话，并以约 `20000` token 为尾部目标；摘要模型默认使用当前聊天模型，也可通过 `LUMI_COMPACTION_MODEL` 单独指定。电话和主动提醒请求不触发压缩。
+- 上下文压缩：以上游上一条请求实际输入 Token 数为依据，达到触发点后，在下一条普通聊天请求中单独调用摘要模型压缩较早历史；默认窗口 `380000`、触发点 `300000`。保留最近至少 `10` 轮、最多 `15` 轮完整对话，并以约 `20000` token 为尾部目标；摘要模型默认使用当前聊天模型，也可通过 `LUMI_COMPACTION_MODEL` 单独指定。电话和主动提醒请求不触发压缩。
 - `LUMI_MEMORY_API_URL`：记忆库地址，默认 `https://memorycore.zeabur.app`
 - `LUMI_MEMORY_API_KEY`：可选，记忆库 API Key
 - `LUMI_MEMORY_SEARCH_PATH`：可选，检索路径，默认 `/search`
@@ -169,7 +169,7 @@ Aria 没有 desire/fatigue 维度，因此旧 desire 驱动的自动 Solo 不参
 
 上游：[cai5232/murmur](https://github.com/cai5232/murmur)，原作者 fishisfish0614 (Fish 小鱼) 和 Keyan (克衍)。引擎 LICENSE 为 CC BY-NC-SA 4.0；以 LICENSE 为准。Lumi 仅通过 HTTP 使用独立引擎，详见 THIRD_PARTY_NOTICES.md。
 
-当上游上一条请求实际输入 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会在普通聊天回复前通过一条独立摘要请求，把较早历史蒸馏为 `<context_summary>`，然后用「系统提示词 + 滚动摘要 + 最近原文」替换旧上下文。默认 `LUMI_CONTEXT_LIMIT=200000`、`LUMI_COMPACT_AT=0.85`，即约 170k 触发；最近完整对话至少保留 10 轮、最多 15 轮，目标约 20k token。摘要会在后续压缩时与旧摘要增量合并，不修改或删除存档聊天记录。摘要调用沿用当前前端自定义 API 路线；默认使用聊天模型，`LUMI_COMPACTION_MODEL` 可选填单独的摘要模型名，`LUMI_COMPACT_SUMMARY_TOKENS` 可选调整摘要最大输出，默认 25000。
+当上游上一条请求实际输入 Token 达到触发点时，后端会在普通聊天回复前通过一条独立摘要请求，把较早历史蒸馏为 `<context_summary>`，然后用「系统提示词 + 滚动摘要 + 最近原文」替换旧上下文。默认 `LUMI_CONTEXT_LIMIT=380000`，从 `300000` token 开始压缩；最近完整对话至少保留 10 轮、最多 15 轮，目标约 20k token。摘要会在后续压缩时与旧摘要增量合并，不修改或删除存档聊天记录。摘要调用沿用当前前端自定义 API 路线；默认使用聊天模型，`LUMI_COMPACTION_MODEL` 可选填单独的摘要模型名，`LUMI_COMPACT_SUMMARY_TOKENS` 可选调整摘要最大输出，默认 25000。旧默认触发值 `170000` 会自动迁移到 `300000`，其他手动设置的触发值保留。
 
 每条消息会先由模型提取内部检索关键词，再向记忆库检索；关键词只用于记忆库请求，不会原样传给聊天模型。检索到的记忆正文会作为上下文注入模型。模型可在回复末尾使用内部 `<memory>...</memory>` 标记选择写入长期记忆，后端会移除该标记并在客户端显示“-------沈屿记下了这一刻-------”。
 
