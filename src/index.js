@@ -2829,8 +2829,9 @@ async function compactContext(thread, plan, { model, customProvider }) {
   for (const message of plan.olderMessages) {
     const body = String(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || "").trim();
     if (!body) continue;
-    const prefix = "<" + message.role + ">\n";
-    const suffix = "\n</" + message.role + ">";
+    const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role;
+    const prefix = "<" + speaker + ">\n";
+    const suffix = "\n</" + speaker + ">";
     const maxBodyLength = Math.max(512, maxChunkChars - prefix.length - suffix.length - 120);
     if (body.length <= maxBodyLength) {
       append(prefix + body + suffix);
@@ -2844,12 +2845,12 @@ async function compactContext(thread, plan, { model, customProvider }) {
   if (chunk) chunks.push(chunk);
   if (!chunks.length) return false;
 
-  const recentContext = plan.tailMessageCount ? contextMessages(thread).slice(-plan.tailMessageCount).map(message => `<${message.role}>\n${historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || ""}\n</${message.role}>`).join("\n\n") : "";
+  const recentContext = plan.tailMessageCount ? contextMessages(thread).slice(-plan.tailMessageCount).map(message => { const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role; return `<${speaker}>\n${historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || ""}\n</${speaker}>`; }).join("\n\n") : "";
 
   // Resume only when the previous summary, exact history and model route agree.
   const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    schemaVersion: "semantic-compaction-v5", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    schemaVersion: "semantic-compaction-v6", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
     through: plan.throughMessageId, chunks, recentContext, model: model, route: customProvider
   })).digest("hex");
   let checkpoint = null;
