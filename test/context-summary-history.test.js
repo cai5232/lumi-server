@@ -41,7 +41,7 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const calls = [];
   Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
-    extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch});
+    extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch, contextMessages: thread => thread.messages});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
   vm.runInContext(source.slice(source.indexOf('async function compactContext('), source.indexOf('\nconst backgroundCompactionJobs')), context);
   assert.ok(context.messageTokens(messages) < 100);
@@ -50,13 +50,16 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   assert.ok(context.messageTokens([hidden]) < 150, 'hidden history is counted after summary deduplication');
   const executed = [{name:'lookup', arguments:'{}', result:'verified tool output', succeeded:true}];
   messages.push({id:'b',role:'assistant',content:'查到了',toolCalls:executed});
-  const thread = {contextSummary:'当前摘要',messages};
-  await context.compactContext(thread, {olderMessages:messages,throughMessageId:'b'}, {model:'test',customProvider:{}});
+  const thread = {contextSummary:'当前摘要',messages: [...messages, {id:'c',role:'user',content:'近期言言'}, {id:'d',role:'assistant',content:'近期我'}]};
+  await context.compactContext(thread, {olderMessages:messages,throughMessageId:'b',tailMessageCount:2}, {model:'test',customProvider:{}});
   assert.equal(calls.length, 1);
   assert.ok(!JSON.stringify(calls).includes(summary));
   assert.ok(calls[0].messages[1].content.includes('当前摘要'));
   assert.ok(calls[0].messages[1].content.includes('原文'));
   assert.ok(calls[0].messages[1].content.includes(JSON.stringify(executed)), 'compaction must receive the actual tool result');
+  for (const label of ['<言言>','</言言>','<我>','</我>']) assert.ok(calls[0].messages[1].content.includes(label));
+  assert.ok(!calls[0].messages[1].content.includes('<assistant>'));
+  assert.ok(!calls[0].messages[1].content.includes('<user>'));
   assert.equal(thread.contextSummary, '新摘要');
   assert.equal(messages[0].modelContent.includes(summary), true);
 });
@@ -80,5 +83,6 @@ test('compaction uses the chat persona, model, recent context and emotional sect
   assert.ok(request.messages[0].content.startsWith(CHAT_SYSTEM_PROMPT));
   for (const text of ['情感层必须保留', '【情感与关系】', '-今天她的情绪状态', '- 有没有争吵或和解', '- 有没有说过值得记住的话']) assert.ok(request.messages[0].content.includes(text));
   for (const text of ['旧摘要','较早聊天','近期聊天']) assert.ok(request.messages[1].content.includes(text));
+  assert.ok(request.messages[0].content.includes('以“我”称呼自己，以“言言”称呼她'));
   assert.equal(request.model, 'chat-model');
 });
