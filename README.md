@@ -137,7 +137,7 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 - `GET /v1/watch/analysis-config`、`POST /v1/watch/analyze`：Bearer 鉴权；将当前视频帧转发给单独配置的 OpenAI 兼容视觉模型，不上传或保存完整视频
 - `POST /v1/memories`，JSON body：`{"content":"要记住的内容","threadId":"可选"}`
 - `/v1/letters-map`：经 Lumi API 授权后转发藏宝地图服务；需配置地图服务环境变量
-- `GET /v1/chats/:id/emotion/state|arc|history|regret|memory`，以及 `POST /v1/chats/:id/emotion/activate` / `POST /v1/chats/:id/emotion/memory`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
+- `GET /v1/chats/:id/emotion/state|mood|vitals|baselines|history|moved`，以及 `POST /v1/chats/:id/emotion/update|tick|sleep|snapshot|restore`；这些接口需要 `Authorization: Bearer <LUMI_PUSH_API_TOKEN>`
 - `POST /v1/companion/devices`、`POST /v1/companion/observe`、`DELETE /v1/companion/devices/:id`：macOS 桌面伴读配对与观察接口，使用独立的 `LUMI_DESKTOP_COMPANION_PAIR_TOKEN` 配对；观察按设备绑定的 Lumi 会话和自定义模型路由生成。观察请求可带 `force: true` 跳过两分钟冷却，仍受并发和请求预算限制。最近一次经过敏感信息过滤的屏幕文本、窗口标题和弹幕会作为该会话的隐藏模型上下文保存最多 6 小时，到期清理，不写入可见聊天记录或桌面事件日志
 
 ### Promise Alarm 约定提醒
@@ -155,13 +155,19 @@ Music routes use `LUMI_PUSH_API_TOKEN` Bearer authentication. The NetEase sessio
 
 Promise Alarm 上游代码及网页完整保存在 `promise-alarm/`，其原有 PolyForm Noncommercial 许可和 Required Notice 继续适用于该目录；详见 `promise-alarm/LICENSE` 和 `THIRD_PARTY_NOTICES.md`。
 
-### 情绪驱动力
+### 新版 Murmur / Aria
 
-所有聊天共用一份持久化的情绪状态，保存十类连续驱动力（想念、心软、心疼、好奇、促狭、躁动、后悔、欲望、低落、吃醋）。每 10 分钟向各自基线衰减；离线满 6 个 tick 后想念开始增长；最强驱动力达到 0.65 时每 20 分钟生成一条私密独白，达到 0.50 时按 Murmur 节奏经 Lumi APNs 推送。北京时间 16:00–00:00 静默时段会积攒想念推送，睡眠期间不发送情绪推送。普通聊天、哨兵主动消息、通话、梦境/睡眠阶段和图像整理请求都会收到这份共享驱动力上下文；动态情绪只放在每次请求的 user suffix，不拼进稳定缓存系统提示词。
+所有聊天共享独立部署的 FastAPI Murmur 引擎，完整使用 Aria 示例的 8 个维度：warmth、longing、playfulness、curiosity、excitement、worry、upset、pride。引擎负责惯性、饱和、限幅、每 5 分钟按真实时间衰减、时段缺席规则、晚安粘性、已读不回信号、会话恢复与派生体征。Lumi 不再运行另一套情绪计算，也不初始化旧值到新引擎。
 
-`emotion/state` 返回当前驱动力；`emotion/history?hours=24&n=500` 返回驱动力变化快照，背景 tick 每 10 分钟记录一次，聊天中的实际变化会立即记录，保留最近 7 天；`emotion/arc?type=murmur&n=20` 读取独白，`emotion/regret?n=20` 读取检讨，`emotion/memory` 读取长期/短期情绪记忆。`POST emotion/activate` 支持 `{"type":"activate"}`、`{"type":"boost","drive":"attachment","delta":0.1}`、`{"type":"write_arc","drive":"attachment","text":"..."}` 和 `{"type":"tick"}`。`POST emotion/memory` 支持 `{"content":"..."}` 写短期记忆（最多 500 字）或 `{"scope":"long","content":"..."}` 写长期记忆。
+感知层沿用用户选定的聊天模型与完整上下文，通过隐藏 emotion_update 标签提交 dimensions 增量及 moved 标记。引擎状态被翻译为倾向注入下一轮；主动行动仍由模型结合上下文及实际可用能力决定。Lumi 持久化待发送事件，每次重试保持同一个 event_id，引擎在状态文件中去重。
 
-此实现参考 [Murmur-50Feet](https://github.com/Nixie0/Murmur-50Feet)，保留其 MIT 许可，见 `THIRD_PARTY_NOTICES.md`。
+实际用户轮次发送 source=hook 的在场心跳。主动联系记录和用户自愿分享的设备活动信号分别接入 unanswered；普通助手回复不冒充主动联系，没有活动信号不会触发已读不回。晚安以 snapshot + restore 切换会话，保留 worry/upset 中达到 0.3 的未解决感受，再启用 sleep。服务被中断时由引擎保存 interrupted 快照。
+
+对外仍由 Lumi 的现有 Bearer 鉴权保护，返回原生 dimensions/state/vitals/history 格式。独立服务根路径为新版 FastAPI /docs，需要现有仪表盘登录。旧 Flask 页面、MCP、ntfy、arc/regret/memory/activate 旧情绪接口和旧本地情绪引擎均退出运行。旧持久化卷与情绪文件单独备份，不自动映射到 Aria。
+
+Aria 没有 desire/fatigue 维度，因此旧 desire 驱动的自动 Solo 不参与此情绪系统；用户主动调用的独立功能保留。心迹客户端必须升级为原生协议，不能继续按旧 drives 结构解码。
+
+上游：[cai5232/murmur](https://github.com/cai5232/murmur)，原作者 fishisfish0614 (Fish 小鱼) 和 Keyan (克衍)。引擎 LICENSE 为 CC BY-NC-SA 4.0；以 LICENSE 为准。Lumi 仅通过 HTTP 使用独立引擎，详见 THIRD_PARTY_NOTICES.md。
 
 当上游上一条请求实际输入 Token 达到 `LUMI_CONTEXT_LIMIT × LUMI_COMPACT_AT` 时，后端会在普通聊天回复前通过一条独立摘要请求，把较早历史蒸馏为 `<context_summary>`，然后用「系统提示词 + 滚动摘要 + 最近原文」替换旧上下文。默认 `LUMI_CONTEXT_LIMIT=200000`、`LUMI_COMPACT_AT=0.85`，即约 170k 触发；最近完整对话至少保留 10 轮、最多 15 轮，目标约 20k token。摘要会在后续压缩时与旧摘要增量合并，不修改或删除存档聊天记录。摘要调用沿用当前前端自定义 API 路线；默认使用聊天模型，`LUMI_COMPACTION_MODEL` 可选填单独的摘要模型名，`LUMI_COMPACT_SUMMARY_TOKENS` 可选调整摘要最大输出，默认 25000。
 

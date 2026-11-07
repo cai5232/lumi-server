@@ -62,7 +62,7 @@ test('settings endpoint validates values and uses persisted response', async () 
     assert.equal(exact.status, 200);
     assert.equal(exact.value.triggerTokensEstimate, 45001);
     assert.equal((await context.endpoint({ method: 'DELETE' })).status, 405);
-    const auth = source.slice(source.indexOf('    const callRoute ='), source.indexOf('    if (url.pathname === "/v1/internal/murmur/generate")'));
+    const auth = source.slice(source.indexOf('    const callRoute ='), source.indexOf('    const emotionMatch ='));
     vm.runInContext(`function authorize(req) { ${auth} return { status: 200 }; }`, context);
     context.pushRequestAuthorized = () => false;
     assert.equal(context.authorize({}).status, 401);

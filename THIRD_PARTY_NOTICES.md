@@ -12,33 +12,19 @@ including this adaptation is provided under AGPL-3.0. Its corresponding source
 is available at https://github.com/cai5232/lumi-server.
 Port and integration changes: 2026-10-03.
 
-Murmur-50Feet emotional drive model
-===================================
+Murmur native REST integration
+==============================
 
-The emotional-drive model in `src/emotion.js` is adapted from Murmur-50Feet:
-https://github.com/Nixie0/Murmur-50Feet
+Lumi now communicates over HTTP with the independent Murmur engine:
+https://github.com/cai5232/murmur
 
-Copyright (c) 2026 Nixie0
-
-MIT License
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+The engine's LICENSE is Creative Commons Attribution-NonCommercial-ShareAlike
+4.0 International. Copyright (c) 2026 fishisfish0614 (Fish 小鱼) and Keyan (克衍).
+The engine and its deployment modifications remain in their separate repository
+with their original LICENSE and attribution. The old Murmur-50Feet-derived
+src/emotion.js implementation has been removed from this version of Lumi.
+The new client transports native emotion deltas and reads native state; the
+Python engine exclusively owns its dynamics and persistence.
 
 Promise Alarm
 =============

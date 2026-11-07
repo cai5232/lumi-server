@@ -5,12 +5,29 @@ import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createEmotionState } from '../src/emotion-native.js';
 
 const listen = async server => { await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); return server.address().port; };
 
 test('chat saves a contextual feeling and presents its cause on the next turn without exposing the tag', async () => {
   const folder = await mkdtemp(join(tmpdir(), 'lumi-emotion-perception-'));
   const requests = [];
+  const state = createEmotionState();
+  const events = [];
+  const engine = createServer(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    if (req.url.startsWith('/emotion/history')) return res.end(JSON.stringify(events));
+    if (req.url === '/emotion/state') return res.end(JSON.stringify({ character: 'aria', dimensions: state.dimensions, mood: 'calm', saved_at: Date.now()/1000 }));
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const payload = JSON.parse(raw || '{}');
+    if (req.url === '/emotion/update') {
+      for (const [key, delta] of Object.entries(payload.dimensions)) state.dimensions[key] += delta;
+      if (payload.trigger) events.push({ trigger: payload.trigger, source: payload.source, state: { ...state.dimensions } });
+      return res.end(JSON.stringify({ applied: payload.dimensions, state: state.dimensions, mood: 'calm' }));
+    }
+    return res.end('{"ok":true}');
+  });
+  const enginePort = await listen(engine);
   const provider = createServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
@@ -23,7 +40,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
     if (main) {
       requests.push(body);
       content = requests.length === 1
-        ? '被你逗乐了，我也想逗你一下。<emotion_update>{"changes":{"mischief":0.02},"feeling":"被逗乐了","reason":"她拿刚才的小失误打趣"}</emotion_update>'
+        ? '被你逗乐了，我也想逗你一下。<emotion_update>{"dimensions":{"playfulness":0.02},"trigger":"她拿刚才的小失误打趣","moved":false}</emotion_update>'
         : '还惦记着刚才那个玩笑。';
     }
     res.end(JSON.stringify({ choices: [{ message: { content } }], usage: {} }));
@@ -35,7 +52,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
   const env = { ...process.env, PORT: String(port), LUMI_DATA_DIR: folder,
     LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`, LUMI_MODEL_API_KEY: 'test-only', LUMI_MODEL_NAME: 'test-model',
     LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`, LUMI_BACKGROUND_PULSE_MS: '60000', LUMI_CACHE_KEEPALIVE_ENABLED: 'false' };
-  delete env.MURMUR_SERVICE_URL;
+  env.MURMUR_SERVICE_URL = `http://127.0.0.1:${enginePort}`;
   const backend = spawn(process.execPath, ['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'], { cwd: new URL('..', import.meta.url), env, stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   try {
@@ -56,15 +73,15 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
     }
     assert.equal(requests.length, 2);
     const nextInput = requests[1].messages.filter(m => m.role === 'user').at(-1).content;
-    assert.match(nextInput, /触发：她拿刚才的小失误打趣/);
-    assert.match(nextInput, /被逗乐了/);
-    assert.match(nextInput, /促狭\+0.02/);
+    assert.match(nextInput, /近期实际触发：她拿刚才的小失误打趣/);
+    assert.doesNotMatch(nextInput, /mischief|jealousy/);
     const system = requests[1].messages.find(m => m.role === 'system').content;
-    assert.match(system, /先结合完整对话理解言言此刻的意思与感受/);
-    assert.match(system, /不要求每轮变化/);
-    const saved = JSON.parse(await readFile(join(folder, 'emotion-state.json'), 'utf8'));
-    assert.equal(saved.recentChanges.at(-1).reason, '她拿刚才的小失误打趣');
-    assert.ok(Math.abs(saved.drives.mischief - .22) < 1e-9);
+    assert.match(system, /连续情绪由新版 Murmur 引擎记录/);
+    assert.match(system, /没有变化可省略/);
+    const saved = JSON.parse(await readFile(join(folder, 'emotion-murmur-v2.json'), 'utf8'));
+    assert.equal(events.at(-1).trigger, '她拿刚才的小失误打趣');
+    assert.ok(Math.abs(saved.dimensions.playfulness - .12) < 1e-9);
+    assert.equal(saved.pendingMurmurUpdates.length, 0);
   } finally {
     if (backend.exitCode === null) {
       const exit = new Promise(resolve => backend.once('exit', resolve));
@@ -72,6 +89,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
       await exit;
     }
     await new Promise(resolve => provider.close(resolve));
+    await new Promise(resolve => engine.close(resolve));
     await rm(folder, { recursive: true, force: true });
   }
 });
