@@ -10,7 +10,7 @@ import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
-import { distillContextBatch } from "./context-summary.js";
+import { distillContextBatch, planDistillationChunks } from "./context-summary.js";
 import { assertChatContextBudget } from "./context-budget.js";
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
@@ -2692,7 +2692,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["concise-distiller-v2", model,
+  return createHash("sha256").update(JSON.stringify(["single-pass-distiller-v3", model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
@@ -2784,10 +2784,18 @@ async function compactContext(thread, plan, { model, customProvider }) {
 
   const recentContext = plan.tailMessageCount ? contextMessages(thread).slice(-plan.tailMessageCount).map(message => { const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role; return `<${speaker}>\n${historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || ""}\n</${speaker}>`; }).join("\n\n") : "";
 
+  const configuredSummaryLimit = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000);
+  const summaryLimit = Math.max(1024, Number.isFinite(configuredSummaryLimit) ? Math.floor(configuredSummaryLimit) : 25000);
+  const plannedChunks = planDistillationChunks(chunks, {
+    summary: thread.contextSummary || '', recentContext, contextLimitTokens, maxOutputTokens: summaryLimit
+  });
+  chunks.splice(0, chunks.length, ...plannedChunks);
+  console.info(`[compaction] plan mode=${chunks.length === 1 ? "single_pass" : "overflow_batches"} requests=${chunks.length}`);
+
   // Resume only when the previous summary, exact history and model route agree.
   const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
   const fingerprint = createHash("sha256").update(JSON.stringify({
-    schemaVersion: "semantic-compaction-v6", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
+    schemaVersion: "semantic-compaction-v7-single-first", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
     through: plan.throughMessageId, chunks, recentContext, model: model, route: customProvider
   })).digest("hex");
   let checkpoint = null;
@@ -2810,10 +2818,6 @@ async function compactContext(thread, plan, { model, customProvider }) {
     } finally { await unlink(temporaryPath).catch(() => {}); }
   };
   if (resumeIndex) console.info("[compaction] resuming at batch " + (resumeIndex + 1) + "/" + chunks.length);
-  // Preserve the previous generous default while allowing the configured output budget
-  // to pass through without an application-level upper cap.
-  const configuredSummaryLimit = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000);
-  const summaryLimit = Math.max(1024, Number.isFinite(configuredSummaryLimit) ? Math.floor(configuredSummaryLimit) : 25000);
   for (let i = resumeIndex; i < chunks.length; i++) {
     const batchStartedAt = Date.now();
     console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
