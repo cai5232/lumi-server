@@ -1,3 +1,5 @@
+import { buildReplyTiming, replySendTime } from "./reply-timing.js";
+import { LumiDayflow, TEMPORAL_DISCIPLINE_RULE } from "./dayflow-lumi.js";
 import { newIncomingCall, expireIncomingCall, claimMissedCallFollowUp, MISSED_CALL_INPUT } from "./incoming-call-lifecycle.js";
 import { CHAT_SYSTEM_PROMPT } from "./chat-system-prompt.js";
 import { createAppControlStore } from "./app-control.js";
@@ -100,6 +102,8 @@ const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const modelRequestStore = createModelRequestStore(dataDir);
 const requestFailures = new RequestFailureStore(join(dataDir, "request-failures.json"));
+const dayflow = new LumiDayflow({ directory: join(dataDir, "dayflow"), triggerTokens: () => compressionSettings.snapshot.triggerTokensEstimate, callModel });
+await dayflow.load();
 const proactiveSettingsPath = join(dataDir, "proactive-settings.json");
 const sentinelActivityPath = join(dataDir, "sentinel-activity.json");
 const soloSettingsPath = join(dataDir, "solo-settings.json");
@@ -1835,7 +1839,7 @@ async function followUpMissedCall(threadID, callID) {
         call.missedFollowUp.state = 'failed';
         return true;
       });
-      await requestFailures.record({ threadId: threadID, requestId: 'missed-call:' + callID, source: 'server', message: MISSED_CALL_INPUT, error, requestedAt }, { secrets: [route?.customProvider?.key, process.env.LUMI_PUSH_API_TOKEN] });
+      await requestFailures.record({ threadId: threadID, requestId: 'missed-call:' + callID, source: 'server', kind: 'call_follow_up', message: MISSED_CALL_INPUT, error, requestedAt }, { secrets: [route?.customProvider?.key, process.env.LUMI_PUSH_API_TOKEN] });
     }
     throw error;
   } finally {
@@ -2977,6 +2981,7 @@ async function commitBackgroundCompaction(id, previousSummary, previousBoundary,
 }
 
 function scheduleBackgroundCompaction(id, model, customProvider) {
+  if (dayflow.enabled) return;
   if (!id || !model || !customProvider || backgroundCompactionJobs.has(id)) return;
   const routeSignature = compactionRouteSignature(model, customProvider);
   backgroundCompactionJobs.add(id);
@@ -3044,6 +3049,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
 // Resume saved work after a rollout without requiring another oversized chat.
 // Only threads with both a paid checkpoint and their own saved custom route qualify.
 async function resumeInterruptedCompactions() {
+  if (dayflow.enabled) return;
   const threads = await readThreads();
   const routes = await readMurmurRoutes();
   for (const thread of Object.values(threads)) {
@@ -3131,7 +3137,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, replyTimingRequest = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3142,13 +3148,14 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   provider = "custom";
   // Compaction is scheduled after the chat turn is persisted; never block
   // the foreground HTTP request with multiple upstream distillation calls.
-  const compactionApplied = false;
+  let compactionApplied = false;
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
   // Keep the system prompt user-managed. The environment variable takes precedence;
   // do not append backend-authored persona or feature instructions here.
   let system = CHAT_SYSTEM_PROMPT;
+  if (dayflow.enabled && dayflow.config.mode !== "story") system += "\n\n" + TEMPORAL_DISCIPLINE_RULE;
   const mailSettings = await mcpClientStore.read();
   system += "\n\n【给言言改备注的方法】你可以根据自己的判断或当下心情决定要不要改言言的备注，不需要固定理由或频率，也不需要每次生成都改。要保存新备注时，直接在回复末尾附加隐藏标记 <user_remark>这里写新的备注</user_remark>（最多32个汉字）。服务端会从这个标记读取内容并自动保存到当前聊天的 aiRemark；备注弹窗会展示它。若这次不想改，就不要输出这个标记。标记不会显示给言言，也不要向她解释。";
   const mailToolsAvailable = !callMode && Boolean(thread?.id) &&
@@ -3198,7 +3205,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<core_memories source="memory_core" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</core_memories>`
     : "";
   const relevantMessages = [...new Map([...contextMessages(thread), ...sleepInbox(thread)].map(message => [message.id, message])).values()].sort((a,b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  const historicalImages = new Map(await Promise.all(relevantMessages.filter(message => message.role === "user" && message.modelImageIDs?.length).map(async message => [message.id, await loadChatImages(dataDir, message.modelImageIDs)])));
+  const historicalImages = dayflow.enabled && dayflow.config.mode !== "story" ? new Map() : new Map(await Promise.all(relevantMessages.filter(message => message.role === "user" && message.modelImageIDs?.length).map(async message => [message.id, await loadChatImages(dataDir, message.modelImageIDs)])));
   const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .flatMap((message) => {
@@ -3341,7 +3348,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const liveAttentionContext = buildLiveAttentionContext({ messages: relevantMessages, events: thread.liveAttentionEvents, allowUpdates: !proactive && !callMode && !desktopCompanion });
   const requestFailureContext = !proactive && !callMode && !desktopCompanion && thread?.id
     ? await requestFailures.context(thread.id) : { ids: [], content: "" };
-  const userModelContent = `${systemContext}${emotionDirective}\n${requestFailureContext.content}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${foodDirective}`;
+  const replyTiming = !callMode && !desktopCompanion ? buildReplyTiming({ thread, proactive, request: replyTimingRequest, failures: await requestFailures.read() }) : { content: "" };
+  let userModelContent = `${systemContext}${emotionDirective}\n${requestFailureContext.content}\n${replyTiming.content}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3359,6 +3367,25 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const worldBookSignature = createHash('sha256').update(JSON.stringify(activation.entries)).digest('hex');
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
   cacheSystem = injectedSystem[0].content;
+  const useDayflow = dayflow.enabled && dayflow.config.mode !== "story" && !desktopCompanion;
+  let dayflowProjection = null;
+  if (useDayflow) {
+    dayflowProjection = await dayflow.project({ thread, archive: relevantMessages, input: String(worldBookInput || input || ""),
+      overheadTokens: estimateTokens(cacheSystem) + estimateTokens(userModelContent) + 8000,
+      model, customProvider, signal });
+    userModelContent += dayflowProjection.suffix;
+    compactionApplied = dayflowProjection.rotated;
+    // Provider usage measured the preceding request, not this newly rebuilt
+    // projection. The actual outgoing body still gets its own capacity check.
+    thread.lastMeasuredInputTokens = 0;
+    if (dayflowProjection.warning) {
+      const failedAt = dayflow.lastRuns.get(thread.id)?.failedAt;
+      await requestFailures.record({ threadId: thread.id, requestId: "dayflow:" + failedAt, kind: "compaction", source: "server", message: String(worldBookInput || input || ""), error: dayflowProjection.warning, requestedAt: failedAt }, { secrets: [customProvider?.key] });
+      const updated = await requestFailures.context(thread.id);
+      userModelContent = requestFailureContext.content ? userModelContent.replace(requestFailureContext.content, updated.content) : userModelContent + "\n" + updated.content;
+      Object.assign(requestFailureContext, updated);
+    }
+  }
   const previousUserContent = previousUser
     ? (historicalModelContent(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
@@ -3366,7 +3393,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   // Text-only snapshots cannot substitute for attachments or executed tool results.
   const historyHasEvidence = relevantMessages.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length);
-  const exactCachedPrefix = !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const exactCachedPrefix = !useDayflow && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -3387,7 +3414,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? [...exactCachedPrefix, { role: "user", content: userModelContent, images }]
     : [
         { role: "system", content: cacheSystem },
-        ...history,
+        ...(dayflowProjection ? [...dayflowProjection.history, ...phoneHistory] : history),
         // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
         // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
         // invalidates the cache prefix even when all earlier chat turns are unchanged.
@@ -4568,6 +4595,15 @@ const server = createServer(async (req, res) => {
         return send(res, 502, { error: "letters_map_unavailable" });
       }
     }
+    if (url.pathname === "/v1/settings/dayflow") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method === "GET") return send(res, 200, await dayflow.status((await readThreads()).default));
+      if (req.method === "PATCH") {
+        try { await dayflow.configure(await body(req)); return send(res, 200, await dayflow.status((await readThreads()).default)); }
+        catch (error) { return send(res, 400, { error: error.message }); }
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
     if (url.pathname === "/v1/mcp/servers") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -4879,6 +4915,7 @@ const server = createServer(async (req, res) => {
       ok: true,
       requestLogVersion: "summary-details-no-images-v1",
       emptyResponseRecovery: "same-route-json-once-v1",
+      dayflow: await dayflow.status(activeThread),
       sleepInboxVersion: "v2",
       buildVersion,
       htmlCards: "separate-content-title-v1",
@@ -5613,7 +5650,7 @@ const server = createServer(async (req, res) => {
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" } : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
-      const storedUserMessage = { ...userMessage, requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
+      const storedUserMessage = { ...userMessage, clientSentAt: replySendTime(input.requestedAt, requestReceivedAt).at, ...(typeof input.timeZone === "string" ? { timeZone: input.timeZone } : {}), requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       if (images.length) storedUserMessage.modelImageIDs = await saveChatImages(dataDir, images);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
@@ -5673,7 +5710,7 @@ const server = createServer(async (req, res) => {
         estimateTokens(threads[id].cacheSystem || "") +
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
-      const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
+      const foregroundPlan = dayflow.enabled ? null : compactionPlan(threads[id], projectedInputTokens);
       if (foregroundPlan) {
         let foregroundCompacted = false;
         const routeSignature = compactionRouteSignature(selectedModel, customProvider);
@@ -5711,7 +5748,7 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, replyTimingRequest: { requestedAt: input.requestedAt, receivedAt: requestReceivedAt, timeZone: input.timeZone, userMessageID: storedUserMessage.id }, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);

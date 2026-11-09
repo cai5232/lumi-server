@@ -1,0 +1,42 @@
+{
+  "name": "dayflow-context",
+  "version": "0.3.0",
+  "description": "A cache-aware attention and forgetting layer for high-frequency everyday AI chat.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./adapters": "./src/adapters.js",
+    "./integrations/tidal-memory": "./src/integrations/tidal-memory.js",
+    "./stores/json-file": "./src/stores/json-file.js"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "example": "node examples/basic.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "llm",
+    "context-management",
+    "compaction",
+    "prompt-caching",
+    "ai-companion",
+    "memory"
+  ],
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0xblewalker/dayflow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0xblewalker/dayflow/issues"
+  },
+  "homepage": "https://github.com/0xblewalker/dayflow#readme"
+}
