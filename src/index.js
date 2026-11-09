@@ -1,3 +1,4 @@
+import { newIncomingCall, expireIncomingCall, claimMissedCallFollowUp, MISSED_CALL_INPUT } from "./incoming-call-lifecycle.js";
 import { CHAT_SYSTEM_PROMPT } from "./chat-system-prompt.js";
 import { createAppControlStore } from "./app-control.js";
 import { readNote, readNoteImage } from "./xiaohongshu.js";
@@ -1349,8 +1350,13 @@ async function persistChatThread(id, snapshot) {
     const messagesByID = new Map((Array.isArray(stored.messages) ? stored.messages : []).map((item) => [item.id, item]));
     for (const item of (Array.isArray(snapshot.messages) ? snapshot.messages : [])) messagesByID.set(item.id, item);
     const messages = Array.from(messagesByID.values()).sort((a, b) => new Date(a.createdAt).valueOf() - new Date(b.createdAt).valueOf());
+    const callsByID = new Map((stored.calls || []).map(call => [call.id, call]));
+    for (const call of snapshot.calls || []) {
+      const current = callsByID.get(call.id);
+      callsByID.set(call.id, current && ({ pending: 0, active: 1, ended: 2 }[current.state] > { pending: 0, active: 1, ended: 2 }[call.state]) ? current : call);
+    }
     const diaries = mergeDiaryEntries(stored.diaries || [], snapshot.diaries || []);
-    all[id] = { ...stored, ...snapshot, messages, diaries };
+    all[id] = { ...stored, ...snapshot, messages, diaries, calls: [...callsByID.values()] };
     // A chat started before asynchronous compaction may finish afterwards.
     // Preserve the newer on-disk summary instead of undoing that compaction.
     if (Date.parse(stored.compactedAt || "") > Date.parse(snapshot.compactedAt || "") ||
@@ -1737,22 +1743,14 @@ function extractScreenMarker(content) {
 }
 
 async function createIncomingCallInvite(thread, reason) {
-  const now = new Date();
-  const call = {
-    id: randomUUID(),
-    initiator: "assistant",
-    state: "pending",
-    reason: String(reason || "想听听你的声音").slice(0, 120),
-    createdAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 30_000).toISOString(),
-    turns: []
-  };
+  const call = newIncomingCall(reason);
   thread.calls = Array.isArray(thread.calls) ? thread.calls : [];
   thread.calls.push(call);
   return call;
 }
 
 function startIncomingCallRing(threadID, call) {
+  scheduleIncomingCallExpiry(threadID, call);
   const deadline = new Date(call.expiresAt).getTime();
   const ring = async () => {
     if (Date.now() >= deadline) return;
@@ -1767,6 +1765,91 @@ function startIncomingCallRing(threadID, call) {
     }
   };
   setTimeout(() => { void ring(); }, 2_000);
+}
+
+// Share the chat persistence queue for atomic pending -> active/ended transitions.
+async function mutateCallThread(id, change) {
+  const previous = chatPersistenceQueues.get(id) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    const threads = await readThreads();
+    const thread = threads[id];
+    if (!thread) return null;
+    const result = change(thread);
+    if (result !== false) await saveThreads(threads);
+    return result;
+  });
+  chatPersistenceQueues.set(id, operation);
+  try { return await operation; }
+  finally { if (chatPersistenceQueues.get(id) === operation) chatPersistenceQueues.delete(id); }
+}
+
+const incomingCallExpiryTimers = new Map();
+function scheduleIncomingCallExpiry(threadID, call) {
+  if (incomingCallExpiryTimers.has(call.id)) return;
+  const timer = setTimeout(() => {
+    incomingCallExpiryTimers.delete(call.id);
+    void expireAndFollowUpCall(threadID, call.id).catch(error => console.warn(`call expiry failed: ${error.message}`));
+  }, Math.max(0, Date.parse(call.expiresAt) - Date.now()));
+  timer.unref();
+  incomingCallExpiryTimers.set(call.id, timer);
+}
+async function expireAndFollowUpCall(threadID, callID) {
+  await mutateCallThread(threadID, thread => expireIncomingCall(thread, callID));
+  // Do not wait for model generation before returning a pending-call poll.
+  void followUpMissedCall(threadID, callID).catch(error => console.warn(`missed call follow-up failed: ${error.message}`));
+}
+async function followUpMissedCall(threadID, callID) {
+  while (activeChatThreads.has(threadID)) await new Promise(resolve => setTimeout(resolve, 50));
+  activeChatThreads.add(threadID);
+  chatRequestsInFlight += 1;
+  let claimed = false;
+  let route;
+  let requestedAt;
+  try {
+    claimed = await mutateCallThread(threadID, thread => claimMissedCallFollowUp(thread.calls?.find(call => call.id === callID)));
+    if (!claimed) return;
+    const thread = (await readThreads())[threadID];
+    requestedAt = thread.calls.find(call => call.id === callID).missedFollowUp.startedAt;
+    route = await callProviderRoute({}, thread);
+    const generated = await generateReply({ input: MISSED_CALL_INPUT, systemPrompt: thread.cacheRequestedSystemPrompt, thread, ...route });
+    if (!generated.content?.trim() && !generated.htmlContent) throw new Error('empty_missed_call_reply');
+    const message = { id: randomUUID(), role: 'assistant', content: extractDialMarker(generated.content).content, thinking: generated.thinking, toolCalls: generated.toolCalls || [], modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: generated.htmlContent ? 'mixed' : 'text', htmlContent: generated.htmlContent, htmlTitle: generated.htmlTitle, createdAt: new Date().toISOString(), missedCallID: callID };
+    // This one follow-up is a chat response, not another automatic redial.
+    thread.messages.push(message);
+    thread.calls.find(call => call.id === callID).missedFollowUp.state = 'completed';
+    thread.cacheKeepaliveMessages = null;
+    thread.cacheKeepaliveAssistantContent = '';
+    thread.cacheKeepalivePrefixHash = '';
+    thread.cacheKeepaliveAt = 0;
+    thread.cacheSystem = generated.cacheSystem;
+    await persistChatThread(threadID, thread);
+    await requestFailures.acknowledge(threadID, generated.requestFailureIDs || []);
+    await instantCommands.acknowledge(threadID, generated.commandFeedbackIDs || []);
+    await saveEmotionState();
+    await sendProactivePush(threadID, message.content);
+  } catch (error) {
+    if (claimed) {
+      await mutateCallThread(threadID, thread => {
+        const call = thread.calls?.find(call => call.id === callID);
+        if (call?.missedFollowUp?.state !== 'generating') return false;
+        call.missedFollowUp.state = 'failed';
+        return true;
+      });
+      await requestFailures.record({ threadId: threadID, requestId: 'missed-call:' + callID, source: 'server', message: MISSED_CALL_INPUT, error, requestedAt }, { secrets: [route?.customProvider?.key, process.env.LUMI_PUSH_API_TOKEN] });
+    }
+    throw error;
+  } finally {
+    activeChatThreads.delete(threadID);
+    chatRequestsInFlight -= 1;
+  }
+}
+async function resumeIncomingCalls() {
+  const threads = await readThreads();
+  for (const thread of Object.values(threads)) for (const call of thread.calls || []) {
+    if (call.initiator !== 'assistant') continue;
+    if (call.state === 'pending') startIncomingCallRing(thread.id, call);
+    else if (call.missedFollowUp?.state === 'pending') void followUpMissedCall(thread.id, call.id).catch(error => console.warn(`missed call recovery failed: ${error.message}`));
+  }
 }
 
 function estimateTokens(text) {
@@ -5124,10 +5207,7 @@ const server = createServer(async (req, res) => {
       const pending = (thread.calls || []).find((item) => item.initiator === "assistant" && item.state === "pending");
       if (!pending) return send(res, 200, { call: null });
       if (Date.now() >= new Date(pending.expiresAt || 0).getTime()) {
-        pending.state = "ended";
-        pending.endedAt = new Date().toISOString();
-        thread.messages.push({ id: randomUUID(), role: "assistant", content: `我刚刚想打电话给你，但你没有接到。${pending.reason || "等你有空再找我"}，不急，回来再和我说话。`, contentType: "call_status", callID: pending.id, callInitiator: "assistant", callStatus: "missed", createdAt: pending.endedAt });
-        await saveThreads(threads);
+        await expireAndFollowUpCall(thread.id, pending.id);
         return send(res, 200, { call: null });
       }
       return send(res, 200, { call: { callId: pending.id, reason: pending.reason, createdAt: pending.createdAt, expiresAt: pending.expiresAt } });
@@ -5141,8 +5221,23 @@ const server = createServer(async (req, res) => {
       const thread = threads[decodeURIComponent(rawThreadID)];
       const call = thread?.calls?.find((item) => item.id === callID && item.initiator === "assistant");
       if (!call) return send(res, 404, { error: "call_not_found" });
-      if (call.state !== "pending") return send(res, 409, { error: "call_not_pending" });
-      if (Date.now() >= new Date(call.expiresAt || 0).getTime()) return send(res, 410, { error: "call_expired" });
+      const outcome = await mutateCallThread(decodeURIComponent(rawThreadID), current => {
+        const target = current.calls?.find(item => item.id === callID);
+        if (target?.state !== 'pending') return { error: 'call_not_pending', status: 409 };
+        if (Date.now() >= Date.parse(target.expiresAt)) {
+          expireIncomingCall(current, callID);
+          return { error: 'call_expired', status: 410 };
+        }
+        target.state = action === 'accept' ? 'active' : 'ended';
+        if (action === 'accept') target.startedAt = new Date().toISOString();
+        else target.endedAt = new Date().toISOString();
+        return { call: structuredClone(target) };
+      });
+      if (outcome?.error) {
+        if (outcome.status === 410) void followUpMissedCall(decodeURIComponent(rawThreadID), callID).catch(error => console.warn(error.message));
+        return send(res, outcome.status, { error: outcome.error });
+      }
+      Object.assign(call, outcome.call);
       const now = new Date().toISOString();
       if (action === "decline") {
         call.state = "ended";
@@ -5162,7 +5257,7 @@ const server = createServer(async (req, res) => {
         const callStatusMessage = { id: randomUUID(), role: "assistant", content: "", contentType: "call_status", callID: call.id, callInitiator: "assistant", callStatus: "rejected", createdAt: now };
         const assistantMessage = { id: randomUUID(), role: "assistant", content: generated.content || "没关系，你先忙，等你有空我们再说。", createdAt: now };
         thread.messages.push(callStatusMessage, assistantMessage);
-        await saveThreads(threads);
+        await persistChatThread(decodeURIComponent(rawThreadID), thread);
         await saveEmotionState();
         return send(res, 200, { callId: call.id, status: "declined", assistantMessage, callStatusMessage });
       }
@@ -5199,7 +5294,7 @@ const server = createServer(async (req, res) => {
         try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, softVoice: Boolean(input.softVoice), maxChars: 900 }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
-      await saveThreads(threads);
+      await persistChatThread(decodeURIComponent(rawThreadID), thread);
       await saveEmotionState();
       const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
       return send(res, 200, { callId: call.id, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingSpeechText : null, speechError });
@@ -5822,6 +5917,7 @@ setInterval(async () => {
     } finally { sleepRadioRunning = false; }
   } catch (error) { console.warn("sleep radio scheduler failed: " + String(error.message || error)); }
 }, 20_000);
+void resumeIncomingCalls().catch(error => console.warn(`call recovery failed: ${error.message}`));
 server.listen(port, () => console.log(`Lumi server listening on :${server.address().port}`));
 void resumeInterruptedCompactions().catch(error => console.warn("[compaction] startup recovery failed: " + error.message));
 for (const signal of ["SIGINT", "SIGTERM"]) {
