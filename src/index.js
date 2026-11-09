@@ -2190,12 +2190,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   // Reserve at least 1024 tokens for the visible answer; small-output tasks
   // such as calendar extraction should not send an unusable thinking budget.
   const nativeThinkingBudget = Math.min(configuredThinkingBudget, outputTokenLimit - 1024);
-  // Sonnet 5.5 uses between_tools for text without up-front thinking.
-  // Newer Opus/Fable/Mythos models cannot disable thinking at all.
-  const quietThinking = /claude[-_/]?sonnet[-_.]?5[-_.]?5/i.test(model)
-    ? { thinking: { type: "between_tools" } }
-    : /claude[-_/]?(?:opus|fable|mythos)(?:[-_.]?5|[-_.]?preview)/i.test(model)
-      ? {} : { thinking: { type: "disabled" } };
+  // Suppress application-added thinking for distillation without imposing an
+  // optional thinking.type that the selected custom relay may not support.
+  const quietThinking = {};
   let requestBody = nativeAnthropic
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
@@ -2692,7 +2689,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["single-pass-distiller-v3", model,
+  return createHash("sha256").update(JSON.stringify(["single-pass-distiller-v4-relay-defaults", model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
