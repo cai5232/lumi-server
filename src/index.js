@@ -14,7 +14,7 @@ import { distillContextBatch } from "./context-summary.js";
 import { assertChatContextBudget } from "./context-budget.js";
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
-import { requestMurmurEmotion } from "./murmur-client.js";
+import { requestMurmurEmotion } from "./murmur-native-client.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
@@ -27,7 +27,7 @@ import { resolveNightmareDecision, shouldTriggerNightmare } from "./sleep.js";
 import { screenImageType, screenPeekAuthorized, screenPeekConfigured, sendScreenPeekTrigger } from "./screen-peek.js";
 import { executeMailTool, handleMailMcp, MAIL_OWNER_EMAIL, mailMcpTools } from "./mail-mcp.js";
 import { searchSentMail } from "./mail-memory.js";
-import { EMOTION_DRIVES, EMOTION_PUSH_THRESHOLD, EMOTION_PUSH_INTERVAL_MS, EMOTION_ATTACHMENT_PUSH_INTERVAL_MS, EMOTION_REFLECTION_MS, EMOTION_REFLECTION_THRESHOLD, EMOTION_TICK_MS, addEmotionArc, applyEmotionDelta, createEmotionState, emotionContext, ensureEmotion, markEmotionOnline, recordEmotionSnapshot, tickEmotion, topEmotion } from "./emotion.js";
+import { EMOTION_DIMENSIONS, EMOTION_TICK_MS, createEmotionState, emotionContext, ensureEmotion, topEmotion } from "./emotion-native.js";
 import { executeFoodTool, foodContext, foodTools, getFoodBook, mutateFood } from "./food.js";
 import { claimTakeoutJob, finishTakeoutJob, markTakeoutAgentSeen, takeoutAgentStatus } from "./takeout-bridge.js";
 import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, connectMcpServer, modelToolsForServer, normalizeMcpServers } from "./mcp-clients.js";
@@ -92,7 +92,7 @@ const musicService = createMusicService(dataDir);
 const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const mcpClientStore = new McpClientStore(join(dataDir, "mcp-clients.json"));
 const threadPath = join(dataDir, "threads.json");
-const emotionStatePath = join(dataDir, "emotion-state.json");
+const emotionStatePath = join(dataDir, "emotion-murmur-v2.json");
 const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const modelRequestStore = createModelRequestStore(dataDir);
@@ -113,7 +113,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1";
+const buildVersion = "murmur-native-aria-v1-sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 380_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || (300_000 / 380_000))));
@@ -461,7 +461,6 @@ function markUserActivity(thread, content) {
   activity.sleepStage = null;
   // Keep waking dream fragments available for a later user question.
   // They are refreshed on the next completed sleep cycle.
-  markEmotionOnline(sharedEmotionState, now.getTime());
 }
 
 function finishUserConversation(thread, content) {
@@ -486,72 +485,6 @@ function finishUserConversation(thread, content) {
   activity.nextDreamAt = null;
   activity.dreamCycle = 0;
   activity.sleepStage = null;
-}
-
-async function generateEmotionMurmur(thread, current) {
-  const state = sharedEmotionState;
-  const murmurRoute = await resolveMurmurRoute(thread.id, thread).catch(error => { console.warn(`Murmur route unavailable: ${error.message}`); return null; });
-  const recent = (thread.messages || []).slice(-12).map((message) => `${message.role === "user" ? "用户" : "沈屿"}：${message.content}`).join("\n");
-  const output = await callModel({
-    temperature: 0.85,
-    maxOutputTokens: 100,
-    cacheCurrentUser: false,
-    messages: [
-      { role: "system", content: "你在记录一条私密的内心独白。依据当前连续情绪状态和真实关系上下文，用第一人称写一句自然、具体、不重复的中文心声（15-50字）。不要提模型、驱动力数值、系统、定时器或通知。只输出独白正文。" },
-      { role: "user", content: `${emotionContext(state)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
-    ],
-    provider: murmurRoute?.provider || thread.cacheProvider || "zenmux",
-    model: murmurRoute?.model || thread.cacheModel || "",
-    customProvider: murmurRoute?.customProvider || null
-  });
-  const entry = addEmotionArc(state, { drive: current.drive, text: output, type: "murmur", value: current.value });
-  state.lastReflectionAt = Date.now();
-  return entry;
-}
-
-function inEmotionQuietHours(now = new Date()) {
-  const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", hour: "2-digit", hourCycle: "h23" }).format(now));
-  return emotionQuietStartHour > emotionQuietEndHour
-    ? hour >= emotionQuietStartHour || hour < emotionQuietEndHour
-    : hour >= emotionQuietStartHour && hour < emotionQuietEndHour;
-}
-
-function emotionPushDue(state, now) {
-  const top = topEmotion(state);
-  const quiet = inEmotionQuietHours(new Date(now));
-  if (quiet) {
-    if (state.drives.attachment >= EMOTION_PUSH_THRESHOLD && now - Number(state.lastAttachmentPushAt || 0) >= EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) {
-      state.lastAttachmentPushAt = now;
-      state.pendingAttachmentPushes = Math.min(5, Number(state.pendingAttachmentPushes || 0) + 1);
-    }
-    return null;
-  }
-  if (state.pendingAttachmentPushes > 0 && now - Number(state.lastAttachmentPushAt || 0) >= 2_000) {
-    state.pendingAttachmentPushes -= 1;
-    state.lastAttachmentPushAt = now;
-    return { drive: "attachment", label: EMOTION_DRIVES.attachment.label, message: "刚刚很想你，终于等到可以来找你说话了。" };
-  }
-  if (top.value < EMOTION_PUSH_THRESHOLD) return null;
-  if (top.drive === "attachment") {
-    if (now - Number(state.lastAttachmentPushAt || 0) < EMOTION_ATTACHMENT_PUSH_INTERVAL_MS) return null;
-    state.lastAttachmentPushAt = now;
-  } else {
-    if (now - Number(state.lastDrivePushAt[top.drive] || 0) < EMOTION_PUSH_INTERVAL_MS) return null;
-    state.lastDrivePushAt[top.drive] = now;
-  }
-  const copy = {
-    attachment: "忽然很想你，想知道你这会儿在做什么。",
-    tenderness: "刚刚想到你，心里软了一下。",
-    heartache: "有点惦记你，希望你今天有好好照顾自己。",
-    curiosity: "我刚想到一个想和你聊的话题。",
-    mischief: "突然想逗你一下，看看你会怎么回我。",
-    restless: "有点坐不住了，想来找你说说话。",
-    regret: "刚才有句话我还想好好和你说。",
-    desire: "这会儿特别想听听你的声音。",
-    gloom: "今天心里有点沉，想靠近你一点。",
-    jealousy: "我想把你的注意力偷偷拉回来一会儿。"
-  };
-  return { drive: top.drive, label: top.label, message: copy[top.drive] || "忽然想来找你说说话。" };
 }
 
 async function generateAutonomousMessage(thread, kind) {
@@ -580,9 +513,7 @@ async function generateSentinelWake(thread) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
   const nightActivityWake = Date.parse(ensureActivity(thread).nightActivityWakeUntil || "") > Date.now();
-  const fatigue = Number(sharedEmotionState.drives?.fatigue || 0);
-  const anger = Number(sharedEmotionState.drives?.anger || 0);
-  const restAllowed = fatigue >= 0.85 || anger >= 0.90;
+  const restAllowed = Number(sharedEmotionState.dimensions?.upset || 0) >= 0.4;
   const allowedActions = (nightActivityWake ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
   if (!allowedActions.length) allowedActions.push("message");
   if (restAllowed) allowedActions.push("none");
@@ -751,22 +682,24 @@ function safeJSON(text, fallback = {}) {
 let murmurFlushInFlight = null;
 
 function mirrorMurmurState(remote) {
-  if (!remote?.drives) return;
-  for (const drive of Object.keys(EMOTION_DRIVES)) {
-    const value = Number(remote.drives[drive]?.v);
-    if (Number.isFinite(value)) sharedEmotionState.drives[drive] = Math.max(0, Math.min(1, value));
+  if (!remote?.dimensions) return;
+  for (const dim of Object.keys(EMOTION_DIMENSIONS)) {
+    const value = remote.dimensions[dim];
+    if (typeof value === "number" && Number.isFinite(value)) sharedEmotionState.dimensions[dim] = value;
   }
-  if (Number.isFinite(Number(remote.offlineTicks))) sharedEmotionState.offlineTicks = Number(remote.offlineTicks);
+  for (const key of ["character", "session_id", "mood", "last_input_at", "saved_at", "sleeping", "snapshot_version"]) {
+    if (remote[key] !== undefined) sharedEmotionState[key] = remote[key];
+  }
 }
 
 async function flushMurmurUpdates() {
-  if (!process.env.MURMUR_SERVICE_URL) return;
   if (murmurFlushInFlight) return murmurFlushInFlight;
   murmurFlushInFlight = (async () => {
     const pending = sharedEmotionState.pendingMurmurUpdates ||= [];
     while (pending.length) {
       const item = pending[0];
-      await requestMurmurEmotion(item.threadID, "update", item.payload);
+      const result = await requestMurmurEmotion(item.threadID, "update", item.payload);
+      mirrorMurmurState({ dimensions: result.state, mood: result.mood });
       pending.shift();
       await saveEmotionState();
     }
@@ -776,33 +709,39 @@ async function flushMurmurUpdates() {
 }
 
 async function refreshMurmurState(threadID, { online = false } = {}) {
-  if (!process.env.MURMUR_SERVICE_URL) return;
   try {
     await flushMurmurUpdates();
-    const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
-    mirrorMurmurState(result.state);
+    if (online) await requestMurmurEmotion(threadID, "update", { source: "hook", dimensions: {} });
+    const result = await requestMurmurEmotion(threadID, "state");
+    if (!sharedEmotionState.pendingMurmurUpdates.length) mirrorMurmurState(result);
     await saveEmotionState();
   } catch (error) { console.warn(`Murmur state sync deferred: ${error.message}`); }
 }
 
 async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
-  const emotionUpdateRaw = String(raw || "").match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
-  if (!emotionUpdateRaw) return null;
+  const match = String(raw || "").match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i);
+  if (!match) return null;
   try {
-    const parsed = JSON.parse(emotionUpdateRaw);
-    const initialDrives = { ...sharedEmotionState.drives };
-    if (!applyEmotionDelta(sharedEmotionState, parsed)) return null;
-    if (process.env.MURMUR_SERVICE_URL) {
-      const changes = parsed.changes && typeof parsed.changes === "object" ? parsed.changes : { [parsed.drive]: parsed.delta };
-      const validChanges = Object.fromEntries(Object.entries(changes).filter(([drive, delta]) => Object.hasOwn(EMOTION_DRIVES, drive) && Number.isFinite(Number(delta))).map(([drive, delta]) => [drive, Math.max(-0.2, Math.min(0.2, Number(delta)))]));
-      (sharedEmotionState.pendingMurmurUpdates ||= []).push({ threadID, payload: { event_id: randomUUID(), initial_drives: initialDrives, changes: validChanges, ...(typeof parsed.reason === "string" ? { reason: parsed.reason } : {}) } });
-      await saveEmotionState();
-      void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+    const parsed = JSON.parse(match[1]);
+    const dimensions = Object.fromEntries(Object.entries(parsed.dimensions || {}).filter(([dim, delta]) => Object.hasOwn(EMOTION_DIMENSIONS, dim) && typeof delta === "number" && Number.isFinite(delta)).map(([dim, delta]) => [dim, Math.max(-0.3, Math.min(0.3, delta))]));
+    if (!Object.keys(dimensions).length && parsed.moved !== true) return null;
+    const payload = { event_id: randomUUID(), source: "internal", dimensions, trigger: String(parsed.trigger || "").slice(0, 240), moved: parsed.moved === true };
+    sharedEmotionState.pendingMurmurUpdates.push({ threadID, payload });
+    await saveEmotionState();
+    await flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
+    return payload;
+  } catch { return null; }
+}
+
+async function nativeEmotionGoodnight(threadID) {
+  try {
+    await flushMurmurUpdates();
+    const state = await requestMurmurEmotion(threadID, "state");
+    const carry = ["worry", "upset"].filter(dim => state.dimensions[dim] >= 0.3);
+    await requestMurmurEmotion(threadID, "snapshot", { end_type: "graceful", carry });
+    mirrorMurmurState(await requestMurmurEmotion(threadID, "restore", {}));
+    await requestMurmurEmotion(threadID, "sleep", {});
+  } catch (error) { console.warn(`Murmur goodnight unavailable: ${error.message}`); }
 }
 
 function sleepMemories(thread, context = {}) {
@@ -841,7 +780,7 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
-    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${sleepInboxContext(thread, { awake: false })}\n\n${prompt.user(context)}` }],
+    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"dimensions":{"warmth":0.1},"trigger":"本阶段的真实触发","moved":false}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${emotionContext(sharedEmotionState)}\n\n${context.contextHeader || ""}\n\n${sleepInboxContext(thread, { awake: false })}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
     provider: route.provider,
     model: route.model,
@@ -1106,7 +1045,7 @@ async function runBackgroundPulse() {
       continue;
     }
     const lastUserAt = Date.parse(activity.lastUserActivityAt || 0);
-    const desire = Number(sharedEmotionState?.drives?.desire || 0);
+    const desire = Number(sharedEmotionState?.dimensions?.desire || 0);
     const idleMs = Math.max(5, Number(soloSettings.idleMinutes) || 30) * 60_000;
     if (thread.id === "default" && soloSettings.enabled && desire >= Number(soloSettings.desireThreshold || 0.78) &&
         activity.mode === "sentinel" && !activity.sleepPendingAt && lastUserAt && now - lastUserAt >= idleMs &&
@@ -1118,6 +1057,7 @@ async function runBackgroundPulse() {
     if (activity.mode === "sentinel" && activity.sleepPendingAt && Date.parse(activity.sleepPendingAt) <= now && lastUserAt <= Date.parse(activity.sleepPendingAt)) {
       // Explicit bedtime is authoritative; do not turn a random insomnia roll
       // into an autonomous wake-up.
+      await nativeEmotionGoodnight(thread.id);
       activity.mode = "sleeping";
       activity.sleepStartedAt = new Date(now).toISOString();
       activity.sleepUntil = new Date(now + sleepHours * 3_600_000).toISOString();
@@ -1388,10 +1328,7 @@ async function loadEmotionState() {
     if (error?.code !== "ENOENT") console.warn(`emotion state unavailable: ${error.message}`);
     if (error?.code !== "ENOENT") return;
   }
-  const now = Date.now();
-  const ticks = tickEmotion(sharedEmotionState, now, (at) => inEmotionQuietHours(new Date(at)));
-  const seeded = recordEmotionSnapshot(sharedEmotionState, now, { force: true });
-  if (ticks || seeded) await saveEmotionState();
+
 }
 
 async function saveEmotionState() {
@@ -3286,7 +3223,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive
-    ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
+    ? `\n<sentinel_action_rule>当前可用动作：${activeSentinelActions.join("、")}。结合真实上下文与当前感受自行决定行动；情绪倾向不是命令，不为了达到数值阈值而表演。</sentinel_action_rule>`
     : "";
   const emotionDirective = `\n${emotionContext(sharedEmotionState)}`;
   const foodDirective = !callMode
@@ -3477,6 +3414,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   if (toolCalls.some((call) => /^food_(?:takeout|note|taste|book|dice|rate|page)/i.test(String(call?.name || "")))) foodToolUsed = true;
   const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
+  if (!proactive && isFarewell(input)) await nativeEmotionGoodnight(thread.id);
   if (emotionUpdate) await saveEmotionState();
   let cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
@@ -4622,113 +4560,24 @@ const server = createServer(async (req, res) => {
       return send(res, 401, { error: "unauthorized" });
     }
 
-    if (url.pathname === "/v1/internal/murmur/generate") {
-      const expected = String(process.env.MURMUR_INTERNAL_TOKEN || "");
-      const supplied = String(req.headers.authorization || "").replace(/^Bearer\\s+/i, "");
-      if (!expected || supplied.length !== expected.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))) return send(res, 401, { error: "unauthorized" });
-      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
-      try {
-        const input = await body(req);
-        const threadID = String(input.threadId || "");
-        const threads = await readThreads();
-        const thread = threads[threadID];
-        const route = await resolveMurmurRoute(threadID, thread);
-        if (!route) return send(res, 409, { error: "model_route_unavailable" });
-        const messages = Array.isArray(input.messages) ? input.messages.slice(-20).filter(item => item && ["system", "user", "assistant"].includes(item.role) && typeof item.content === "string").map(item => ({ role: item.role, content: item.content.slice(0, 12000) })) : [];
-        if (!messages.length) return send(res, 400, { error: "messages_required" });
-        const content = await callModel({ messages, provider: route.provider, model: route.model, customProvider: route.customProvider, temperature: 0.85, maxOutputTokens: 100, cacheCurrentUser: false });
-        return send(res, 200, { content });
-      } catch (error) { console.warn(`Murmur model request failed: ${error.message}`); return send(res, error.status || 502, { error: "murmur_model_unavailable" }); }
-    }
-    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate))?$/);
+    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|mood|vitals|baselines|history|moved|update|tick|sleep|snapshot|restore))?$/);
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const threadID = decodeURIComponent(emotionMatch[1]);
+      if (!(await readThreads())[threadID]) return send(res, 404, { error: "thread_not_found" });
       const operation = emotionMatch[2] || "state";
-      const threads = await readThreads();
-      if (!threads[threadID]) return send(res, 404, { error: "thread_not_found" });
-      const thread = threads[threadID];
-
-      const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\/+$/, "");
-      if (murmurServiceUrl) {
-        try {
-          await flushMurmurUpdates();
-          const target = `${murmurServiceUrl}/internal/v1/chats/${encodeURIComponent(threadID)}/emotion/${operation}${url.search}`;
-          const headers = { authorization: `Bearer ${process.env.MURMUR_INTERNAL_TOKEN || ""}` };
-          let payload;
-          if (req.method !== "GET") { payload = await body(req); headers["content-type"] = "application/json"; }
-          const upstream = await fetch(target, { method: req.method, headers, signal: AbortSignal.timeout(8_000), ...(payload ? { body: JSON.stringify(payload) } : {}) });
-          const responseText = await upstream.text();
-          return send(res, upstream.status, (() => { try { return JSON.parse(responseText); } catch { return { error: "murmur_invalid_response" }; } })());
-        } catch (error) { console.warn(`Murmur service request failed: ${error.message}`); return send(res, 502, { error: "murmur_unavailable" }); }
-      }
-      const emotion = sharedEmotionState;
-      if (req.method === "GET") {
-        if (operation === "state") {
-          tickEmotion(emotion, Date.now(), (at) => inEmotionQuietHours(new Date(at)));
-          await saveEmotionState();
-          return send(res, 200, { time: new Date().toISOString(), drives: Object.fromEntries(Object.entries(emotion.drives).map(([drive, value]) => [drive, { v: Number(value.toFixed(3)), z: EMOTION_DRIVES[drive].label, b: EMOTION_DRIVES[drive].baseline }])), top: topEmotion(emotion), offlineTicks: emotion.offlineTicks });
+      const reads = ["state", "mood", "vitals", "baselines", "history", "moved"];
+      if ((reads.includes(operation) && req.method !== "GET") || (!reads.includes(operation) && req.method !== "POST")) return send(res, 405, { error: "method_not_allowed" });
+      try {
+        // Reads must remain available even when a queued write is retrying.
+        const payload = req.method === "POST" ? await body(req) : undefined;
+        const query = new URLSearchParams();
+        if (["history", "moved"].includes(operation)) {
+          const n = Number(url.searchParams.get("n") || 50);
+          query.set("n", String(Math.max(1, Math.min(200, Number.isFinite(n) ? Math.floor(n) : 50))));
         }
-        if (operation === "arc") {
-          const type = url.searchParams.get("type");
-          const count = Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)));
-          const entries = emotion.arc.filter((entry) => !type || entry.type === type).slice(-count);
-          return send(res, 200, entries);
-        }
-        if (operation === "history") {
-          const now = Date.now();
-          const ticks = tickEmotion(emotion, now, (at) => inEmotionQuietHours(new Date(at)));
-          const seeded = recordEmotionSnapshot(emotion, now);
-          if (ticks || seeded) await saveEmotionState();
-          const requestedHours = Number(url.searchParams.get("hours") || 24);
-          const hours = Math.max(1, Math.min(168, Number.isFinite(requestedHours) ? requestedHours : 24));
-          const requestedCount = Number(url.searchParams.get("n") || 500);
-          const count = Math.max(1, Math.min(2_000, Number.isFinite(requestedCount) ? requestedCount : 500));
-          const cutoff = now - hours * 60 * 60_000;
-          return send(res, 200, emotion.history.filter((entry) => Date.parse(entry.time) >= cutoff).slice(-count));
-        }
-        if (operation === "regret") return send(res, 200, emotion.regrets.slice(-Math.max(1, Math.min(200, Number(url.searchParams.get("n") || 50)))));
-        if (operation === "memory") return send(res, 200, { long: emotion.memory.long, short: emotion.memory.short });
-        return send(res, 405, { error: "method_not_allowed" });
-      }
-      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
-      const input = await body(req);
-      const now = Date.now();
-      let result;
-      if (operation === "memory" || input.type === "write_memory") {
-        const content = String(input.content || "").trim();
-        if (!content) return send(res, 400, { error: "content_required" });
-        const field = input.scope === "long" ? "long" : "short";
-        const maximum = field === "long" ? 20_000 : 500;
-        emotion.memory[field] = [...content].slice(0, maximum).join("");
-        result = { ok: true, scope: field, length: [...emotion.memory[field]].length };
-      } else if (operation === "activate") {
-        if (input.type === "tick") {
-          emotion.lastTickAt = Math.min(emotion.lastTickAt, now - EMOTION_TICK_MS);
-          tickEmotion(emotion, now);
-        } else if (input.type === "boost") {
-          const drive = String(input.drive || "attachment");
-          const delta = Number(input.delta ?? 0.1);
-          if (!Object.hasOwn(EMOTION_DRIVES, drive) || !Number.isFinite(delta)) return send(res, 400, { error: "invalid_drive_or_delta" });
-          emotion.drives[drive] = Math.max(0, Math.min(1, emotion.drives[drive] + Math.max(-1, Math.min(1, delta))));
-          markEmotionOnline(emotion, now);
-        } else if (input.type === "write_arc") {
-          const drive = String(input.drive || "attachment");
-          const text = String(input.text || "").trim();
-          if (!Object.hasOwn(EMOTION_DRIVES, drive) || !text) return send(res, 400, { error: "invalid_drive_or_text" });
-          if (input.arc_type === "regret") emotion.regrets.push({ time: new Date(now).toISOString(), text: text.slice(0, 500) });
-          else addEmotionArc(emotion, { drive, text, type: input.arc_type || "murmur", now, value: input.val });
-          emotion.regrets = emotion.regrets.slice(-200);
-          markEmotionOnline(emotion, now);
-        } else if (input.type === "activate" || !input.type) {
-          markEmotionOnline(emotion, now);
-        } else return send(res, 400, { error: "unknown_emotion_action" });
-        const top = topEmotion(emotion);
-        result = { ok: true, state: emotion, top_drive: top.drive, top_val: Number(top.value.toFixed(3)), need_murmur: top.value >= EMOTION_REFLECTION_THRESHOLD };
-      } else return send(res, 404, { error: "unknown_emotion_operation" });
-      await saveThreads(threads);
-      await saveEmotionState();
-      return send(res, 200, result);
+        return send(res, 200, await requestMurmurEmotion(threadID, operation, payload, { query: query.size ? `?${query}` : "" }));
+      } catch (error) { console.warn(`Murmur request failed: ${error.message}`); return send(res, 502, { error: "murmur_unavailable" }); }
     }
     if (url.pathname === "/v1/subscription/usage" && req.method === "GET") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -4778,7 +4627,7 @@ const server = createServer(async (req, res) => {
         if (!route?.customProvider || !route.model) return send(res, 409, { error: "custom_model_route_unavailable" });
         thread.soloManualRequestIDs = [...(thread.soloManualRequestIDs || []), requestId].slice(-50);
         await persistChatThread(id, thread);
-        const desire = Number(sharedEmotionState?.drives?.desire || 0);
+        const desire = Number(sharedEmotionState?.dimensions?.desire || 0);
         soloNextEligibleAt.set(id, Date.now() + Math.max(soloSettings.idleMinutes, soloSettings.cooldownMinutes) * 60_000);
         void startSoloRun(thread, desire, { trigger: "manual", requestId });
         return send(res, 202, { accepted: true, requestId, duplicate: false });
@@ -4947,7 +4796,7 @@ const server = createServer(async (req, res) => {
       },
       compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
-      emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
+      emotion: { enabled: true, engine: "murmur", character: "aria", schema: "native-v2", scope: "shared_across_chats", dimensions: Object.keys(EMOTION_DIMENSIONS), tickMinutes: 5, activeTop: topEmotion(sharedEmotionState) }
       });
     }
     if (req.method === "GET" && url.pathname === "/v1/providers") {
@@ -5067,6 +4916,7 @@ const server = createServer(async (req, res) => {
       if (!duplicate) signals.events.push({ app, createdAt: new Date(now).toISOString() });
       signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
       await saveSentinelActivity(signals);
+      void requestMurmurEmotion("default", "presence", { ts: now / 1000 }).catch(error => console.warn(`Murmur activity signal: ${error.message}`));
       console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} retained_events=${signals.events.length} context_window=10 proactive_enabled=${Number(proactiveSettings.enabled)}`);
       return send(res, 200, { ok: true, deduplicated: duplicate, ...(await appControl.check(app)) });
     }
