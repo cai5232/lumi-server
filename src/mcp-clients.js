@@ -4,6 +4,11 @@ import { randomUUID } from 'node:crypto';
 
 const MAX_SERVERS = 30;
 export const ENGAWA_SERVER_ID = 'engawa-porch';
+export const MEMORY_SERVER_ID = 'nocturne-memory';
+export const MEMORY_TOOLS = Object.freeze(['breath', 'trace', 'hold', 'wander']);
+const memoryMcpURL = () => String(process.env.LUMI_MEMORY_API_URL || '').replace(/\/+$/, '') + '/mcp';
+const configuredMemory = server => server?.id === MEMORY_SERVER_ID && Boolean(process.env.LUMI_MEMORY_API_URL && process.env.LUMI_MEMORY_API_KEY) && server.url === memoryMcpURL();
+const requestHeaders = server => configuredMemory(server) ? { ...server.headers, authorization: `Bearer ${process.env.LUMI_MEMORY_API_KEY}` } : server.headers;
 export const ENGAWA_READ_ONLY_TOOLS = Object.freeze([
   'web_read', 'rss_read', 'shelf', 'shelf_suggest', 'sky_tonight', 'apod',
   'daily_art', 'arxiv_new', 'daily_poem', 'on_this_day', 'hobby_corner'
@@ -12,15 +17,16 @@ const privateHost = host => host === 'localhost' || host.endsWith('.local') || h
 
 export function modelToolsForServer(server) {
   const tools = Array.isArray(server?.tools) ? server.tools : [];
+  if (server?.id === MEMORY_SERVER_ID) return tools.filter(tool => MEMORY_TOOLS.includes(tool?.name));
   return server?.id === ENGAWA_SERVER_ID
     ? tools.filter(tool => ENGAWA_READ_ONLY_TOOLS.includes(tool?.name))
     : tools;
 }
 
-export function validateMcpURL(value, { allowZeaburInternal = false } = {}) {
+export function validateMcpURL(value, { allowZeaburInternal = false, allowConfiguredMemory = false } = {}) {
   let url;
   try { url = new URL(String(value || '').trim()); } catch { throw new Error('MCP URL 无效'); }
-  const trustedInternal = allowZeaburInternal && url.protocol === 'http:' && url.hostname.toLowerCase().endsWith('.zeabur.internal');
+  const trustedInternal = (allowZeaburInternal && url.protocol === 'http:' && url.hostname.toLowerCase().endsWith('.zeabur.internal')) || (allowConfiguredMemory && url.toString() === memoryMcpURL());
   if ((url.protocol !== 'https:' && !trustedInternal) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
   return url.toString();
 }
@@ -39,8 +45,9 @@ export function normalizeMcpServers(input) {
       if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,80}$/.test(key) || /^(host|content-length|connection|transfer-encoding)$/i.test(key)) throw new Error('MCP 请求头名称无效');
       headers[key] = String(value).slice(0, 4000);
     }
+    const configuredMemoryURL = configuredMemory(item);
     const configuredEngawaURL = id === ENGAWA_SERVER_ID && String(item.url || '').trim() === String(process.env.ENGAWA_MCP_URL || '').trim();
-    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
+    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL, allowConfiguredMemory: configuredMemoryURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
   });
 }
 
@@ -78,6 +85,16 @@ export class McpClientStore {
         id: ENGAWA_SERVER_ID, name: '檐廊 Engawa', enabled: true,
         url: engawaURL, headers: {}, tools: [], connectedAt: null
       }])[0]);
+    }
+    if (process.env.LUMI_MEMORY_API_URL && process.env.LUMI_MEMORY_API_KEY) {
+      const existing = settings.servers.find(server => server.id === MEMORY_SERVER_ID);
+      const url = memoryMcpURL();
+      const next = normalizeMcpServers([{
+        id: MEMORY_SERVER_ID, name: '长期记忆库', enabled: existing?.enabled !== false,
+        url, headers: {}, tools: existing?.url === url ? existing.tools || [] : [],
+        connectedAt: existing?.url === url ? existing.connectedAt || null : null
+      }])[0];
+      if (existing) Object.assign(existing, next); else settings.servers.push(next);
     }
     const neteaseMcpURL = process.env.LUMI_NETEASE_MCP_URL;
     const neteaseMcpToken = process.env.LUMI_NETEASE_MCP_TOKEN;
@@ -159,7 +176,7 @@ export async function mcpRequest(server, method, params = {}, session = null) {
   const id = randomUUID();
   const response = await fetch(server.url, {
     method: 'POST',
-    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...server.headers, ...(session ? { 'mcp-session-id': session } : {}) },
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...requestHeaders(server), ...(session ? { 'mcp-session-id': session } : {}) },
     body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
     signal: AbortSignal.timeout(20_000), redirect: 'error'
   });
@@ -174,10 +191,10 @@ export async function connectMcpServer(server) {
   const protocolVersion = '2025-03-26';
   const initialized = await mcpRequest(server, 'initialize', { protocolVersion, capabilities: {}, clientInfo: { name: 'Lumi', version: '1.0' } });
   if (initialized.sessionId) {
-    await fetch(server.url, { method: 'POST', headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...server.headers, 'mcp-session-id': initialized.sessionId }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), signal: AbortSignal.timeout(10_000), redirect: 'error' });
+    await fetch(server.url, { method: 'POST', headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...requestHeaders(server), 'mcp-session-id': initialized.sessionId }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), signal: AbortSignal.timeout(10_000), redirect: 'error' });
   }
   const listed = await mcpRequest(server, 'tools/list', {}, initialized.sessionId);
-  return { tools: Array.isArray(listed.result.tools) ? listed.result.tools : [], sessionId: listed.sessionId, serverInfo: initialized.result.serverInfo || null };
+  return { tools: modelToolsForServer({ ...server, tools: Array.isArray(listed.result.tools) ? listed.result.tools : [] }), sessionId: listed.sessionId, serverInfo: initialized.result.serverInfo || null };
 }
 
 export async function callMcpTool(server, name, args) {
