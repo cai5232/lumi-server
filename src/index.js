@@ -4564,7 +4564,9 @@ const server = createServer(async (req, res) => {
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const threadID = decodeURIComponent(emotionMatch[1]);
-      if (!(await readThreads())[threadID]) return send(res, 404, { error: "thread_not_found" });
+      // The default chat is created at startup. Reading the shared Aria engine
+      // must not parse the entire conversation archive on every polling request.
+      if (threadID !== "default" && !(await readThreads())[threadID]) return send(res, 404, { error: "thread_not_found" });
       const operation = emotionMatch[2] || "state";
       const reads = ["state", "mood", "vitals", "baselines", "history", "moved"];
       if ((reads.includes(operation) && req.method !== "GET") || (!reads.includes(operation) && req.method !== "POST")) return send(res, 405, { error: "method_not_allowed" });
