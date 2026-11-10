@@ -60,6 +60,7 @@ test('real chat and autonomous wake both deliver server-calculated reply timing'
   const prior=[{id:'legacy-end',role:'assistant',content:'旧聊天',createdAt:'2026-11-08T01:00:00Z'},...Array.from({length:24},(_,i)=>({id:'past-'+i,role:i%2?'assistant':'user',content:'这是当前会话里需要保留的原文。'.repeat(100)+i,createdAt:new Date(Date.parse('2026-11-09T01:00:00Z')+i*60000).toISOString()}))];
   await writeFile(join(folder,'context-compression.json'),JSON.stringify({triggerTokens:230000}));
   await writeFile(join(folder,'threads.json'),JSON.stringify({default:{id:'default',title:'test',messages:prior,compactedThroughMessageId:'legacy-end',contextSummary:'旧摘要的重要承诺',lastMeasuredInputTokens:230001,compactionCount:475}}));
+  await writeFile(join(folder,'request-failures.json'),JSON.stringify({events:[{id:'historic-error',key:'default:server:chat:historic-error',requestId:'historic-error',threadId:'default',kind:'chat',source:'server',message:'之前没发成功的话',error:'historic relay failure for continuity',requestedAt:'2026-11-09T00:00:00Z',failedAt:'2026-11-09T00:01:00Z',deliveredAt:'2026-11-09T00:02:00Z'}]}));
   const backend = spawn(process.execPath, ['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'], { cwd: new URL('..', import.meta.url), env, stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   try {
@@ -78,7 +79,7 @@ test('real chat and autonomous wake both deliver server-calculated reply timing'
     const enabled=await fetch(base+'/v1/settings/proactive',{method:'PUT',headers:{Authorization:'Bearer test-auth','content-type':'application/json'},body:JSON.stringify({enabled:true,threadId:'default',intervalMin:10,intervalMax:10,actions:{message:true,phone:false,screen:false}})});assert.equal(enabled.status,200);
     const saved=JSON.parse(await readFile(join(folder,'threads.json'),'utf8'));saved.default.activity.nextWakeAt=new Date(Date.now()-1000).toISOString();saved.default.activity.nextWakeSource='settings';await writeFile(join(folder,'timing-edit.tmp'),JSON.stringify(saved));await rename(join(folder,'timing-edit.tmp'),join(folder,'threads.json'));
     for(let i=0;i<80&&requests.length<2;i++)await new Promise(resolve=>setTimeout(resolve,100));
-    assert.equal(requests.length,2);const wake=extract(requests[1]);assert.equal(wake.mode,'autonomous_wake');assert.equal(wake.awaitingUserReply,true);assert.ok(wake.unansweredForSeconds>=0);assert.ok(wake.latestUserMessageAt);
+    assert.equal(requests.length,2);const wake=extract(requests[1]);assert.equal(wake.mode,'autonomous_wake');assert.match(requests[1].messages.filter(m=>m.role==='user').at(-1).content,/historic relay failure for continuity/);assert.equal(wake.awaitingUserReply,true);assert.ok(wake.unansweredForSeconds>=0);assert.ok(wake.latestUserMessageAt);
   } finally {
     if (backend.exitCode === null) {
       const exit = new Promise(resolve => backend.once('exit', resolve));

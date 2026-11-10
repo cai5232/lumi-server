@@ -16,3 +16,28 @@ test('shortcut timestamps show per-app local open times; legacy events explicitl
  const context=formatAppActivity([two,one],{now});assert.match(context,/微信（打开于 2026-11-09 19:58:02/);assert.match(context,/Safari（上报于 2026-11-09 19:55:03/);assert.ok(context.indexOf('微信')<context.indexOf('Safari'));assert.match(context,/未提供精确打开时间/);
  assert.equal(appOpenTiming({},now).openedAt,null);assert.equal(appOpenTiming({openedAt:'2099-01-01'},now).openedAt,null);assert.equal(appOpenTiming({timestamp:now/1000},now).openedAt,new Date(now).toISOString());
 });
+
+test('acknowledged errors remain visible across later requests and process restarts',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'lumi-failure-history-'));
+ try{
+  const path=join(dir,'failures.json');let store=new RequestFailureStore(path);
+  const id=await store.record({threadId:'default',requestId:'keep',message:'我昨天发出的消息',error:'HTTP 502: relay unavailable',requestedAt:'2026-11-09T11:20:00Z'});
+  await store.acknowledge('default',[id]);
+  for(let i=0;i<3;i++){
+   store=new RequestFailureStore(path);const context=await store.context('default');assert.deepEqual(context.ids,[]);
+   assert.match(context.content,/我昨天发出的消息/);assert.match(context.content,/HTTP 502/);assert.match(context.content,/11:20:00/);assert.match(context.content,/deliveredAt/);
+   assert.match(context.content,/不代表这次又失败/);
+  }
+ }finally{await rm(dir,{recursive:true,force:true});}
+});
+test('recent history stays bounded, prioritizes unseen errors, and leaves every original record stored',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'lumi-failure-history-'));
+ try{
+  const store=new RequestFailureStore(join(dir,'failures.json'));
+  for(let i=0;i<8;i++){
+   const id=await store.record({threadId:'default',requestId:'old-'+i,message:'长消息'.repeat(4000),error:'old-'+i,requestedAt:new Date(1762686000000+i*1000).toISOString()});await store.acknowledge('default',[id]);
+  }
+  const fresh=await store.record({threadId:'default',requestId:'fresh',message:'最新发送失败的消息',error:'fresh-error'});
+  const context=await store.context('default');assert.ok(context.ids.includes(fresh));assert.match(context.content,/fresh-error/);assert.ok(context.content.length<43000);assert.equal((await store.read()).length,9);
+ }finally{await rm(dir,{recursive:true,force:true});}
+});

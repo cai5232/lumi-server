@@ -77,6 +77,13 @@ test('failed chat content, error and request time reach the next successful mode
     const last=requests[2].messages.filter(m=>m.role==='user').at(-1).content;
     assert.match(last,/离线时我发过的话/);assert.match(last,/network disconnected/);
     assert.equal((last.match(/<request_failures/g)||[]).length,1);
+    assert.match(last,/第一条发出却报错的消息/);assert.match(last,/temporary relay failure/);
+    assert.match(last,/deliveredAt/);assert.match(last,/retention="recent-history"/);
+    response=await post('第四条消息，继续聊刚才的问题');assert.equal(response.status,200);
+    const fourth=requests[3].messages.filter(m=>m.role==='user').at(-1).content;
+    assert.match(fourth,/第一条发出却报错的消息/);assert.match(fourth,/network disconnected/);
+    assert.equal((fourth.match(/<request_failures/g)||[]).length,1);
+
   } finally {
     if (backend.exitCode === null) {
       const exit = new Promise(resolve => backend.once('exit', resolve));
