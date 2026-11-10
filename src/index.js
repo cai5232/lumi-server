@@ -5677,6 +5677,13 @@ const server = createServer(async (req, res) => {
         ? (await stickerStore.list()).stickers.find(sticker => sticker.image === stickerImageURL)
         : null;
       let modelMessageContent = isStickerMessage ? stickerMessageForModel(input, catalogSticker) : userMessage.content;
+      // HerVoice sends acoustic evidence separately from the visible transcript.
+      // Preserve it in model-facing history, including deferred replies, without exposing it as chat text.
+      if (typeof input.context === "string" && input.context.startsWith("用户发送真实语音，Groq 转写：")) {
+        const voiceEvidence = input.context.slice(0, 8000);
+        modelMessageContent += `\n\n<her_voice source="groq-transcript-and-hervoice-acoustics" reliability="weak-cues-not-facts">${voiceEvidence}</her_voice>`;
+      }
+
       if (isXHSMessage) {
         try {
           const card = JSON.parse(messageText);
