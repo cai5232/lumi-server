@@ -1,3 +1,4 @@
+import { isTrustedEphemera, ephemeraWriteAllowed, ephemeraTrace, sealEphemeraReply, ephemeraContext, EPHEMERA_MODEL_GUIDE } from "./ephemera-policy.js";
 import { buildReplyTiming, replySendTime } from "./reply-timing.js";
 import { LumiDayflow, TEMPORAL_DISCIPLINE_RULE } from "./dayflow-lumi.js";
 import { newIncomingCall, expireIncomingCall, claimMissedCallFollowUp, MISSED_CALL_INPUT } from "./incoming-call-lifecycle.js";
@@ -2182,10 +2183,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : cacheMessages(anthropicSafeMessages, model, cacheCurrentUser);
   const mcpSettings = mcpThreadId ? mailSettings : { servers: [] };
   const mcpServers = mcpSettings.servers.filter(server => server.enabled);
+  if (mcpServers.some(isTrustedEphemera)) {
+    const system = preparedMessages.find(message => message.role === "system");
+    if (system && typeof system.content === "string") system.content += "\n" + EPHEMERA_MODEL_GUIDE;
+    else if (system && Array.isArray(system.content)) system.content = [...system.content, { type: "text", text: EPHEMERA_MODEL_GUIDE }];
+  }
   // Keep Anthropic's remote MCP connector for server-configured providers.
   // Custom Anthropic relays instead receive ordinary Anthropic tool schemas;
   // Lumi executes those tools locally so the relay need not proxy MCP beta.
-  const nativeRemoteMcpServers = nativeAnthropic && !customProvider ? mcpServers.filter(server => server.id !== ENGAWA_SERVER_ID).map(server => {
+  const nativeRemoteMcpServers = nativeAnthropic && !customProvider ? mcpServers.filter(server => server.id !== ENGAWA_SERVER_ID && !isTrustedEphemera(server)).map(server => {
     const authorization = Object.entries(server.headers || {}).find(([key]) => key.toLowerCase() === "authorization")?.[1] || "";
     const token = authorization.replace(/^Bearer\s+/i, "").trim();
     return { id: server.id, type: "url", url: server.url, name: server.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64), ...(token ? { authorization_token: token } : {}) };
@@ -2205,7 +2211,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const [toolIndex, tool] of modelToolsForServer(server).entries()) {
       if (!tool?.name || tool.disabled === true) continue;
       const name = `mcp_${serverIndex}_${toolIndex}_${String(tool.name).replace(/[^A-Za-z0-9_-]/g, "_")}`.slice(0, 64);
-      mcpToolMap.set(name, { server, tool, allowWrite: server.id === "x-twikit" && server.url === "https://i2tgptdlhsalamb7rdleapzy.107.174.137.23.sslip.io/mcp" });
+      mcpToolMap.set(name, { server, tool, allowWrite: ephemeraWriteAllowed(server, tool) || (server.id === "x-twikit" && server.url === "https://i2tgptdlhsalamb7rdleapzy.107.174.137.23.sslip.io/mcp") });
       mcpTools.push({ type: "function", function: { name, description: `${server.name}: ${String(tool.description || "").slice(0, 500)}`, parameters: tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} } } });
     }
   }
@@ -2265,7 +2271,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool)
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || isTrustedEphemera(mcpToolMap.get(tool.name)?.server) || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
@@ -2411,7 +2417,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         continue;
       }
       if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false }));
         results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
@@ -2425,11 +2431,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, use.input || {}) } : {}) });
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, use.input || {}) } : {}) }));
         results.push({ type: "tool_result", tool_use_id: use.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: false }));
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
@@ -2441,8 +2447,8 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
       if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
-      if (!entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
+      if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false }));
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
@@ -2453,11 +2459,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, args) } : {}) });
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, args) } : {}) }));
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: String(call.function.arguments || "").slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push(ephemeraTrace(entry, { name: entry.tool.name, arguments: String(call.function.arguments || "").slice(0, 4000), result: output, succeeded: false }));
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
@@ -2516,7 +2522,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
   if (returnMetadata) return { content: content.trim(), finishReason };
-  const finalContent = nativeThinking ? `<thinking>${nativeThinking}</thinking>\n${content.trim()}` : content.trim();
+  const finalContent = sealEphemeraReply(content, nativeThinking, toolTrace);
   return toolTrace.length ? `${finalContent}\n<lumi_tool_calls>${JSON.stringify(toolTrace)}</lumi_tool_calls>` : finalContent;
 }
 
@@ -3349,7 +3355,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const requestFailureContext = !callMode && !desktopCompanion && thread?.id
     ? await requestFailures.context(thread.id) : { ids: [], content: "" };
   const replyTiming = !callMode && !desktopCompanion ? buildReplyTiming({ thread, proactive, request: replyTimingRequest, failures: await requestFailures.read() }) : { content: "" };
-  let userModelContent = `${systemContext}${emotionDirective}\n${requestFailureContext.content}\n${replyTiming.content}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${foodDirective}`;
+  const dateContext = !callMode && !desktopCompanion ? await ephemeraContext(mailSettings) : "";
+  let userModelContent = `${systemContext}${dateContext}${emotionDirective}\n${requestFailureContext.content}\n${replyTiming.content}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
