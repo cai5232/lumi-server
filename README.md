@@ -214,3 +214,18 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 压缩失败的冷却按模型、接口和凭据绑定；切换线路可立即重试，原线路的冷却会跨重启保留。冷却和已有任务会打印明确的 `[compaction] skipped` 日志。超量聊天会返回真实的摘要失败原因与重试时间，不再只显示通用上限错误。
 
 摘要正文默认以最多6,000字符为精简目标（小输出预算会同步降低目标）。达到输出上限或返回过长摘要时，保留全部输入材料，自动将目标减半重写一次，并明确关闭扩展思考。不会把截断结果当作成功，也不会自动提高付费输出上限。已完成批次的检查点继续复用。
+
+### Keepsake · 封存
+
+原生 Lumi 的「Us → 封存」使用以下接口，全部沿用 `LUMI_PUSH_API_TOKEN` 验证，并按聊天 ID 隔离：
+
+- `GET /v1/chats/:id/keepsakes`：返回 `{items: [...]}`。
+- `POST /v1/chats/:id/keepsakes`：`{msg_ids: [...], title, pre_you, send}`，只接受该会话真实存在的消息，保存原话和相邻上下文快照，十分钟内重复选择返回同一颗泡。
+- `PUT /v1/chats/:id/keepsakes/meta`：`{key, title?, tags?, pre_you?, wall?, glass?, askMe?, visit?}`。
+- `POST /v1/chats/:id/keepsakes/comments`：`{key, text, parent_id?, send}`。
+- `DELETE /v1/chats/:id/keepsakes/comments`：`{key, id}`，只删除用户留言，保留回复链。
+- `DELETE /v1/chats/:id/keepsakes`：`{key}`，删除泡泡。
+
+数据原子写入 `LUMI_DATA_DIR/keepsakes.json`，备份时包含此文件。部署服务端后再更新 iOS 客户端；无需另起 Python 服务或新增环境变量。AI 可以自主保存真实对话、回复发送给它的留言及补写前情；失败会留在可见回复中。私密留言不进入模型背景。实现参考 keepsake（MIT，© 2026 Elle & Matt）。
+
+验证：`node --test test/keepsakes.test.js test/keepsakes-api.test.js`，覆盖重启持久化、会话隔离、真实消息校验、并发留言、发送开关，以及一次真实 HTTP 聊天请求中 AI 收到留言并保存回复的完整路径。
