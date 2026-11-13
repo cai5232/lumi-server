@@ -25,7 +25,6 @@ test('invalid summaries never trigger a second model request', async () => {
   const failures = [
     { result: { content: '<context_summary>unfinished', finishReason: 'end_turn' }, error: /incomplete/ },
     { result: { content: '<context_summary>truncated', finishReason: 'max_tokens' }, error: /max_tokens/ },
-    { result: { content: '<context_summary>' + 'x'.repeat(6000) + '</context_summary>', finishReason: 'stop' }, error: /oversized/ },
     { thrown: Error('quota'), error: /quota/ },
     { thrown: Object.assign(Error('empty'), { code: 'empty_model_response' }), error: /empty/ }
   ];

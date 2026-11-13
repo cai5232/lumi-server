@@ -5,7 +5,9 @@ import { mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch } from '../src/context-summary.js';
+import { contextSummaryMessages, extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch } from '../src/context-summary.js';
+
+import { requestInputTokens } from '../src/context-budget.js';
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const start = source.indexOf('const compactionRetryAfter = new Map();');
@@ -18,32 +20,28 @@ async function harness(t, callModel) {
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const context = { dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
     process: { env: {} }, contextLimitTokens: 380000, console, callModel, historicalModelContent: value => value,
-    extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch };
+    contextSummaryMessages, requestInputTokens, distillContextBatch,
+    estimateTokens: value => requestInputTokens({ system: value }) - 1 };
   vm.createContext(context);
   vm.runInContext(source.slice(start, end) + source.slice(historyStart, historyEnd), context);
   return context;
 }
 
-test('a rejected non-compressing checkpoint is discarded so a later retry can recover', async t => {
-  let calls = 0;
-  const context = await harness(t, async () => ({
-    content: `<context_summary>${++calls === 1 ? 'x'.repeat(15000) : 'concise facts'}</context_summary>`,
-    finishReason: 'stop'
-  }));
-  // Isolate final checkpoint validation from the distiller's own length guard.
-  context.distillContextBatch = async (call, input) => {
-    const result = await call(input);
-    return {summary:extractCompleteContextSummary(result.content),finishReason:result.finishReason};
-  };
-  const thread = { id: 'retry', messages: [], cacheKeepaliveMessages: ['old-prefix'] };
-  const plan = { olderMessages: [{ id: 'old', role: 'user', content: 's'.repeat(16000) }], throughMessageId: 'old' };
-  await assert.rejects(context.compactContext(thread, plan, { model: 'test', customProvider: {} }), /non-compression/);
-  assert.equal(thread.contextSummary, undefined);
-  assert.deepEqual(thread.cacheKeepaliveMessages, ['old-prefix']);
-  assert.equal(await context.compactContext(thread, plan, { model: 'test', customProvider: {} }), true);
-  assert.equal(calls, 2, 'retry must request a fresh summary instead of replaying the rejected checkpoint');
-  assert.equal(thread.contextSummary, 'concise facts');
-  assert.equal(thread.cacheKeepaliveMessages, null);
+test('Sonnet 5.5 can send more history and return a larger summary than the old caps', async t => {
+  const history = '史'.repeat(450_000);
+  const summary = '新摘要'.repeat(5000);
+  const context = await harness(t, async request => {
+    assert.equal(request.maxOutputTokens, 128_000);
+    assert.ok(request.messages[1].content.includes(history));
+    assert.equal(request.singleAttempt, true);
+    return { content: `<context_summary>${summary}</context_summary>`, finishReason: 'end_turn' };
+  });
+  const thread = { contextSummary: '之前的摘要' };
+  await context.compactContext(thread, { olderMessages: [{ id: 'old', role: 'user', content: history }] },
+    { model: 'claude-sonnet-5-5', customProvider: { apiFormat: 'anthropic' } });
+  assert.equal(thread.contextSummary, summary);
+  assert.equal(thread.compactedThroughMessageId, 'old');
+  assert.equal(thread.compactedMessageOffset, 0);
 });
 
 test('one request advances only its own segment, and truncation preserves the saved position', async t => {
@@ -52,8 +50,8 @@ test('one request advances only its own segment, and truncation preserves the sa
     calls.push(request);
     return { content: '<context_summary>facts</context_summary>', finishReason: calls.length === 2 ? 'max_tokens' : 'stop' };
   });
-  context.process.env.LUMI_COMPACT_CHUNK_CHARS = '4000';
-  const text = 'A'.repeat(3989) + '😀  ' + 'B'.repeat(3994) + 'C'.repeat(200);
+  context.contextLimitTokens = requestInputTokens({ messages: contextSummaryMessages('previous', '') }) + 1000;
+  const text = '史'.repeat(995) + '😀  ' + '史'.repeat(1600);
   const messages = [{ id: 'long', role: 'user', content: text }, { id: 'tail', role: 'assistant', content: 'recent text' }];
   const thread = { id: 'resume', messages, contextSummary: 'previous' };
   const compress = () => context.compactContext(thread, { olderMessages: context.contextMessages(thread).filter(message => message.id === 'long') },
@@ -62,15 +60,16 @@ test('one request advances only its own segment, and truncation preserves the sa
   await compress();
   assert.equal(calls.length, 1);
   assert.equal(thread.compactedThroughMessageId, 'long');
-  assert.equal(thread.compactedMessageOffset, 3989);
-  assert.equal(context.contextMessages(thread)[0].content, text.slice(3989));
+  const firstOffset = thread.compactedMessageOffset;
+  assert.ok(firstOffset > 900 && firstOffset < 1000);
+  assert.equal(context.contextMessages(thread)[0].content, text.slice(firstOffset));
   assert.ok(!calls[0].messages[1].content.includes('recent text'));
   await assert.rejects(compress(), /did not finish normally/);
   assert.equal(calls.length, 2);
-  assert.equal(thread.compactedMessageOffset, 3989);
+  assert.equal(thread.compactedMessageOffset, firstOffset);
   await compress();
   assert.equal(calls.length, 3);
-  assert.ok(calls[2].messages[1].content.includes('😀  B'));
+  assert.ok(calls[2].messages[1].content.includes('😀  史'));
   const nextOffset = thread.compactedMessageOffset;
   assert.equal(context.contextMessages(thread)[0].content, text.slice(nextOffset));
   await compress();

@@ -11,8 +11,8 @@ import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
-import { distillContextBatch } from "./context-summary.js";
-import { assertChatContextBudget } from "./context-budget.js";
+import { contextSummaryMessages, distillContextBatch } from "./context-summary.js";
+import { assertChatContextBudget, requestInputTokens } from "./context-budget.js";
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
@@ -2764,7 +2764,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["single-request-distiller-v1", model,
+  return createHash("sha256").update(JSON.stringify(["model-window-distiller", model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
@@ -2828,11 +2828,17 @@ function compactionMessageBody(message) {
 
 async function compactContext(thread, plan, { model, customProvider }) {
   const summary = String(thread.contextSummary || "").trim();
-  const configuredChars = Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 180_000);
-  const maxChars = Math.min(
-    Math.max(4_000, Math.min(320_000, Number.isFinite(configuredChars) ? Math.floor(configuredChars) : 180_000)),
-    Math.floor(contextLimitTokens / 2)
-  );
+  // The relay may expose a smaller window than the published model spec.
+  const sonnet55 = /(?:^|\/)claude-sonnet-5[.-]5(?:$|[-:@])/i.test(model);
+  const modelContextTokens = sonnet55 ? 1_000_000 : contextLimitTokens;
+  // Anthropic Messages requires max_tokens. OpenAI-compatible routes can use their own default.
+  const nativeAnthropic = customProvider?.apiFormat === "anthropic";
+  const promptTokens = requestInputTokens({ messages: contextSummaryMessages(summary, "") });
+  const maxOutputTokens = nativeAnthropic
+    ? (sonnet55 ? 128_000 : Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192))
+    : undefined;
+  let remainingTokens = modelContextTokens - promptTokens - (maxOutputTokens || 0);
+  if (remainingTokens <= 0) throw new Error("existing summary leaves no room in the model context for history");
   let chunk = "";
   let throughMessageId;
   let offset = 0;
@@ -2843,11 +2849,24 @@ async function compactContext(thread, plan, { model, customProvider }) {
     const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role;
     const prefix = (chunk ? "\n\n" : "") + "<" + speaker + ">\n";
     const suffix = "\n</" + speaker + ">";
-    const available = maxChars - chunk.length - prefix.length - suffix.length;
-    if (available <= 0 || (chunk && body.length > available)) break;
-    let end = Math.min(body.length, available);
-    if (end < body.length && /[\uD800-\uDBFF]/.test(body[end - 1])) end--;
-    chunk += prefix + body.slice(0, end) + suffix;
+    const available = remainingTokens - estimateTokens(prefix) - estimateTokens(suffix);
+    if (available <= 0) break;
+    let end = body.length;
+    if (estimateTokens(body) > available) {
+      let low = 0;
+      let high = end;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (estimateTokens(body.slice(0, middle)) <= available) low = middle;
+        else high = middle - 1;
+      }
+      end = low;
+      if (/[\uD800-\uDBFF]/.test(body[end - 1])) end--;
+    }
+    if (!end) break;
+    const segment = body.slice(0, end);
+    chunk += prefix + segment + suffix;
+    remainingTokens = available - estimateTokens(segment);
     throughMessageId = message.id;
     if (end < body.length) {
       offset = previousOffset + end;
@@ -2856,13 +2875,8 @@ async function compactContext(thread, plan, { model, customProvider }) {
   }
   if (!throughMessageId) return false;
 
-  const configuredOutput = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 8192);
-  const maxOutputTokens = Math.max(1024, Math.min(8192, Number.isFinite(configuredOutput) ? Math.floor(configuredOutput) : 8192));
   console.info("[compaction] distilling one request chars=" + chunk.length + " summaryChars=" + summary.length);
   const result = await distillContextBatch(callModel, { summary, chunk, model, customProvider, maxOutputTokens });
-  if (!summary && chunk.length >= 12_000 && result.summary.length > chunk.length * 0.8) {
-    throw new Error("distiller summary is too close to source length; refusing non-compression");
-  }
   thread.contextSummary = result.summary;
   thread.compactionCount = (thread.compactionCount || 0) + 1;
   thread.compactedAt = new Date().toISOString();
