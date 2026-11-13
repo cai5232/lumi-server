@@ -10,15 +10,17 @@ import { extractCompleteContextSummary, isNormalModelCompletion, distillContextB
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
 const start = source.indexOf('const compactionRetryAfter = new Map();');
 const end = source.indexOf('\nconst backgroundCompactionJobs', start);
+const historyStart = source.indexOf('function contextMessages(');
+const historyEnd = source.indexOf('\nfunction messageTokens(', historyStart);
 
 async function harness(t, callModel) {
   const dataDir = await mkdtemp(join(tmpdir(), 'lumi-compaction-retry-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const context = { dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
-    process: { env: {} }, console, callModel, historicalModelContent: value => value,
+    process: { env: {} }, contextLimitTokens: 380000, console, callModel, historicalModelContent: value => value,
     extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch };
   vm.createContext(context);
-  vm.runInContext(source.slice(start, end), context);
+  vm.runInContext(source.slice(start, end) + source.slice(historyStart, historyEnd), context);
   return context;
 }
 
@@ -44,33 +46,45 @@ test('a rejected non-compressing checkpoint is discarded so a later retry can re
   assert.equal(thread.cacheKeepaliveMessages, null);
 });
 
-test('a truncated later batch preserves history and resumes only the unfinished batch', async t => {
-  let calls = 0;
-  const context = await harness(t, async () => {
-    calls++;
-    return { content: '<context_summary>facts</context_summary>', finishReason: calls === 2 || calls === 3 ? 'max_tokens' : 'stop' };
+test('one request advances only its own segment, and truncation preserves the saved position', async t => {
+  const calls = [];
+  const context = await harness(t, async request => {
+    calls.push(request);
+    return { content: '<context_summary>facts</context_summary>', finishReason: calls.length === 2 ? 'max_tokens' : 'stop' };
   });
   context.process.env.LUMI_COMPACT_CHUNK_CHARS = '4000';
-  const messages = [{ id: 'long', role: 'user', content: 's'.repeat(6000) }];
-  const original = JSON.stringify(messages);
-  const thread = { id: 'resume', messages, contextSummary: 'previous', compactedThroughMessageId: 'before', cacheKeepaliveMessages: ['prefix'] };
-  const plan = { olderMessages: messages, throughMessageId: 'long' };
-  await assert.rejects(context.compactContext(thread, plan, { model: 'test', customProvider: {} }), /did not finish normally/);
-  assert.equal(thread.contextSummary, 'previous');
-  assert.equal(thread.compactedThroughMessageId, 'before');
-  assert.deepEqual(thread.cacheKeepaliveMessages, ['prefix']);
-  await context.compactContext(thread, plan, { model: 'test', customProvider: {} });
-  assert.equal(calls, 4, 'successful first batch must not incur a second model request; only the unfinished batch retries');
-  assert.equal(JSON.stringify(messages), original);
+  const text = 'A'.repeat(3989) + '😀  ' + 'B'.repeat(3994) + 'C'.repeat(200);
+  const messages = [{ id: 'long', role: 'user', content: text }, { id: 'tail', role: 'assistant', content: 'recent text' }];
+  const thread = { id: 'resume', messages, contextSummary: 'previous' };
+  const compress = () => context.compactContext(thread, { olderMessages: context.contextMessages(thread).filter(message => message.id === 'long') },
+    { model: 'test', customProvider: {} });
+
+  await compress();
+  assert.equal(calls.length, 1);
   assert.equal(thread.compactedThroughMessageId, 'long');
-  assert.equal(thread.cacheKeepaliveMessages, null);
+  assert.equal(thread.compactedMessageOffset, 3989);
+  assert.equal(context.contextMessages(thread)[0].content, text.slice(3989));
+  assert.ok(!calls[0].messages[1].content.includes('recent text'));
+  await assert.rejects(compress(), /did not finish normally/);
+  assert.equal(calls.length, 2);
+  assert.equal(thread.compactedMessageOffset, 3989);
+  await compress();
+  assert.equal(calls.length, 3);
+  assert.ok(calls[2].messages[1].content.includes('😀  B'));
+  const nextOffset = thread.compactedMessageOffset;
+  assert.equal(context.contextMessages(thread)[0].content, text.slice(nextOffset));
+  await compress();
+  assert.equal(calls.length, 4);
+  assert.equal(thread.compactedMessageOffset, 0);
+  assert.equal(context.contextMessages(thread)[0].id, 'tail');
+  assert.equal(thread.messages[0].content, text);
 });
 
 function installForeground(context, compactContext) {
   const gateStart = source.indexOf('      if (foregroundPlan)');
   const gateEnd = source.indexOf('\n      generated = await generateReply', gateStart);
   Object.assign(context, { foregroundPlan: {}, backgroundCompactionJobs: new Set(), id: 'default',
-    threads: { default: {} }, selectedModel: 'test', customProvider: {},
+    threads: { default: {} }, foregroundCompactionAttempted: false, selectedModel: 'test', customProvider: {},
     persistChatThread: async () => {}, compactContext, projectedInputTokens:0, contextLimitTokens:200000 });
   vm.runInContext(`async function foreground() { ${source.slice(gateStart, gateEnd)} }`, context);
 }

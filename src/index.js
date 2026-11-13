@@ -1417,7 +1417,7 @@ async function persistChatThread(id, snapshot) {
     // Preserve the newer on-disk summary instead of undoing that compaction.
     if (Date.parse(stored.compactedAt || "") > Date.parse(snapshot.compactedAt || "") ||
         (stored.compactedAt && !snapshot.compactedAt)) {
-      for (const field of ["contextSummary", "compactionCount", "compactedAt", "compactedThroughMessageId"]) {
+      for (const field of ["contextSummary", "compactionCount", "compactedAt", "compactedThroughMessageId", "compactedMessageOffset"]) {
         all[id][field] = stored[field];
       }
       all[id].lastMeasuredInputTokens = 0;
@@ -2020,7 +2020,14 @@ function contextMessages(thread) {
     console.warn(`[compaction] boundary missing for thread=${thread.id || "default"}; using bounded recent history`);
     return messages.slice(-Math.max(2, Number(process.env.LUMI_COMPACT_FALLBACK_MESSAGES || 16)));
   }
-  return messages.slice(boundaryIndex + 1);
+  const offset = Number(thread.compactedMessageOffset) || 0;
+  if (offset <= 0) return messages.slice(boundaryIndex + 1);
+  const message = messages[boundaryIndex];
+  const remainder = compactionMessageBody(message).slice(offset);
+  return [
+    { ...message, content: remainder, modelContent: remainder, toolCalls: [], precedingUserModelContent: undefined },
+    ...messages.slice(boundaryIndex + 1)
+  ];
 }
 function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content) + 8 + (message.role === "assistant" && message.precedingUserModelContent ? estimateTokens(historicalModelContent(message.precedingUserModelContent)) + 8 : 0), 0); }
 function cacheUsage(usage = {}) {
@@ -2107,7 +2114,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
   return { topic: query, note, citations };
 }
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], signal, returnMetadata = false, stream = true, knownInputTokens = null, singleAttempt = false }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2316,7 +2323,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   console.info("[model-request-shape] " + JSON.stringify(safeRequestMetrics));
   let relay;
   try {
-    relay = await requestRelay({ url: apiURL, body: requestBody, signal: signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined), headers: {
+    relay = await requestRelay({ url: apiURL, body: requestBody, singleAttempt, signal: signal || (proactive ? sentinelGenerationControllers.get(mailThreadId)?.signal : undefined), headers: {
     "content-type": "application/json",
     accept: stream ? "text/event-stream" : "application/json",
     ...(!nativeAnthropic || !directAnthropicAPI ? { authorization: `Bearer ${apiKey}` } : {}),
@@ -2378,13 +2385,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
-  if (nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
+  if (!singleAttempt && nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
     return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
     : [];
-  if (nativeToolUses.length && mcpRound < 4) {
+  if (!singleAttempt && nativeToolUses.length && mcpRound < 4) {
     const results = [];
     for (const use of nativeToolUses.slice(0, 8)) {
       const entry = mcpToolMap.get(use.name);
@@ -2419,7 +2426,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     return callModel({ signal, stream, knownInputTokens, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, returnMetadata });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
-  if (Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
+  if (!singleAttempt && Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
     const results = [];
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
@@ -2484,7 +2491,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       .map((block) => typeof block === "string" ? block : block?.text || block?.content || "")
       .join("")
     : typeof rawContent === "string" ? rawContent : "";
-  if (!content.trim() && !emptyResponseRetried && !responseOutput.some(item => item?.type === "function_call")) {
+  if (!content.trim() && !singleAttempt && !emptyResponseRetried && !responseOutput.some(item => item?.type === "function_call")) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || data?.choices?.[0]?.finish_reason || "unknown"}; retrying once as JSON on the same route`);
     return callModel({ signal, stream: false, knownInputTokens, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, returnMetadata });
   }
@@ -2750,14 +2757,14 @@ function compactionPlan(thread, projectedInputTokens = 0) {
   const tail = tailTurns.flat();
   const older = messages.slice(0, Math.max(0, messages.length - tail.length));
   if (!older.length) return null;
-  return { tailMessageCount: tail.length, tailTurnCount: tailTurns.length, tailTokenCount, olderMessages: older, throughMessageId: older[older.length - 1].id };
+  return { olderMessages: older };
 }
 
 // A failed compaction must not stall every subsequent chat message.
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["concise-distiller-v2", model,
+  return createHash("sha256").update(JSON.stringify(["single-request-distiller-v1", model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
@@ -2815,107 +2822,52 @@ function setCompactionDiagnostics(id, patch) {
   compactionDiagnostics.set(id, { ...(compactionDiagnostics.get(id) || {}), ...patch, updatedAt: new Date().toISOString() });
 }
 
+function compactionMessageBody(message) {
+  return String(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || "").trim();
+}
+
 async function compactContext(thread, plan, { model, customProvider }) {
-  // Bound *every* distillation request, including a single enormous message.
-  // Keep all source text; chunk long messages instead of dropping any content.
-  const maxChunkChars = Math.max(4000, Math.min(320000, Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 60000)));
-  const chunks = [];
+  const summary = String(thread.contextSummary || "").trim();
+  const configuredChars = Number(process.env.LUMI_COMPACT_CHUNK_CHARS || 180_000);
+  const maxChars = Math.min(
+    Math.max(4_000, Math.min(320_000, Number.isFinite(configuredChars) ? Math.floor(configuredChars) : 180_000)),
+    Math.floor(contextLimitTokens / 2)
+  );
   let chunk = "";
-  const append = (part) => {
-    if (chunk && chunk.length + part.length + 2 > maxChunkChars) {
-      chunks.push(chunk);
-      chunk = "";
-    }
-    chunk += (chunk ? "\n\n" : "") + part;
-  };
+  let throughMessageId;
+  let offset = 0;
   for (const message of plan.olderMessages) {
-    const body = String(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || "").trim();
+    const previousOffset = message.id === thread.compactedThroughMessageId ? Number(thread.compactedMessageOffset) || 0 : 0;
+    const body = previousOffset ? message.content : compactionMessageBody(message);
     if (!body) continue;
     const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role;
-    const prefix = "<" + speaker + ">\n";
+    const prefix = (chunk ? "\n\n" : "") + "<" + speaker + ">\n";
     const suffix = "\n</" + speaker + ">";
-    const maxBodyLength = Math.max(512, maxChunkChars - prefix.length - suffix.length - 120);
-    if (body.length <= maxBodyLength) {
-      append(prefix + body + suffix);
-      continue;
-    }
-    for (let offset = 0, part = 1; offset < body.length; offset += maxBodyLength, part++) {
-      append(prefix + "[连续长消息片段 " + part + "]\n" +
-        body.slice(offset, offset + maxBodyLength) + suffix);
+    const available = maxChars - chunk.length - prefix.length - suffix.length;
+    if (available <= 0 || (chunk && body.length > available)) break;
+    let end = Math.min(body.length, available);
+    if (end < body.length && /[\uD800-\uDBFF]/.test(body[end - 1])) end--;
+    chunk += prefix + body.slice(0, end) + suffix;
+    throughMessageId = message.id;
+    if (end < body.length) {
+      offset = previousOffset + end;
+      break;
     }
   }
-  if (chunk) chunks.push(chunk);
-  if (!chunks.length) return false;
+  if (!throughMessageId) return false;
 
-  const recentContext = plan.tailMessageCount ? contextMessages(thread).slice(-plan.tailMessageCount).map(message => { const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role; return `<${speaker}>\n${historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || ""}\n</${speaker}>`; }).join("\n\n") : "";
-
-  // Resume only when the previous summary, exact history and model route agree.
-  const checkpointPath = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id || "default")).digest("hex").slice(0, 24) + ".json");
-  const fingerprint = createHash("sha256").update(JSON.stringify({
-    schemaVersion: "semantic-compaction-v6", boundary: thread.compactedThroughMessageId || "", summary: thread.contextSummary || "",
-    through: plan.throughMessageId, chunks, recentContext, model: model, route: customProvider
-  })).digest("hex");
-  let checkpoint = null;
-  try {
-    const saved = JSON.parse(await readFile(checkpointPath, "utf8"));
-    if (saved.fingerprint === fingerprint && Number.isInteger(saved.nextIndex) &&
-        saved.nextIndex >= 0 && saved.nextIndex <= chunks.length &&
-        typeof saved.summary === "string") checkpoint = saved;
-  } catch (error) {
-    if (error?.code !== "ENOENT") console.warn("[compaction] checkpoint ignored: " + error.message);
+  const configuredOutput = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 8192);
+  const maxOutputTokens = Math.max(1024, Math.min(8192, Number.isFinite(configuredOutput) ? Math.floor(configuredOutput) : 8192));
+  console.info("[compaction] distilling one request chars=" + chunk.length + " summaryChars=" + summary.length);
+  const result = await distillContextBatch(callModel, { summary, chunk, model, customProvider, maxOutputTokens });
+  if (!summary && chunk.length >= 12_000 && result.summary.length > chunk.length * 0.8) {
+    throw new Error("distiller summary is too close to source length; refusing non-compression");
   }
-  let summary = checkpoint ? checkpoint.summary : String(thread.contextSummary || "").trim();
-  const resumeIndex = checkpoint?.nextIndex || 0;
-  const saveCheckpoint = async (nextIndex, nextSummary) => {
-    await mkdir(dataDir, { recursive: true });
-    const temporaryPath = checkpointPath + "." + randomUUID() + ".tmp";
-    try {
-      await writeFile(temporaryPath, JSON.stringify({ fingerprint, nextIndex, summary: nextSummary }));
-      await rename(temporaryPath, checkpointPath);
-    } finally { await unlink(temporaryPath).catch(() => {}); }
-  };
-  if (resumeIndex) console.info("[compaction] resuming at batch " + (resumeIndex + 1) + "/" + chunks.length);
-  // Preserve the previous generous default while allowing the configured output budget
-  // to pass through without an application-level upper cap.
-  const configuredSummaryLimit = Number(process.env.LUMI_COMPACT_SUMMARY_TOKENS || 25000);
-  const summaryLimit = Math.max(1024, Number.isFinite(configuredSummaryLimit) ? Math.floor(configuredSummaryLimit) : 25000);
-  for (let i = resumeIndex; i < chunks.length; i++) {
-    const batchStartedAt = Date.now();
-    console.info("[compaction] distilling batch " + (i + 1) + "/" + chunks.length +
-      " chars=" + chunks[i].length + " summaryChars=" + summary.length);
-    let result;
-    try {
-      result = await distillContextBatch(callModel, {
-        summary, chunk: chunks[i], recentContext, index: i, total: chunks.length,
-        model: model, customProvider,
-        maxOutputTokens: summaryLimit
-      });
-    } catch (error) {
-      throw new Error("batch " + (i + 1) + "/" + chunks.length + " after " +
-        Math.round((Date.now() - batchStartedAt) / 1000) + "s: " + String(error.message || error));
-    }
-    console.info("[compaction] batch " + (i + 1) + "/" + chunks.length +
-      " completed in " + Math.round((Date.now() - batchStartedAt) / 1000) + "s finish=" + result.finishReason);
-    summary = result.summary;
-    await saveCheckpoint(i + 1, summary);
-  }
-  // Do not replace a shorter rolling context with a near-verbatim transcript.
-  // Only check the first distillation (no previous summary) to avoid penalizing
-  // later incremental batches that retain established long-term facts.
-  if (!String(thread.contextSummary || "").trim()) {
-    const sourceChars = chunks.reduce((total, part) => total + part.length, 0);
-    if (sourceChars >= 12000 && summary.length > Math.max(5000, Math.floor(sourceChars * 0.8))) {
-      // This completed checkpoint cannot pass validation. Let the next attempt
-      // distill again instead of replaying the same rejected summary forever.
-      await unlink(checkpointPath).catch(() => {});
-      throw new Error("distiller summary is too close to source length; refusing non-compression");
-    }
-  }
-  // Commit atomically only after every chunk succeeds.
-  thread.contextSummary = summary;
+  thread.contextSummary = result.summary;
   thread.compactionCount = (thread.compactionCount || 0) + 1;
   thread.compactedAt = new Date().toISOString();
-  thread.compactedThroughMessageId = plan.throughMessageId;
+  thread.compactedThroughMessageId = throughMessageId;
+  thread.compactedMessageOffset = offset;
   thread.lastMeasuredInputTokens = 0;
   thread.cacheKeepaliveMessages = null;
   thread.cacheKeepaliveAssistantContent = "";
@@ -2929,21 +2881,20 @@ const backgroundCompactionJobs = new Set();
 
 // Apply a finished summary to the freshest stored thread, never to a stale
 // in-memory copy. Keep all original messages for the conversation UI.
-async function commitBackgroundCompaction(id, previousSummary, previousBoundary, snapshot) {
+async function commitBackgroundCompaction(id, previousSummary, previousBoundary, previousOffset, snapshot) {
   const previous = chatPersistenceQueues.get(id) || Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
-    // Do not compete with an active chat's persistence.
-    if (activeChatThreads.has(id)) return false;
     const all = await readThreads();
     const current = all[id];
     if (!current || String(current.contextSummary || "") !== previousSummary ||
         String(current.compactedThroughMessageId || "") !== previousBoundary ||
-        !current.messages?.some(message => message.id === snapshot.compactedThroughMessageId) ||
-        activeChatThreads.has(id)) return false;
+        (Number(current.compactedMessageOffset) || 0) !== previousOffset ||
+        !current.messages?.some(message => message.id === snapshot.compactedThroughMessageId)) return false;
     current.contextSummary = snapshot.contextSummary;
     current.compactionCount = snapshot.compactionCount;
     current.compactedAt = snapshot.compactedAt;
     current.compactedThroughMessageId = snapshot.compactedThroughMessageId;
+    current.compactedMessageOffset = snapshot.compactedMessageOffset;
     current.lastMeasuredInputTokens = 0;
     current.cacheKeepaliveMessages = null;
     current.cacheKeepaliveAssistantContent = "";
@@ -2970,7 +2921,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const snapshot = threads[id];
         if (!snapshot) return;
         if (await compactionCoolingDown(id, routeSignature)) { logCompactionWait(id, "cooldown"); return; }
-        const plan = compactionPlan(snapshot);
+        const plan = compactionPlan(snapshot, messageTokens(contextMessages(snapshot)));
         if (!plan) {
           setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
           return;
@@ -2979,22 +2930,10 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         compactionRetryRoutes.set(id, routeSignature);
         const oldSummary = String(snapshot.contextSummary || "");
         const oldBoundary = String(snapshot.compactedThroughMessageId || "");
+        const oldOffset = Number(snapshot.compactedMessageOffset) || 0;
         const completed = await compactContext(snapshot, plan, { model, customProvider });
         if (!completed) return;
-        // A completed (and already paid-for) summary should not be discarded just
-        // because the next chat began during distillation. Wait for in-flight chat
-        // persistence to finish, keeping this job registered to avoid duplicate work.
-        for (let attempt = 0; activeChatThreads.has(id) && attempt < 90; attempt++) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-        if (activeChatThreads.has(id)) {
-          // Preserve successful checkpoint for a subsequent retry; do not
-          // restart expensive upstream distillation immediately.
-          compactionRetryAfter.set(id, Date.now() + 2 * 60_000);
-          setCompactionDiagnostics(id, { status: "deferred", reason: "chat_in_progress" });
-          return;
-        }
-        const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, snapshot);
+        const applied = await commitBackgroundCompaction(id, oldSummary, oldBoundary, oldOffset, snapshot);
         if (applied) {
           compactionRetryAfter.delete(id);
           await unlink(compactionCooldownPath(id)).catch(() => {});
@@ -3016,30 +2955,6 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
       }
     })();
   });
-}
-
-// Resume saved work after a rollout without requiring another oversized chat.
-// Only threads with both a paid checkpoint and their own saved custom route qualify.
-async function resumeInterruptedCompactions() {
-  const threads = await readThreads();
-  const routes = await readMurmurRoutes();
-  for (const thread of Object.values(threads)) {
-    if (!compactionPlan(thread)) continue;
-    const exact = [routes[thread.id], thread.modelRoute].some(route => route?.provider === "custom" && route.customProvider);
-    if (!exact) continue;
-    const path = join(dataDir, "compaction-" + createHash("sha256").update(String(thread.id)).digest("hex").slice(0, 24) + ".json");
-    try {
-      const checkpoint = JSON.parse(await readFile(path, "utf8"));
-      if (!Number.isInteger(checkpoint.nextIndex) || checkpoint.nextIndex < 1 || typeof checkpoint.summary !== "string") continue;
-    } catch (error) {
-      if (error?.code !== "ENOENT") console.warn("[compaction] recovery checkpoint ignored: " + error.message);
-      continue;
-    }
-    const route = await resolveMurmurRoute(thread.id, thread);
-    if (!route?.customProvider || !route.model) continue;
-    console.info("[compaction] startup recovery scheduled thread=" + thread.id);
-    scheduleBackgroundCompaction(thread.id, route.model, route.customProvider);
-  }
 }
 
 function chooseEmojiFromMood(mood, faces, reply) {
@@ -5671,6 +5586,7 @@ const server = createServer(async (req, res) => {
         catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
         if (!customProvider || !selectedModel) return send(res, 400, { error: "custom_provider_or_model_required" });
       }
+      let foregroundCompactionAttempted = false;
       const result = (async () => {
       const messageText = String(input.content || "").trim();
       const incomingActivity = ensureActivity(threads[id]);
@@ -5737,7 +5653,9 @@ const server = createServer(async (req, res) => {
         estimateTokens(threads[id].cacheSystem || "") +
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
-      const foregroundPlan = compactionPlan(threads[id], projectedInputTokens);
+      const overContextLimit = Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens;
+      const foregroundPlan = overContextLimit ? compactionPlan(threads[id], projectedInputTokens) : null;
+      // Ordinary replies can schedule a single background request after being saved.
       if (foregroundPlan) {
         let foregroundCompacted = false;
         const routeSignature = compactionRouteSignature(selectedModel, customProvider);
@@ -5747,6 +5665,7 @@ const server = createServer(async (req, res) => {
           logCompactionWait(id, "cooldown");
         } else {
           try {
+            foregroundCompactionAttempted = true;
             const applied = await compactContext(threads[id], foregroundPlan, { model: selectedModel, customProvider });
             if (applied) {
               foregroundCompacted = true;
@@ -5766,8 +5685,7 @@ const server = createServer(async (req, res) => {
         }
         // Surface the actual summary failure instead of replacing it with an
         // unrelated generic context-limit message on every subsequent send.
-        if (Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens &&
-            !foregroundCompacted) {
+        if (!foregroundCompacted && Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens) {
           const diagnostic = compactionDiagnostics.get(id);
           if (diagnostic?.status !== "succeeded") {
             const reason = diagnostic?.error || "压缩任务正在运行，请稍后重试。";
@@ -5875,7 +5793,7 @@ const server = createServer(async (req, res) => {
       await persistChatThread(id, threads[id]);
       await instantCommands.acknowledge(id, generated.commandFeedbackIDs || []).catch(error => console.warn(`command feedback acknowledgement failed: ${error.message}`));
       // Fire and forget: the current reply is not delayed by distillation.
-      scheduleBackgroundCompaction(id, selectedModel, customProvider);
+      if (!foregroundCompactionAttempted) scheduleBackgroundCompaction(id, selectedModel, customProvider);
       if (messageText && !images.length && !galleryImageIDs.length && generated.calendarEvents) {
         void applyCalendarMessage(messageText, userMessage.id, generated.calendarEvents).then(result => {
           if (result.applied?.length || result.skipped?.length) console.info(`[calendar-extract] message=${userMessage.id} applied=${result.applied?.length || 0} skipped=${result.skipped?.length || 0}`);
@@ -5913,7 +5831,7 @@ const server = createServer(async (req, res) => {
           else recentMessageRequests.delete(key);
         }
         // Even a failed foreground turn can trigger recovery of an oversized context.
-        scheduleBackgroundCompaction(id, selectedModel, customProvider);
+        if (!foregroundCompactionAttempted) scheduleBackgroundCompaction(id, selectedModel, customProvider);
         if (input.stream === true && res.getHeader("content-type")?.includes("text/event-stream")) {
           failChatTextStream(res, error);
           return;
@@ -5978,7 +5896,6 @@ setInterval(async () => {
   } catch (error) { console.warn("sleep radio scheduler failed: " + String(error.message || error)); }
 }, 20_000);
 server.listen(port, () => console.log(`Lumi server listening on :${server.address().port}`));
-void resumeInterruptedCompactions().catch(error => console.warn("[compaction] startup recovery failed: " + error.message));
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     stopPromiseAlarm();

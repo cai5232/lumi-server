@@ -104,3 +104,24 @@ test('a foreground request can cancel a background model call immediately',async
  await started;controller.abort();
  await assert.rejects(pending,error=>error.name==='AbortError'&&error.statusCode===499);
 });
+
+test('single-attempt requests learn relay compatibility without resending', async () => {
+  let calls = 0;
+  const options = {
+    url: 'https://single-attempt.test/v1/messages', headers: {}, body: { model: 'summary', stream: true },
+    singleAttempt: true,
+    fetchImpl: async (_, request) => {
+      calls++;
+      if (JSON.parse(request.body).stream) {
+        return new Response(JSON.stringify({ error: { message: 'stream unsupported' } }), { status: 400 });
+      }
+      return new Response('{}');
+    }
+  };
+  const rejected = await requestRelay(options);
+  assert.equal(rejected.response.status, 400);
+  assert.equal(rejected.requestBody.stream, true);
+  assert.equal(calls, 1);
+  assert.equal((await requestRelay(options)).response.status, 200);
+  assert.equal(calls, 2);
+});
