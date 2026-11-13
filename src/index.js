@@ -1417,7 +1417,7 @@ async function persistChatThread(id, snapshot) {
     // Preserve the newer on-disk summary instead of undoing that compaction.
     if (Date.parse(stored.compactedAt || "") > Date.parse(snapshot.compactedAt || "") ||
         (stored.compactedAt && !snapshot.compactedAt)) {
-      for (const field of ["contextSummary", "compactionCount", "compactedAt", "compactedThroughMessageId", "compactedMessageOffset"]) {
+      for (const field of ["contextSummary", "compactionCount", "compactedAt", "compactedThroughMessageId", "compactedMessageOffset", "activeContextStartMessageId"]) {
         all[id][field] = stored[field];
       }
       all[id].lastMeasuredInputTokens = 0;
@@ -2748,25 +2748,54 @@ async function writeMemory(content, threadId) {
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
-function compactionPlan(thread, projectedInputTokens = 0) {
-  const messages = contextMessages(thread);
-  const upstreamInputTokens = Math.max(Number(thread.lastMeasuredInputTokens || 0), Number(projectedInputTokens || 0));
-  if (upstreamInputTokens < compressionSettings.snapshot.triggerTokensEstimate) return null;
-  const tailTurns = [];
-  let tailTokenCount = 0;
-  for (let index = messages.length - 1; index >= 0 && tailTurns.length < preservedTailMaxTurns;) {
-    let start = index;
-    if (messages[index].role === "assistant" && index > 0 && messages[index - 1].role === "user") start = index - 1;
-    const turn = messages.slice(start, index + 1);
-    tailTurns.unshift(turn);
-    tailTokenCount += messageTokens(turn);
-    index = start - 1;
-    if (tailTurns.length >= preservedTailMinTurns && tailTokenCount >= preservedTailTargetTokens) break;
+function preservedChatTail(messages, countTokens = messageTokens) {
+  let index = messages.length;
+  let turns = 0;
+  let tokens = 0;
+  while (index > 0 && turns < preservedTailMaxTurns) {
+    let start = index - 1;
+    if (messages[start].role === "assistant" && start > 0 && messages[start - 1].role === "user") start--;
+    tokens += countTokens(messages.slice(start, index));
+    index = start;
+    turns++;
+    if (turns >= preservedTailMinTurns && tokens >= preservedTailTargetTokens) break;
   }
-  const tail = tailTurns.flat();
-  const older = messages.slice(0, Math.max(0, messages.length - tail.length));
+  return messages.slice(index);
+}
+
+function activeChatMessages(thread) {
+  const messages = contextMessages(thread);
+  if (!thread.compactedAt || !thread.contextSummary) return messages;
+  const start = messages.findIndex(message => message.id === thread.activeContextStartMessageId);
+  if (start >= 0) return messages.slice(start);
+  // Recover the intended tail for summaries saved before the active boundary was stored.
+  const compactedAt = Date.parse(thread.compactedAt);
+  const last = messages.findLastIndex(message => Date.parse(message.createdAt) <= compactedAt);
+  if (last < 0) return messages;
+  const atCompaction = messages.slice(0, last + 1);
+  const tail = preservedChatTail(atCompaction, turns => activeHistoryTokens(thread, turns));
+  return messages.slice(atCompaction.length - tail.length);
+}
+
+function activeHistoryTokens(thread, messages = activeChatMessages(thread)) {
+  if (!thread.contextSummary || !thread.compactedAt) return messageTokens(messages);
+  return messages.reduce((total, message) => total + estimateTokens(message.content) +
+    8, 0);
+}
+
+function previousChatInputTokens(thread) {
+  if (thread.compactedAt && !thread.activeContextStartMessageId) return 0;
+  return Number(thread.lastMeasuredInputTokens) || 0;
+}
+
+function compactionPlan(thread, projectedInputTokens = 0) {
+  const messages = activeChatMessages(thread);
+  const upstreamInputTokens = Math.max(previousChatInputTokens(thread), Number(projectedInputTokens || 0));
+  if (upstreamInputTokens < compressionSettings.snapshot.triggerTokensEstimate) return null;
+  const tail = preservedChatTail(messages, turns => activeHistoryTokens(thread, turns));
+  const older = messages.slice(0, messages.length - tail.length);
   if (!older.length) return null;
-  return { olderMessages: older };
+  return { olderMessages: older, activeContextStartMessageId: tail[0]?.id };
 }
 
 // A failed compaction must not stall every subsequent chat message.
@@ -2893,6 +2922,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
   thread.compactedAt = new Date().toISOString();
   thread.compactedThroughMessageId = throughMessageId;
   thread.compactedMessageOffset = offset;
+  thread.activeContextStartMessageId = plan.activeContextStartMessageId;
   thread.lastMeasuredInputTokens = 0;
   thread.cacheKeepaliveMessages = null;
   thread.cacheKeepaliveAssistantContent = "";
@@ -2920,6 +2950,7 @@ async function commitBackgroundCompaction(id, previousSummary, previousBoundary,
     current.compactedAt = snapshot.compactedAt;
     current.compactedThroughMessageId = snapshot.compactedThroughMessageId;
     current.compactedMessageOffset = snapshot.compactedMessageOffset;
+    current.activeContextStartMessageId = snapshot.activeContextStartMessageId;
     current.lastMeasuredInputTokens = 0;
     current.cacheKeepaliveMessages = null;
     current.cacheKeepaliveAssistantContent = "";
@@ -2946,7 +2977,7 @@ function scheduleBackgroundCompaction(id, model, customProvider) {
         const snapshot = threads[id];
         if (!snapshot) return;
         if (await compactionCoolingDown(id, routeSignature)) { logCompactionWait(id, "cooldown"); return; }
-        const plan = compactionPlan(snapshot, messageTokens(contextMessages(snapshot)));
+        const plan = compactionPlan(snapshot, activeHistoryTokens(snapshot));
         if (!plan) {
           setCompactionDiagnostics(id, { status: "below_threshold", lastCheckedAt: new Date().toISOString(), inputTokens: Number(snapshot.lastMeasuredInputTokens || 0), triggerTokens: compressionSettings.snapshot.triggerTokensEstimate });
           return;
@@ -3083,18 +3114,20 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
   const summaryText = thread.contextSummary;
+  const hasCompactedContext = Boolean(summaryText && thread.compactedAt);
+  const activeHistory = activeChatMessages(thread);
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
-    ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-16).map((message) => message.content).join("\n")
+    ? activeHistory.filter((message) => message.role === "user" || message.role === "assistant").slice(-16).map((message) => message.content).join("\n")
     : "";
-  const recentMemoryContext = contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").slice(-12).map((message) => historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content).filter(Boolean).join("\n");
+  const recentMemoryContext = activeHistory.filter((message) => message.role === "user" || message.role === "assistant").slice(-12).map((message) => hasCompactedContext ? message.content : historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content).filter(Boolean).join("\n");
   // A focused query is far more accurate for Nocturne's lexical matching.
   // For vague follow-ups, include only a short recent user-turn clue.
   const primaryMemoryQuery = String(input || "").trim();
   const vagueMemoryQuery = primaryMemoryQuery.length < 12 ||
     /^(?:那个|这个|上次|之前|后来|然后|还有|继续|它|他|她|呢|怎么样|记得)/.test(primaryMemoryQuery);
   const lastUserMemoryHint = vagueMemoryQuery
-    ? contextMessages(thread).filter(message => message.role === "user")
+    ? activeHistory.filter(message => message.role === "user")
         .slice(-3).map(message => String(message.content || "").slice(0, 160)).join(" ")
     : "";
   const memoryRecallQuery = [primaryMemoryQuery, lastUserMemoryHint].filter(Boolean).join(" ").slice(0, 800);
@@ -3114,23 +3147,29 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const retrieved = memories.length
     ? `<core_memories source="memory_core" retrieved_at="${timestamp}">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</core_memories>`
     : "";
-  const relevantMessages = [...new Map([...contextMessages(thread), ...sleepInbox(thread)].map(message => [message.id, message])).values()].sort((a,b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
-  const historicalImages = new Map(await Promise.all(relevantMessages.filter(message => message.role === "user" && message.modelImageIDs?.length).map(async message => [message.id, await loadChatImages(dataDir, message.modelImageIDs)])));
+  const relevantMessages = [...new Map([...activeHistory, ...sleepInbox(thread)].map(message => [message.id, message])).values()].sort((a,b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  const pendingSleepIDs = new Set(sleepInbox(thread).map(message => message.id));
+  const historicalImages = new Map(await Promise.all(relevantMessages
+    .filter(message => message.role === "user" && message.modelImageIDs?.length &&
+      (!hasCompactedContext || pendingSleepIDs.has(message.id)))
+    .map(async message => [message.id, await loadChatImages(dataDir, message.modelImageIDs)])));
   const chatHistory = relevantMessages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .flatMap((message) => {
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
-      let content = historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content;
+      let content = hasCompactedContext
+        ? stripPrivateReasoning(message.content)
+        : historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content;
       const savedImages = historicalImages.get(message.id) || [];
-      if (message.imageAttachmentCount && !savedImages.length) {
-        content = `${content || ""}\n[服务器附件记录：这轮用户实际发送了${message.imageAttachmentCount}张图片，当轮模型接收过图片；当前历史未能恢复原图。应区分当时的观察与当前无法重新核对的细节。]`;
+      if ((message.imageAttachmentCount || message.modelImageIDs?.length) && !savedImages.length) {
+        content = `${content || ""}\n[服务器附件记录：这轮用户实际发送了${message.imageAttachmentCount || message.modelImageIDs.length}张图片，当轮模型接收过图片；当前历史未能恢复原图。应区分当时的观察与当前无法重新核对的细节。]`;
       }
       if (typeof content !== "string" || !content.trim()) return [];
       // An unsolicited nudge has an internal user request that is deliberately
       // absent from the visible timeline. It is nevertheless part of the
       // provider prefix and must precede the stored assistant reply exactly.
-      const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
+      const preceding = !hasCompactedContext && message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
         ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
         : [];
       return [...preceding, { role: message.role, content, ...(savedImages.length ? { images: savedImages } : {}) }];
@@ -3282,7 +3321,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   // Text-only snapshots cannot substitute for attachments or executed tool results.
   const historyHasEvidence = relevantMessages.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length);
-  const exactCachedPrefix = !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const exactCachedPrefix = !hasCompactedContext && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixHasStaleCompaction && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -3343,7 +3382,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   let replyHistoryFitted = false;
   let raw = await callModel({
-    toolTrace: performedToolCalls, signal, knownInputTokens: thread.lastMeasuredInputTokens || 0,
+    toolTrace: performedToolCalls, signal, knownInputTokens: previousChatInputTokens(thread),
     fitReplyHistory: !proactive && !callMode && !desktopCompanion,
     onHistoryFitted: () => { replyHistoryFitted = true; },
     // Calls use the same model output settings as ordinary chats; do not add a
@@ -3383,7 +3422,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // model one structured chance to correct it through the same executor.
       foodToolUsed = true;
       cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: "上一条外卖/饮食工具调用格式无效，没有执行任何操作。请不要输出工具标签；如仍需操作，按 <food_tool>{\"name\":\"工具名\",\"arguments\":{...}}</food_tool> 输出一条有效调用，否则直接正常回复。" }];
-      raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: thread.lastMeasuredInputTokens || 0, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+      raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: previousChatInputTokens(thread), toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
       continue;
     }
     if (!request || typeof request.name !== "string") {
@@ -3412,7 +3451,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     }
     performedToolCalls.push({ name: request.name, arguments: JSON.stringify(request.arguments || {}).slice(0, 4000), result: String(result).slice(0, 12000), succeeded });
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
-    raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: thread.lastMeasuredInputTokens || 0, toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
+    raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: previousChatInputTokens(thread), toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
   const traceStart = raw.indexOf("<lumi_tool_calls>");
   const traceEnd = traceStart < 0 ? -1 : raw.indexOf("</lumi_tool_calls>", traceStart);
@@ -3521,7 +3560,8 @@ async function checkCacheKeepalive() {
     if (!thread?.cacheSystem || !cacheModel || !/anthropic|claude/i.test(cacheModel)) {
       return { attempted: false, reason: "no_matching_chat_cache" };
     }
-    const history = contextMessages(thread);
+    const history = activeChatMessages(thread);
+    if (thread.compactedAt && !thread.activeContextStartMessageId) return { attempted: false, reason: "legacy_compaction_snapshot" };
     if (history.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length)) {
       return { attempted: false, reason: "history_requires_evidence" };
     }
@@ -4318,7 +4358,7 @@ const server = createServer(async (req, res) => {
         // Scheduled reminders must use the same durable Lumi conversation context
         // as chat and sentinel wakes, rather than the alarm service's isolated mini-chat.
         const chatHistory = thread
-          ? contextMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").flatMap((message) => {
+          ? activeChatMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").flatMap((message) => {
               const text = withoutStaleCompactionDirective(message.modelContent) || message.content;
               if (typeof text !== "string" || !text.trim()) return [];
               const preceding = message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
@@ -4916,7 +4956,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: messageTokens(contextMessages(activeThread)), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: "selected_chat_model", triggerSource: "upstream_input_tokens" },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: activeHistoryTokens(activeThread), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours, dreamIntervalMinutes: sleepDreamIntervalMinutes, nightmareProbability: sleepNightmareProbability, reentryProbability: sleepReentryProbability },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
@@ -5677,11 +5717,11 @@ const server = createServer(async (req, res) => {
       // Compact before sending an oversized request, rather than waiting for the
       // previous upstream usage to cross the threshold after the reply is sent.
       // Estimate model-facing history including persisted per-turn context.
-      const projectedInputTokens = messageTokens(contextMessages(threads[id])) +
+      const projectedInputTokens = activeHistoryTokens(threads[id]) +
         estimateTokens(threads[id].cacheSystem || "") +
         estimateTokens(threads[id].contextSummary || "") +
         estimateTokens(modelMessageContent) + 12000;
-      const overContextLimit = Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens;
+      const overContextLimit = Math.max(previousChatInputTokens(threads[id]), projectedInputTokens) > contextLimitTokens;
       const foregroundPlan = overContextLimit ? compactionPlan(threads[id], projectedInputTokens) : null;
       // Ordinary replies can schedule a single background request after being saved.
       if (foregroundPlan) {
@@ -5713,7 +5753,7 @@ const server = createServer(async (req, res) => {
         }
         // Surface the actual summary failure instead of replacing it with an
         // unrelated generic context-limit message on every subsequent send.
-        if (!foregroundCompacted && Math.max(Number(threads[id].lastMeasuredInputTokens || 0), projectedInputTokens) > contextLimitTokens) {
+        if (!foregroundCompacted && Math.max(previousChatInputTokens(threads[id]), projectedInputTokens) > contextLimitTokens) {
           const diagnostic = compactionDiagnostics.get(id);
           if (diagnostic?.status !== "succeeded") {
             const reason = diagnostic?.error || "压缩任务正在运行，请稍后重试。";
@@ -5734,6 +5774,9 @@ const server = createServer(async (req, res) => {
       threads[id].lastChatProvider = selectedProvider;
       threads[id].lastChatModel = selectedModel || selectedConfig?.model || "";
       threads[id].cacheRequestStartedAt = generated.cacheRequestStartedAt;
+      if (threads[id].compactedAt && !threads[id].activeContextStartMessageId) {
+        threads[id].activeContextStartMessageId = activeChatMessages(threads[id])[0]?.id;
+      }
       threads[id].lastMeasuredInputTokens = generated.measuredInputTokens;
       // A successful compaction removes old messages from the active context; never retain the pre-compaction cache snapshot.
       if (generated.compactionApplied) {

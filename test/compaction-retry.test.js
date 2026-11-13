@@ -103,7 +103,7 @@ function installForeground(context, compactContext) {
   const gateEnd = source.indexOf('\n      generated = await generateReply', gateStart);
   Object.assign(context, { foregroundPlan: {}, backgroundCompactionJobs: new Set(), id: 'default',
     threads: { default: {} }, foregroundCompactionAttempted: false, selectedModel: 'test', customProvider: {},
-    persistChatThread: async () => {}, compactContext, projectedInputTokens:0, contextLimitTokens:200000 });
+    persistChatThread: async () => {}, previousChatInputTokens: thread => Number(thread.lastMeasuredInputTokens) || 0, compactContext, projectedInputTokens:0, contextLimitTokens:200000 });
   vm.runInContext(`async function foreground() { ${source.slice(gateStart, gateEnd)} }`, context);
 }
 

@@ -14,7 +14,7 @@ test('saved threshold persists and changes the actual compaction decision', asyn
     const options = { path: join(directory, 'settings.json'), contextLimitTokens: 200000, defaultTriggerRatio: 0.85 };
     const store = await openCompressionSettings(options);
     assert.equal(store.snapshot.triggerTokensEstimate, 170000);
-    const start = source.indexOf('function compactionPlan(');
+    const start = source.indexOf('function preservedChatTail(');
     const plan = source.slice(start, source.indexOf('\nasync function compactContext(', start));
     const context = { compressionSettings: store, contextMessages: thread => thread.messages, messageTokens: messages => messages.length * 1000, preservedTailMinTurns: 10, preservedTailMaxTurns: 15, preservedTailTargetTokens: 20000 };
     vm.createContext(context); vm.runInContext(plan, context);
@@ -106,4 +106,40 @@ test('the previous 170k default migrates to the new 300k default', async () => {
     const store = await openCompressionSettings({ path, contextLimitTokens: 380_000, defaultTriggerRatio: 300_000 / 380_000, legacyDefaultTriggerTokens: 170_000 });
     assert.equal(store.snapshot.triggerTokensEstimate, 300_000);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a saved summary resumes with recent turns and ignores the pre-upgrade inflated measurement', () => {
+  const start = source.indexOf('function preservedChatTail(');
+  const end = source.indexOf('// A failed compaction', start);
+  const context = {
+    contextMessages: thread => thread.messages,
+    messageTokens: messages => messages.reduce((sum, message) => sum + message.content.length, 0),
+    estimateTokens: text => text.length,
+    preservedTailMinTurns: 10, preservedTailMaxTurns: 15, preservedTailTargetTokens: 20_000,
+    compressionSettings: { snapshot: { triggerTokensEstimate: 300_000 } }
+  };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+  const thread = {
+    contextSummary: 'saved summary',
+    compactedAt: new Date(60_000).toISOString(),
+    lastMeasuredInputTokens: 588_574,
+    messages: [
+      { id: 'old', role: 'user', content: '史'.repeat(400_000), createdAt: new Date(0).toISOString() },
+      ...Array.from({ length: 62 }, (_, i) => ({
+        id: String(i), role: i % 2 ? 'assistant' : 'user', content: 'short',
+        modelContent: 'hidden context'.repeat(1000), createdAt: new Date((i + 1) * 1000).toISOString()
+      }))
+    ]
+  };
+  assert.equal(context.activeChatMessages(thread)[0].id, '30');
+  assert.equal(context.activeChatMessages(thread).at(-1).id, '61');
+  assert.ok(context.activeHistoryTokens(thread) < 1000);
+  assert.equal(context.compactionPlan(thread, context.activeHistoryTokens(thread)), null);
+  thread.activeContextStartMessageId = '30';
+  thread.lastMeasuredInputTokens = 310_000;
+  const next = context.compactionPlan(thread);
+  assert.equal(next.olderMessages[0].id, '30');
+  assert.equal(next.activeContextStartMessageId, '32');
+  assert.equal(thread.messages[0].id, 'old');
 });
