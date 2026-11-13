@@ -1,5 +1,5 @@
 import { createKeepsakeStore, keepsakeContext, runKeepsakeMarks } from "./keepsakes.js";
-import { CHAT_SYSTEM_PROMPT } from "./chat-system-prompt.js";
+import { DEFAULT_CHAT_PERSONA, CHAT_FEATURE_PROMPT, CHAT_PROMPT_SEPARATOR } from "./chat-system-prompt.js";
 import { createAppControlStore } from "./app-control.js";
 import { readNote, readNoteImage } from "./xiaohongshu.js";
 import { sleepMessageDecision, sleepInbox, sleepInboxContext, fullDreamRecall, dreamRecords, cleanDreamContent, acknowledgeSleepInbox, validateSoloSettings } from "./sleep-inbox.js";
@@ -1401,6 +1401,41 @@ async function saveEmotionState() {
   const temporaryPath = `${emotionStatePath}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(sharedEmotionState, null, 2));
   await rename(temporaryPath, emotionStatePath);
+}
+
+const chatPersonaPath = join(dataDir, "chat-persona.json");
+let chatPersonaWrite = Promise.resolve();
+
+async function readChatPersona() {
+  try {
+    const saved = JSON.parse(await readFile(chatPersonaPath, "utf8"));
+    if (typeof saved.prompt !== "string") throw new Error("Invalid saved chat persona");
+    return saved.prompt;
+  } catch (error) {
+    if (error.code === "ENOENT") return DEFAULT_CHAT_PERSONA;
+    throw error;
+  }
+}
+
+function chatPersonaSnapshot(prompt) {
+  return { prompt, revision: createHash("sha256").update(prompt).digest("hex") };
+}
+
+function saveChatPersona(prompt, revision) {
+  const operation = chatPersonaWrite.then(async () => {
+    if (chatPersonaSnapshot(await readChatPersona()).revision !== revision) return null;
+    await mkdir(dataDir, { recursive: true });
+    const temporary = chatPersonaPath + "." + randomUUID() + ".tmp";
+    try {
+      await writeFile(temporary, JSON.stringify({ prompt }), { mode: 0o600 });
+      await rename(temporary, chatPersonaPath);
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
+    return chatPersonaSnapshot(prompt);
+  });
+  chatPersonaWrite = operation.catch(() => {});
+  return operation;
 }
 
 function contextSummarySnapshot(thread) {
@@ -3100,9 +3135,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // Proactive follow-ups stay on the ordinary chat system prompt so their
   // stable prefix can read the same cache as the chat that led to them. The
   // nudge-specific instruction is placed in the changing user suffix below.
-  // Keep the system prompt user-managed. The environment variable takes precedence;
-  // do not append backend-authored persona or feature instructions here.
-  let system = CHAT_SYSTEM_PROMPT;
+  const persona = await readChatPersona();
+  let system = CHAT_FEATURE_PROMPT;
   const mailSettings = await mcpClientStore.read();
   system += "\n\n【给言言改备注的方法】你可以根据自己的判断或当下心情决定要不要改言言的备注，不需要固定理由或频率，也不需要每次生成都改。要保存新备注时，直接在回复末尾附加隐藏标记 <user_remark>这里写新的备注</user_remark>（最多32个汉字）。服务端会从这个标记读取内容并自动保存到当前聊天的 aiRemark；备注弹窗会展示它。若这次不想改，就不要输出这个标记。标记不会显示给言言，也不要向她解释。";
   const mailToolsAvailable = !callMode && Boolean(thread?.id) &&
@@ -3119,6 +3153,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
+  // Apply feature and mode adjustments before attaching the editable text.
+  system = persona + CHAT_PROMPT_SEPARATOR + system;
   const summaryText = thread.contextSummary;
   const hasCompactedContext = Boolean(thread.compactedAt);
   const activeHistory = activeChatMessages(thread);
@@ -3289,8 +3325,6 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const configuredApps = !callMode ? await appControl.get() : { apps: [], autonomous: false };
   const appControlDirective = configuredApps.apps.length ? `\n<available_feature name="app_control">用户已自愿设置快捷指令应用限制。工具分别为 lumi_lock_app、lumi_unlock_app、lumi_app_control_status；当前登记的 App：${configuredApps.apps.join("、")}。${configuredApps.autonomous ? "用户允许你在自主唤醒时根据近期使用记录自主选 App 和限制时长。需要锁定时，必须调用 lumi_lock_app 并明确填写 minutes（1–1440）；根据使用情况选一个合适时长，不用固定时间表，也不能省略时长。需要解除时必须调用 lumi_unlock_app。" : "仅在用户提出要求时调整；用户没说时长时，你仍可根据情境选择 minutes（1–1440）。"}工具可新增 App 名称，但只有手机已经为该 App 设置“打开 App 时”快捷指令自动化才会生效。限制到时后自动解除；也可随时用解锁工具解除。只有本轮工具返回成功后才能说已锁定或已解除。工具调用失败时如实说明，不要假装执行。</available_feature>` : "";
   const surfDirective = !callMode ? "\n\n<available_feature name=\"web_search\">需要新鲜信息、外部事实，或自主唤醒时自然好奇时，可调用 Lumi 联网搜索工具 surf_web_and_save。它由 Lumi 服务器直接搜索公开网页，不需要单独浏览器或搜索 Key；搜索后会保存见闻和来源。不要每轮都搜，也不要搜索用户私人信息。如果工具报错，说明这次没搜成功，不要假装搜过。</available_feature>" : "";
-  // The backend-owned prompt is canonical. Ignore legacy LUMI_SYSTEM_PROMPT
-  // and client-supplied systemPrompt so old persona text cannot replace it.
   const commandFeedback = !proactive && !callMode ? await instantCommands.feedback(thread.id) : [];
   const commandDirective = !callMode ? '\n<instant_commands>需要用户现在去做一件具体的事时，可在回复末尾附加隐藏标签 <countdown>{"title":"去喝水","minutes":1}</countdown>。不需要计时就省略 minutes。计时从发出指令时开始，最多24小时；用户完成后下一轮会收到真实用时反馈。只在自然需要时使用，不要每轮都下指令。标签不要放在代码块、speech、thinking 或 HTML 中。</instant_commands>' : '';
   const commandFeedbackContext = commandFeedbackText(commandFeedback);
@@ -3585,6 +3619,10 @@ async function checkCacheKeepalive() {
     if (!Number.isFinite(lastRealAt) || !Number.isFinite(lastRequestAt) ||
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
+    const persona = await readChatPersona();
+    if (!thread.cacheSystem.includes(persona + CHAT_PROMPT_SEPARATOR + "【记忆与上下文压缩】")) {
+      return { attempted: false, reason: "system_prompt_changed" };
+    }
     const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
     const lastAssistant = history[history.length - 1];
     const snapshotAssistant = typeof thread.cacheKeepaliveAssistantContent === "string" && thread.cacheKeepaliveAssistantContent.trim()
@@ -5485,6 +5523,19 @@ const server = createServer(async (req, res) => {
         }
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    if (url.pathname === "/v1/settings/system-prompt") {
+      res.setHeader("cache-control", "no-store");
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method === "GET") return send(res, 200, chatPersonaSnapshot(await readChatPersona()));
+      if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+      const input = await limitedJSONBody(req, 3_600_000);
+      if (typeof input?.prompt !== "string" || typeof input?.revision !== "string") {
+        return send(res, 400, { error: "invalid_system_prompt" });
+      }
+      const saved = await saveChatPersona(input.prompt, input.revision);
+      if (!saved) return send(res, 409, { error: "提示词已更新。请重新读取最新版本，再合并你的修改。" });
+      return send(res, 200, saved);
     }
     const summaryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/context-summary$/);
     if (summaryMatch) {
