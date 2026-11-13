@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { contextSummaryMessages, extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch } from '../src/context-summary.js';
+import { contextSummaryMessages, distillContextBatch } from '../src/context-summary.js';
 
 import { requestInputTokens } from '../src/context-budget.js';
 
@@ -18,7 +18,7 @@ const historyEnd = source.indexOf('\nfunction messageTokens(', historyStart);
 async function harness(t, callModel) {
   const dataDir = await mkdtemp(join(tmpdir(), 'lumi-compaction-retry-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
-  const context = { dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
+  const context = { URL, dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
     process: { env: {} }, contextLimitTokens: 380000, console, callModel, historicalModelContent: value => value,
     contextSummaryMessages, requestInputTokens, distillContextBatch,
     estimateTokens: value => requestInputTokens({ system: value }) - 1 };
@@ -38,10 +38,29 @@ test('Sonnet 5.5 can send more history and return a larger summary than the old 
   });
   const thread = { contextSummary: '之前的摘要' };
   await context.compactContext(thread, { olderMessages: [{ id: 'old', role: 'user', content: history }] },
-    { model: 'claude-sonnet-5-5', customProvider: { apiFormat: 'anthropic' } });
+    { model: 'claude-sonnet-5-5', customProvider: { apiFormat: 'anthropic', url: 'https://api.anthropic.com' } });
   assert.equal(thread.contextSummary, summary);
   assert.equal(thread.compactedThroughMessageId, 'old');
   assert.equal(thread.compactedMessageOffset, 0);
+});
+
+test('a Sonnet relay stays within the configured window even when the official model window is larger', async t => {
+  const history = '史'.repeat(450_000);
+  let calls = 0;
+  const context = await harness(t, async request => {
+    calls++;
+    assert.ok(requestInputTokens(request) + request.maxOutputTokens <= 380_000);
+    assert.ok(request.maxOutputTokens > 8192);
+    assert.ok(!request.messages[1].content.includes(history));
+    return { content: '<context_summary>facts</context_summary>', finishReason: 'end_turn' };
+  });
+  const thread = { messages: [{ id: 'old', role: 'user', content: history }] };
+  await context.compactContext(thread, { olderMessages: thread.messages },
+    { model: 'claude-sonnet-5-5', customProvider: { apiFormat: 'anthropic', url: 'https://relay.example' } });
+  assert.equal(calls, 1);
+  assert.ok(thread.compactedMessageOffset > 180_000);
+  assert.ok(thread.compactedMessageOffset < history.length);
+  assert.equal(thread.messages[0].content, history);
 });
 
 test('one request advances only its own segment, and truncation preserves the saved position', async t => {

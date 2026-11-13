@@ -2764,7 +2764,7 @@ function compactionPlan(thread, projectedInputTokens = 0) {
 const compactionRetryAfter = new Map();
 const compactionRetryRoutes = new Map();
 function compactionRouteSignature(model, customProvider) {
-  return createHash("sha256").update(JSON.stringify(["model-window-distiller", model,
+  return createHash("sha256").update(JSON.stringify(["relay-window-distiller", model,
     customProvider?.url, customProvider?.apiFormat, customProvider?.chatPath, customProvider?.key])).digest("hex");
 }
 function compactionCooldownPath(id) {
@@ -2830,12 +2830,14 @@ async function compactContext(thread, plan, { model, customProvider }) {
   const summary = String(thread.contextSummary || "").trim();
   // The relay may expose a smaller window than the published model spec.
   const sonnet55 = /(?:^|\/)claude-sonnet-5[.-]5(?:$|[-:@])/i.test(model);
-  const modelContextTokens = sonnet55 ? 1_000_000 : contextLimitTokens;
-  // Anthropic Messages requires max_tokens. OpenAI-compatible routes can use their own default.
   const nativeAnthropic = customProvider?.apiFormat === "anthropic";
+  const directAnthropic = nativeAnthropic && customProvider.url &&
+    new URL(customProvider.url).hostname === "api.anthropic.com";
+  const modelContextTokens = directAnthropic && sonnet55 ? 1_000_000 : contextLimitTokens;
+  // Anthropic Messages requires max_tokens. OpenAI-compatible routes can use their own default.
   const promptTokens = requestInputTokens({ messages: contextSummaryMessages(summary, "") });
   const maxOutputTokens = nativeAnthropic
-    ? (sonnet55 ? 128_000 : Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192))
+    ? (sonnet55 ? Math.min(128_000, Math.floor(modelContextTokens / 3)) : Number(process.env.LUMI_MAX_OUTPUT_TOKENS || 8192))
     : undefined;
   let remainingTokens = modelContextTokens - promptTokens - (maxOutputTokens || 0);
   if (remainingTokens <= 0) throw new Error("existing summary leaves no room in the model context for history");
