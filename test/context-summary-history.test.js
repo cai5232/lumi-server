@@ -39,11 +39,11 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const summary = 'old-summary'.repeat(5000);
   const messages = [{id:'a',role:'user',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
   const calls = [];
-  Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
+  Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, contextLimitTokens:380000, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
     extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch, contextMessages: thread => thread.messages});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
-  vm.runInContext(source.slice(source.indexOf('async function compactContext('), source.indexOf('\nconst backgroundCompactionJobs')), context);
+  vm.runInContext(source.slice(source.indexOf('function compactionMessageBody('), source.indexOf('\nconst backgroundCompactionJobs')), context);
   assert.ok(context.messageTokens(messages) < 100);
   const hidden = {role:'assistant',content:'回复',precedingUserModelContent:messages[0].modelContent};
   assert.ok(context.messageTokens([hidden]) > context.messageTokens([{role:'assistant',content:'回复'}]));
@@ -54,6 +54,7 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   await context.compactContext(thread, {olderMessages:messages,throughMessageId:'b',tailMessageCount:2}, {model:'test',customProvider:{}});
   assert.equal(calls.length, 1);
   assert.ok(!JSON.stringify(calls).includes(summary));
+  assert.ok(!calls[0].messages[1].content.includes('近期言言'));
   assert.ok(calls[0].messages[1].content.includes('当前摘要'));
   assert.ok(calls[0].messages[1].content.includes('原文'));
   assert.ok(calls[0].messages[1].content.includes(JSON.stringify(executed)), 'compaction must receive the actual tool result');
@@ -75,14 +76,16 @@ test('history preserves exact tool outcomes without treating a failed call as su
 });
 
 
-test('compaction uses the chat persona, model, recent context and emotional section', async () => {
+test('compaction uses the chat persona, model and emotional section without resending recent history', async () => {
   const { CHAT_SYSTEM_PROMPT } = await import('../src/chat-system-prompt.js');
   let request;
   await distillContextBatch(async value => { request = value; return {content:'<context_summary>【情感与关系】\n- 她很开心</context_summary>', finishReason:'stop'}; },
     {summary:'旧摘要', chunk:'较早聊天', recentContext:'近期聊天', index:0, total:1, model:'chat-model', customProvider:{}, maxOutputTokens:1000});
   assert.ok(request.messages[0].content.startsWith(CHAT_SYSTEM_PROMPT));
   for (const text of ['情感层必须保留', '【情感与关系】', '-今天她的情绪状态', '- 有没有争吵或和解', '- 有没有说过值得记住的话']) assert.ok(request.messages[0].content.includes(text));
-  for (const text of ['旧摘要','较早聊天','近期聊天']) assert.ok(request.messages[1].content.includes(text));
+  for (const text of ['旧摘要','较早聊天']) assert.ok(request.messages[1].content.includes(text));
   assert.ok(request.messages[0].content.includes('以“我”称呼自己，以“言言”称呼她'));
+  assert.ok(!request.messages[1].content.includes('近期聊天'));
+  assert.equal(request.singleAttempt, true);
   assert.equal(request.model, 'chat-model');
 });

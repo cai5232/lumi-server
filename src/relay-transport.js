@@ -92,7 +92,7 @@ function streamError(raw) {
 }
 const capabilities = new Map();
 // timeoutMS is an idle timeout (no new bytes), so long but live streams are never cut; maxMS is the hard cap.
-export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000, signal }) {
+export async function requestRelay({ url, headers, body, fetchImpl = fetch, timeoutMS = 120000, maxMS = 900000, signal, singleAttempt = false }) {
   const key = url + '\n' + body.model;
   const requestBody = structuredClone(body);
   for (const patch of capabilities.get(key) || []) applyPatch(requestBody, patch);
@@ -143,7 +143,9 @@ export async function requestRelay({ url, headers, body, fetchImpl = fetch, time
         const saved = capabilities.get(key) || [];
         capabilities.set(key, [...saved, patch]);
         if (capabilities.size > 128) capabilities.delete(capabilities.keys().next().value);
-        continue;
+        if (!singleAttempt) continue;
+        // Remember the compatibility fix for future requests without resending this one.
+        return { response, data, requestBody: JSON.parse(before), timing };
       }
     }
     return { response, data, requestBody, timing };
