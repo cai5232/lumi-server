@@ -15,17 +15,43 @@ function contentTokens(value) {
   return contentTokens(value.text ?? value.content ?? '');
 }
 
+function messageInputTokens(message) {
+  return contentTokens(message.content) + textTokens(JSON.stringify(message.tool_calls || [])) + 8;
+}
+
 export function requestInputTokens(body) {
-  return contentTokens(body.system) + (body.messages || []).reduce((sum, message) =>
-    sum + contentTokens(message.content) + textTokens(JSON.stringify(message.tool_calls || [])) + 8, 0) +
+  return contentTokens(body.system) +
+    (body.messages || []).reduce((sum, message) => sum + messageInputTokens(message), 0) +
     textTokens(JSON.stringify(body.tools || []));
+}
+
+// Keep a contiguous recent suffix plus every system instruction and the current
+// turn. The archive and its compaction cursor are independent of this view.
+export function fitChatHistory(body, limit) {
+  const messages = body.messages || [];
+  const isUserTurn = message => message.role === 'user' &&
+    !(Array.isArray(message.content) && message.content.some(block => block?.type === 'tool_result'));
+  const currentUser = messages.findLastIndex(isUserTurn);
+  let tokens = requestInputTokens(body);
+  if (tokens <= limit || currentUser < 0) return null;
+
+  const dropped = new Set();
+  for (let index = 0; index < currentUser; index++) {
+    const message = messages[index];
+    if (message.role === 'system' || message.role === 'developer') continue;
+    if (tokens <= limit && isUserTurn(message)) break;
+    tokens -= messageInputTokens(message);
+    dropped.add(index);
+  }
+  if (!dropped.size || tokens > limit) return null;
+  return { messages: messages.filter((_, index) => !dropped.has(index)), tokens, dropped: dropped.size };
 }
 
 export function assertChatContextBudget(body, limit, measuredInputTokens = 0) {
   const estimated = requestInputTokens(body);
   const tokens = Math.max(estimated, Number(measuredInputTokens) || 0);
   if (tokens <= limit) return;
-  throw Object.assign(new Error(`上下文约 ${Math.ceil(tokens)} tokens，超过 ${limit} tokens 上限，压缩尚未成功。已暂停本次模型请求以避免继续消耗超大上下文；请检查摘要线路的额度或切换可用线路后重试。聊天记录仍保留。`), {
+  throw Object.assign(new Error(`上下文约 ${Math.ceil(tokens)} tokens，超过当前聊天请求的 ${limit} tokens 预算。本次请求未发送，聊天记录仍保留。`), {
     code: 'context_compaction_required', statusCode: 503
   });
 }
