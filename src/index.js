@@ -1403,6 +1403,12 @@ async function saveEmotionState() {
   await rename(temporaryPath, emotionStatePath);
 }
 
+function contextSummarySnapshot(thread) {
+  const summary = String(thread.contextSummary || "");
+  const revision = createHash("sha256").update(JSON.stringify([thread.compactedAt || "", summary])).digest("hex");
+  return { summary, revision };
+}
+
 async function persistChatThread(id, snapshot) {
   const previous = chatPersistenceQueues.get(id) || Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
@@ -2765,7 +2771,7 @@ function preservedChatTail(messages, countTokens = messageTokens) {
 
 function activeChatMessages(thread) {
   const messages = contextMessages(thread);
-  if (!thread.compactedAt || !thread.contextSummary) return messages;
+  if (!thread.compactedAt) return messages;
   const start = messages.findIndex(message => message.id === thread.activeContextStartMessageId);
   if (start >= 0) return messages.slice(start);
   // Recover the intended tail for summaries saved before the active boundary was stored.
@@ -2778,7 +2784,7 @@ function activeChatMessages(thread) {
 }
 
 function activeHistoryTokens(thread, messages = activeChatMessages(thread)) {
-  if (!thread.contextSummary || !thread.compactedAt) return messageTokens(messages);
+  if (!thread.compactedAt) return messageTokens(messages);
   return messages.reduce((total, message) => total + estimateTokens(message.content) +
     8, 0);
 }
@@ -3114,7 +3120,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
   const summaryText = thread.contextSummary;
-  const hasCompactedContext = Boolean(summaryText && thread.compactedAt);
+  const hasCompactedContext = Boolean(thread.compactedAt);
   const activeHistory = activeChatMessages(thread);
   const summary = summaryText ? `<context_summary source="system">\n${summaryText}\n</context_summary>` : "";
   const proactiveRawContext = proactive
@@ -5479,6 +5485,44 @@ const server = createServer(async (req, res) => {
         }
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    const summaryMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/context-summary$/);
+    if (summaryMatch) {
+      res.setHeader("cache-control", "no-store");
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const id = decodeURIComponent(summaryMatch[1]);
+      if (req.method === "GET") {
+        const thread = (await readThreads())[id];
+        if (!thread) return send(res, 404, { error: "chat_not_found" });
+        return send(res, 200, contextSummarySnapshot(thread));
+      }
+      if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+      const input = await limitedJSONBody(req, 3_600_000);
+      if (typeof input?.summary !== "string" || typeof input?.revision !== "string") {
+        return send(res, 400, { error: "invalid_context_summary" });
+      }
+      if (activeChatThreads.has(id) || backgroundCompactionJobs.has(id) || (id === "default" && keepaliveInFlight)) {
+        return send(res, 409, { error: "聊天或摘要更新正在进行，请稍后再保存。" });
+      }
+      activeChatThreads.add(id);
+      try {
+        const thread = (await readThreads())[id];
+        if (!thread) return send(res, 404, { error: "chat_not_found" });
+        const current = contextSummarySnapshot(thread);
+        if (input.revision !== current.revision) {
+          return send(res, 409, { error: "摘要已更新。请重新读取最新版本，再合并你的修改。" });
+        }
+        thread.contextSummary = input.summary;
+        thread.lastMeasuredInputTokens = 0;
+        thread.cacheKeepaliveMessages = null;
+        thread.cacheKeepaliveAssistantContent = "";
+        thread.cacheKeepaliveSnapshotKind = "";
+        thread.cacheKeepalivePrefixHash = "";
+        thread.cacheKeepaliveAt = 0;
+        return send(res, 200, contextSummarySnapshot(await persistChatThread(id, thread)));
+      } finally {
+        activeChatThreads.delete(id);
+      }
     }
     const jobMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/requests\/([a-zA-Z0-9_-]{8,128})$/);
     if (jobMatch && req.method === "GET") {
