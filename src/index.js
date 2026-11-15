@@ -2920,8 +2920,10 @@ function activeChatMessages(thread) {
 
 function activeHistoryTokens(thread, messages = activeChatMessages(thread)) {
   if (!thread.compactedAt && !thread.contextExcludedMessageIDs?.length) return messageTokens(messages);
-  return messages.reduce((total, message) => total + estimateTokens(message.content) +
-    8, 0);
+  return messages.reduce((total, message) => {
+    const text = message.toolCalls?.length ? historicalModelContent(message.content, message.toolCalls) : message.content;
+    return total + estimateTokens(text) + 8;
+  }, 0);
 }
 
 function previousChatInputTokens(thread) {
@@ -3002,6 +3004,7 @@ function setCompactionDiagnostics(id, patch) {
 }
 
 function compactionMessageBody(message, visibleOnly = false) {
+  if (visibleOnly === "withTools") return historicalModelContent(stripPrivateReasoning(message.content), message.toolCalls);
   if (visibleOnly) return stripPrivateReasoning(message.content);
   return String(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || "").trim();
 }
@@ -3027,7 +3030,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
   let visibleOnly = false;
   for (const message of plan.olderMessages) {
     const previousOffset = message.id === thread.compactedThroughMessageId ? Number(thread.compactedMessageOffset) || 0 : 0;
-    const useVisibleBody = previousOffset ? Boolean(thread.compactedMessageVisibleOnly) : Boolean(thread.contextExcludedMessageIDs?.length);
+    const useVisibleBody = previousOffset ? thread.compactedMessageVisibleOnly : thread.contextExcludedMessageIDs?.length ? "withTools" : false;
     const body = previousOffset ? message.content : compactionMessageBody(message, useVisibleBody);
     if (!body) continue;
     const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role;
@@ -3308,7 +3311,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
       // from history and the previous request's Anthropic cache prefix can never match again.
       let content = hasCompactedContext || thread.contextExcludedMessageIDs?.length
-        ? stripPrivateReasoning(message.content)
+        ? historicalModelContent(stripPrivateReasoning(message.content), message.toolCalls)
         : historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content;
       const savedImages = historicalImages.get(message.id) || [];
       if ((message.imageAttachmentCount || message.modelImageIDs?.length) && !savedImages.length) {
@@ -3326,14 +3329,14 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const phoneHistory = [];
   if (callMode && Array.isArray(callHistory)) {
     for (const turn of callHistory) {
-      if (!turn || (turn.role !== "user" && turn.role !== "assistant") || typeof turn.content !== "string" || !turn.content.trim()) continue;
+      if (!turn || (turn.role !== "user" && turn.role !== "assistant") || typeof turn.content !== "string" || (!turn.content.trim() && !turn.toolCalls?.length)) continue;
       // The call-opening request is the cacheable predecessor of the first
       // spoken turn. Persist it invisibly, then replay its raw assistant
       // response so the first caller message shares that exact prefix.
       if (turn.role === "assistant" && typeof turn.requestModelContent === "string" && turn.requestModelContent.trim()) {
         phoneHistory.push({ role: "user", content: historicalModelContent(turn.requestModelContent) });
       }
-      phoneHistory.push({ role: turn.role, content: historicalModelContent(turn.modelContent) || turn.content });
+      phoneHistory.push({ role: turn.role, content: historicalModelContent(turn.modelContent || turn.content, turn.toolCalls) || turn.content });
     }
   }
   // A normal chat turn usually ends with an assistant message, and an accepted
@@ -4625,9 +4628,11 @@ const server = createServer(async (req, res) => {
         // as chat and sentinel wakes, rather than the alarm service's isolated mini-chat.
         const chatHistory = thread
           ? activeChatMessages(thread).filter((message) => message.role === "user" || message.role === "assistant").flatMap((message) => {
-              const text = thread.contextResetAt || thread.contextExcludedMessageIDs?.length ? message.content : withoutStaleCompactionDirective(message.modelContent) || message.content;
+              const visibleOnly = thread.compactedAt || thread.contextResetAt || thread.contextExcludedMessageIDs?.length;
+              const body = visibleOnly ? stripPrivateReasoning(message.content) : message.modelContent || message.content;
+              const text = historicalModelContent(body, message.toolCalls);
               if (typeof text !== "string" || !text.trim()) return [];
-              const preceding = !thread.contextResetAt && !thread.contextExcludedMessageIDs?.length && message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
+              const preceding = !visibleOnly && message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
                 ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
                 : [];
               return [...preceding, { role: message.role, content: text }];
@@ -5607,6 +5612,7 @@ const server = createServer(async (req, res) => {
         id: randomUUID(), role: "assistant", content: openingText,
         // Private cache bridge for the first spoken turn; not sent to iOS.
         modelContent: generated.modelContent,
+        toolCalls: generated.toolCalls || [],
         requestModelContent: generated.userModelContent,
         createdAt: now, speechScript: openingSpeechText
       };
@@ -5685,7 +5691,7 @@ const server = createServer(async (req, res) => {
       const now = new Date().toISOString();
       const userTurn = { id: randomUUID(), role: "user", content: generated.callUserText || spoken, createdAt: now };
       const assistantSpeechText = generated.speechText || generated.content;
-      const assistantTurn = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: assistantSpeechText };
+      const assistantTurn = { id: randomUUID(), role: "assistant", content: generated.content, createdAt: now, speechScript: assistantSpeechText, toolCalls: generated.toolCalls || [] };
       call.turns.push(userTurn, assistantTurn);
       let speech = null;
       let speechError = null;
@@ -5942,6 +5948,7 @@ const server = createServer(async (req, res) => {
         id: randomUUID(), role: "assistant", content: generated.content,
         // Private cache bridge for the first spoken turn; not sent to iOS.
         modelContent: generated.modelContent,
+        toolCalls: generated.toolCalls || [],
         requestModelContent: generated.userModelContent,
         createdAt: now, speechScript: openingSpeechText
       };
