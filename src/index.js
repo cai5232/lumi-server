@@ -4352,6 +4352,50 @@ function proxyDuetto(req, res) {
   req.pipe(upstream);
 }
 
+async function proxyLubdub(req, res, url) {
+  res.setHeader("cache-control", "no-store");
+  if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+
+  const letterPath = url.pathname.match(/^\/v1\/lubdub(\/letters)(?:\/([a-z0-9_-]{1,80}))?$/i);
+  if (!letterPath) return send(res, 404, { error: "not_found" });
+  const [, collection, letterID] = letterPath;
+  if (!(req.method === "GET" || (req.method === "POST" && !letterID) || (req.method === "DELETE" && letterID))) {
+    return send(res, 405, { error: "method_not_allowed" });
+  }
+
+  const input = req.method === "POST" ? await limitedJSONBody(req, 64_000) : null;
+  if (req.method === "POST" && (!input || typeof input.content !== "string" ||
+      (input.title != null && typeof input.title !== "string") ||
+      (input.lock_for != null && typeof input.lock_for !== "string") ||
+      (input.reveal_at != null && !["number", "string"].includes(typeof input.reveal_at)))) {
+    return send(res, 400, { error: "invalid_letter" });
+  }
+  try {
+    const token = (process.env.LUMI_LUBDUB_WRITER_TOKEN ||
+      await readFile(join(dataDir, "lubdub-writer-token"), "utf8")).trim();
+    if (!token) return send(res, 503, { error: "信件服务尚未接通。" });
+    const upstream = new URL("https://lumi-api.yanvn.top/lubdub" + collection + (letterID ? "/" + letterID : ""));
+    if (req.method === "GET" && !letterID) {
+      for (const key of ["limit", "offset"]) {
+        const value = url.searchParams.get(key);
+        if (value && /^\d{1,8}$/.test(value)) upstream.searchParams.set(key, value);
+      }
+    }
+    const response = await fetch(upstream, {
+      method: req.method,
+      headers: { authorization: "Bearer " + token, ...(input ? { "content-type": "application/json" } : {}) },
+      body: input ? JSON.stringify({ content: input.content, title: input.title, reveal_at: input.reveal_at, lock_for: input.lock_for }) : undefined,
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000)
+    });
+    if (response.status === 401 || response.status === 403) return send(res, 503, { error: "信件服务暂不可用。" });
+    return send(res, response.status, await response.json());
+  } catch (error) {
+    if (error?.code === "ENOENT") return send(res, 503, { error: "信件服务尚未接通。" });
+    return send(res, 502, { error: "暂时无法连接信件服务。" });
+  }
+}
+
 const server = createServer(async (req, res) => {
   if (req.url?.startsWith("/api/") || req.url?.startsWith("/pkg/")) return proxyDuetto(req, res);
   if (req.method === "GET" && req.url?.split("?")[0] === "/together-listen") {
@@ -4362,6 +4406,7 @@ const server = createServer(async (req, res) => {
   let callLockID;
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname.startsWith("/v1/lubdub/")) return await proxyLubdub(req, res, url);
     if (url.pathname === "/v1/xiaohongshu/preview" && req.method === "POST") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const input = await limitedJSONBody(req, 8192);
