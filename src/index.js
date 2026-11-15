@@ -18,6 +18,8 @@ import { assertChatContextBudget, fitChatHistory, requestInputTokens } from "./c
 import { removeMalformedAnthropicThinkingBlocks } from "./anthropic-messages.js";
 import { miniMaxCaptions, elevenLabsCaptions, mp3Duration } from "./sleep-radio-captions.js";
 import { requestMurmurEmotion } from "./murmur-client.js";
+import { emotionContext as nativeEmotionContext } from "./emotion-native.js";
+import { createNativeMurmurClient, nativeStatusOperations, nativeUpdate } from "./murmur-status.js";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, createHmac, createCipheriv, createDecipheriv, randomBytes, createPrivateKey, createSign, randomUUID, timingSafeEqual } from "node:crypto";
@@ -754,6 +756,11 @@ function safeJSON(text, fallback = {}) {
 }
 
 let murmurFlushInFlight = null;
+let nativeMurmurSnapshot;
+const nativeMurmur = createNativeMurmurClient({
+  baseURL: process.env.MURMUR_SERVICE_URL,
+  token: process.env.MURMUR_INTERNAL_TOKEN
+});
 
 function mirrorMurmurState(remote) {
   if (!remote?.drives) return;
@@ -768,10 +775,14 @@ async function flushMurmurUpdates() {
   if (!process.env.MURMUR_SERVICE_URL) return;
   if (murmurFlushInFlight) return murmurFlushInFlight;
   murmurFlushInFlight = (async () => {
-    const pending = sharedEmotionState.pendingMurmurUpdates ||= [];
+    const native = await nativeMurmur.detect();
+    const pending = native
+      ? sharedEmotionState.pendingNativeMurmurUpdates ||= []
+      : sharedEmotionState.pendingMurmurUpdates ||= [];
     while (pending.length) {
       const item = pending[0];
-      await requestMurmurEmotion(item.threadID, "update", item.payload);
+      if (native) await nativeMurmur.update(item.payload);
+      else await requestMurmurEmotion(item.threadID, "update", item.payload);
       pending.shift();
       await saveEmotionState();
     }
@@ -783,6 +794,12 @@ async function flushMurmurUpdates() {
 async function refreshMurmurState(threadID, { online = false } = {}) {
   if (!process.env.MURMUR_SERVICE_URL) return;
   try {
+    if (await nativeMurmur.detect()) {
+      void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
+      if (online) await nativeMurmur.update({ source: "hook", dimensions: {} });
+      nativeMurmurSnapshot = await nativeMurmur.read("state");
+      return;
+    }
     await flushMurmurUpdates();
     const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
     mirrorMurmurState(result.state);
@@ -795,6 +812,14 @@ async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
   if (!emotionUpdateRaw) return null;
   try {
     const parsed = JSON.parse(emotionUpdateRaw);
+    if (nativeMurmur.available || await nativeMurmur.detect()) {
+      const payload = nativeUpdate(parsed);
+      if (!payload) return null;
+      (sharedEmotionState.pendingNativeMurmurUpdates ||= []).push({ payload });
+      await saveEmotionState();
+      void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
+      return parsed;
+    }
     const initialDrives = { ...sharedEmotionState.drives };
     if (!applyEmotionDelta(sharedEmotionState, parsed)) return null;
     if (process.env.MURMUR_SERVICE_URL) {
@@ -1081,7 +1106,11 @@ async function runBackgroundPulse() {
   proactiveDiagnostics.checks += 1;
   let changed = false;
   const pendingPushes = [];
-  // Emotion is request-driven. The background pulse must not mutate or reflect it while idle.
+  // Retry previously recorded updates independently of panel reads.
+  if (sharedEmotionState.pendingNativeMurmurUpdates?.length) {
+    void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
+  }
+  // Emotion is request-driven. The background pulse must not generate new emotion changes while idle.
   let emotionChanged = false;
   changed ||= emotionChanged;
   for (const cachedThread of Object.values(threads)) {
@@ -1437,11 +1466,17 @@ async function loadEmotionState() {
   if (ticks || seeded) await saveEmotionState();
 }
 
-async function saveEmotionState() {
-  await mkdir(dataDir, { recursive: true });
-  const temporaryPath = `${emotionStatePath}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, JSON.stringify(sharedEmotionState, null, 2));
-  await rename(temporaryPath, emotionStatePath);
+let emotionWrite = Promise.resolve();
+
+function saveEmotionState() {
+  const operation = emotionWrite.then(async () => {
+    await mkdir(dataDir, { recursive: true });
+    const temporaryPath = `${emotionStatePath}.${randomUUID()}.tmp`;
+    await writeFile(temporaryPath, JSON.stringify(sharedEmotionState, null, 2));
+    await rename(temporaryPath, emotionStatePath);
+  });
+  emotionWrite = operation.catch(() => {});
+  return operation;
 }
 
 const chatPersonaPath = join(dataDir, "chat-persona.json");
@@ -1487,6 +1522,9 @@ function clearContextCache(thread) {
 }
 
 function chatEmotionContext(thread) {
+  if (nativeMurmurSnapshot) {
+    return nativeEmotionContext(thread.contextResetAt ? { ...nativeMurmurSnapshot, recent_events: [] } : nativeMurmurSnapshot);
+  }
   // The shared narrative has no conversation-level provenance. Keep the
   // current drives without letting old text enter a reset conversation.
   const state = thread.contextResetAt
@@ -4962,14 +5000,29 @@ const server = createServer(async (req, res) => {
         return send(res, 200, { content });
       } catch (error) { console.warn(`Murmur model request failed: ${error.message}`); return send(res, error.status || 502, { error: "murmur_model_unavailable" }); }
     }
-    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate))?$/);
+    const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate|vitals|moved|baselines))?$/);
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       const threadID = decodeURIComponent(emotionMatch[1]);
       const operation = emotionMatch[2] || "state";
-      const threads = await readThreads();
-      if (!threads[threadID]) return send(res, 404, { error: "thread_not_found" });
-      const thread = threads[threadID];
+      const threads = threadID === "default" ? null : await readThreads();
+      if (threads && !threads[threadID]) return send(res, 404, { error: "thread_not_found" });
+      if (nativeStatusOperations.has(operation)) {
+        try {
+          if (await nativeMurmur.detect()) {
+            if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
+            const result = await nativeMurmur.read(operation, url.searchParams);
+            if (operation === "state") nativeMurmurSnapshot = result;
+            return send(res, 200, result);
+          }
+        } catch (error) {
+          console.warn(`Murmur read failed: ${error.message}`);
+          return send(res, 502, { error: "murmur_unavailable" });
+        }
+        if (["vitals", "moved", "baselines"].includes(operation)) {
+          return send(res, 503, { error: "murmur_native_unavailable" });
+        }
+      }
 
       const murmurServiceUrl = String(process.env.MURMUR_SERVICE_URL || "").replace(/\/+$/, "");
       if (murmurServiceUrl) {
@@ -5048,7 +5101,7 @@ const server = createServer(async (req, res) => {
         const top = topEmotion(emotion);
         result = { ok: true, state: emotion, top_drive: top.drive, top_val: Number(top.value.toFixed(3)), need_murmur: top.value >= EMOTION_REFLECTION_THRESHOLD };
       } else return send(res, 404, { error: "unknown_emotion_operation" });
-      await saveThreads(threads);
+      await saveThreads(threads || await readThreads());
       await saveEmotionState();
       return send(res, 200, result);
     }
