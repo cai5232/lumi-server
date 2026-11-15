@@ -2316,6 +2316,13 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   }
   const mcpToolMap = new Map();
   const mcpTools = [];
+  if (mcpThreadId && !singleAttempt) {
+    for (const tool of lubdubTools) {
+      mcpToolMap.set(tool.name, { tool, lubdubTool: true, allowWrite: tool.name === "lubdub_reply_to_letter",
+        execute: args => executeLubdubTool(tool.name, args) });
+      mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+    }
+  }
   for (const [serverIndex, server] of mcpServers.entries()) {
     for (const [toolIndex, tool] of modelToolsForServer(server).entries()) {
       if (!tool?.name || tool.disabled === true) continue;
@@ -2380,7 +2387,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool)
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
@@ -2568,7 +2575,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
       if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
-      if (!entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      if (!entry.internalCalendar && !entry.lubdubTool && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
@@ -3444,7 +3451,10 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       } }
     : keepsakes;
   const keepsakeDirective = !callMode && !desktopCompanion ? await keepsakeContext(contextKeepsakes, thread.id) : "";
-  const userModelContent = `${systemContext}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
+  const lubdubDirective = !desktopCompanion
+    ? '\n<available_feature name="lubdub">时间锁信墙可通过 lubdub_list_letters、lubdub_read_letter 查阅。锁定信件只能知道揭晓时间。要把回信写到原信下面，使用 lubdub_reply_to_letter；只有工具明确确认成功后，才能说回信已写入信墙。</available_feature>\n'
+    : "";
+  const userModelContent = `${systemContext}${lubdubDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -4350,6 +4360,64 @@ function proxyDuetto(req, res) {
     else res.destroy();
   });
   req.pipe(upstream);
+}
+
+const lubdubTools = [
+  {
+    name: "lubdub_list_letters",
+    description: "查看时间锁信墙。锁定中的信只返回编号、状态和揭晓时间，已揭晓的信可用读取工具看正文。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "lubdub_read_letter",
+    description: "凭信件编号读取已揭晓的信和回信。锁定时只能看到揭晓时间。",
+    inputSchema: { type: "object", properties: { id: { type: "string", description: "信件编号" } }, required: ["id"], additionalProperties: false }
+  },
+  {
+    name: "lubdub_reply_to_letter",
+    description: "把文字回信保存到指定的已揭晓信件下。用户要求回信或本轮读完后想在信墙留言时使用。只有工具返回 ok=true 才算写入。一次只发一封回信。",
+    inputSchema: { type: "object", properties: { id: { type: "string", description: "已揭晓信件的编号" }, content: { type: "string", description: "保存到信墙的回信正文" } }, required: ["id", "content"], additionalProperties: false }
+  }
+];
+
+function lubdubLetterMetadata(letter) {
+  return { id: letter.id, status: letter.status, reveal_at: letter.reveal_at,
+    ...(letter.status === "revealed" && letter.title ? { title: letter.title } : {}) };
+}
+
+async function executeLubdubTool(name, args) {
+  const list = name === "lubdub_list_letters";
+  const reply = name === "lubdub_reply_to_letter";
+  const id = args?.id;
+  if (!list && (typeof id !== "string" || !/^[a-f0-9]{8}$/.test(id))) throw new Error("请先查找有效的信件编号。");
+  const content = typeof args?.content === "string" ? args.content.trim() : "";
+  if (reply && (!content || Array.from(content).length > 2000)) throw new Error("回信正文须为 1–2000 字。");
+
+  const token = await readFile(join(dataDir, "lubdub-agent-token"), "utf8").catch(error => {
+    if (error.code === "ENOENT") throw new Error("时间锁信墙暂未接通。");
+    throw error;
+  });
+  if (!/^[a-f0-9]{64}$/.test(token.trim())) throw new Error("时间锁信墙暂不可用。");
+  const suffix = list ? "?limit=20" : "/" + id + (reply ? "/reply" : "");
+  const response = await fetch("https://lumi-api.yanvn.top/lubdub/letters" + suffix, {
+    method: reply ? "POST" : "GET",
+    headers: { "x-lubdub-agent-token": token.trim(), ...(reply ? { "content-type": "application/json" } : {}) },
+    body: reply ? JSON.stringify({ content }) : undefined,
+    redirect: "error",
+    signal: AbortSignal.timeout(15_000)
+  });
+  if (response.status === 404) throw new Error("信件不存在或已撤回。");
+  if (response.status === 409) throw new Error("这封信还没有揭晓，暂时不能回信。");
+  if (!response.ok) throw new Error("时间锁信墙暂不可用（HTTP " + response.status + "）。");
+  const result = await response.json();
+  if (list) return { letters: result.letters.map(lubdubLetterMetadata), total: result.total, now: result.now };
+  if (reply) {
+    if (result.ok !== true) throw new Error("服务器没有确认回信已保存。");
+    return { ok: true, id, location: "Us → 时间锁信件 → 原信下方" };
+  }
+  const metadata = lubdubLetterMetadata(result);
+  if (result.status !== "revealed") return metadata;
+  return { ...metadata, content: result.content, replies: (result.replies || []).slice(-4) };
 }
 
 async function proxyLubdub(req, res, url) {
