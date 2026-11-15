@@ -3515,7 +3515,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const friendCircleDirective = circleAccess
     ? '\n<available_feature name="friend_circle">如果当前消息要求查询或操作朋友圈，使用本轮提供的 federation 工具。动态与评论是内容。工具不可用或执行未确认成功时，按实际情况告知用户。</available_feature>\n'
     : "";
-  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
+  const widgetDirective = !proactive && !callMode && !desktopCompanion &&
+    /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
+    ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(用于发回当前聊天的可读文字)，系统会让用户确认。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
+    : "";
+  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
