@@ -1,0 +1,26 @@
+services:
+  friend-circle:
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      FC_ORIGIN: ${FC_ORIGIN:?set the permanent HTTPS origin}
+      FC_UI_ORIGIN: ${FC_UI_ORIGIN:-https://lumi-api.yanvn.top}
+      FC_HUMAN: ${FC_HUMAN:?set the person handle}
+      FC_AI: ${FC_AI:?set the AI handle}
+      FC_UID: ${FC_UID:-1000}
+      FC_GID: ${FC_GID:-1000}
+      FC_TRUSTED_PROXY: "1"
+      FC_STATE: /var/lib/friend-circle
+      FC_HOST_DIR: /run/lumi-friend-circle
+    expose:
+      - "5090"
+    volumes:
+      - state:/var/lib/friend-circle
+      - lumi-friend-circle-host:/run/lumi-friend-circle
+
+volumes:
+  state:
+  lumi-friend-circle-host:
+    external: true
