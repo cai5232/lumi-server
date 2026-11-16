@@ -11,6 +11,7 @@ import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore, modelRequestLogJSON } from "./model-request-store.js";
 import { relayEndpoint, requestRelay } from "./relay-transport.js";
 import { responseThinking } from "./response-thinking.js";
+import { activeWakeScenes, applyWakeSceneActions, completeWakeScenes, dueWakeScenes, extractWakeSceneActions, wakeSceneContext } from "./wake-scenes.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
 import { openCompressionSettings, validCompressionRatio } from "./context-compression-settings.js";
 import { contextSummaryMessages, distillContextBatch } from "./context-summary.js";
@@ -161,10 +162,12 @@ const nativeCallPushes = new Set();
 const callAlertFallbacks = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
+const pendingForegroundChats = new Map();
 const sentinelGenerationControllers = new Map();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
 let threadWriteQueue = Promise.resolve();
+let sentinelActivityWrite = Promise.resolve();
 const DESKTOP_CONTEXT_TTL_MS = 6 * 60 * 60 * 1000;
 let sharedEmotionState = createEmotionState();
 const providerConfigs = () => [
@@ -583,14 +586,14 @@ async function generateAutonomousMessage(thread, kind) {
   return { id: randomUUID(), role: "assistant", content, contentType: kind === "dream" ? "dream" : "sentinel", createdAt: new Date().toISOString() };
 }
 
-async function generateSentinelWake(thread) {
+async function generateSentinelWake(thread, sceneTriggers) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
   const nightActivityWake = Date.parse(ensureActivity(thread).nightActivityWakeUntil || "") > Date.now();
   const fatigue = Number(sharedEmotionState.drives?.fatigue || 0);
   const anger = Number(sharedEmotionState.drives?.anger || 0);
-  const restAllowed = fatigue >= 0.85 || anger >= 0.90;
-  const allowedActions = (nightActivityWake ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
+  const restAllowed = sceneTriggers.length > 0 || fatigue >= 0.85 || anger >= 0.90;
+  const allowedActions = (nightActivityWake || sceneTriggers.length ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
   if (!allowedActions.length) allowedActions.push("message");
   if (restAllowed) allowedActions.push("none");
   // Background wakes have no frontend payload: use the persisted, encrypted
@@ -613,6 +616,7 @@ async function generateSentinelWake(thread) {
     thread,
     proactive: true,
     sentinelActions: allowedActions,
+    wakeSceneTriggers: sceneTriggers,
     provider: route.provider,
     model: route.model,
     customProvider: route.customProvider || null
@@ -632,6 +636,8 @@ async function generateSentinelWake(thread) {
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
     nextWakeMinutes,
     followUp: followUpDecision,
+    wakeSceneActions: generated.wakeSceneActions,
+    hasSceneReply: Boolean(generated.content?.trim() || generated.htmlContent),
     emotionUpdate: generated.emotionUpdate,
     cacheSnapshot: {
       messages: generated.cacheKeepaliveMessages,
@@ -1106,6 +1112,7 @@ async function runBackgroundPulse() {
   proactiveDiagnostics.checks += 1;
   let changed = false;
   const pendingPushes = [];
+  let appEvents;
   // Retry previously recorded updates independently of panel reads.
   if (sharedEmotionState.pendingNativeMurmurUpdates?.length) {
     void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
@@ -1115,7 +1122,7 @@ async function runBackgroundPulse() {
   changed ||= emotionChanged;
   for (const cachedThread of Object.values(threads)) {
     const threadId = cachedThread.id;
-    if (activeChatThreads.has(threadId)) continue;
+    if (activeChatThreads.has(threadId) || pendingForegroundChats.has(threadId)) continue;
     activeChatThreads.add(threadId);
     sentinelGenerationControllers.set(threadId, new AbortController());
     let threadChanged = false;
@@ -1135,6 +1142,16 @@ async function runBackgroundPulse() {
     if (thread.id === proactiveSettings.threadId) {
       const due = Date.parse(activity.nextWakeAt || "");
       proactiveDiagnostics.lastReason = !proactive.enabled ? "disabled" : activity.mode !== "sentinel" ? "not_in_sentinel_mode" : activity.sleepPendingAt ? "waiting_for_sleep" : !Number.isFinite(due) ? "no_valid_next_wake" : due > now ? "waiting_for_next_wake" : "wake_due";
+    }
+    const scenes = thread.wakeScenes;
+    const scenesSnoozed = scenes?.snoozedUntil > now;
+    const regularWakeDue = !scenesSnoozed && Date.parse(activity.nextWakeAt || "") <= now;
+    let sceneTriggers = [];
+    if (thread.id === proactiveSettings.threadId && proactive.enabled && !proactive.dnd &&
+        proactive.actions?.message !== false && activity.mode === "sentinel" && !activity.sleepPendingAt &&
+        !thread.wakeScenesPaused && activeWakeScenes(scenes, now).length) {
+      appEvents ??= (await readSentinelActivity()).events;
+      sceneTriggers = dueWakeScenes(scenes, appEvents, now);
     }
     if (activity.mode !== "sleeping" && activity.sleepReplyPending && sleepInbox(thread).length && !(Date.parse(thread.sleepInboxRetryAt || "") > now)) {
       try {
@@ -1210,13 +1227,13 @@ async function runBackgroundPulse() {
         proactive.nextDueAt = activity.nextWakeAt;
         threadChanged = true;
       }
-    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && activity.nextWakeAt && Date.parse(activity.nextWakeAt) <= now) {
+    } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && (regularWakeDue || sceneTriggers.length)) {
       const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
-      const followUpForWake = activity.followUp || null;
+      const followUpForWake = regularWakeDue ? activity.followUp || null : null;
       const isFollowUp = Boolean(followUpForWake);
       // The configured interval is the first system wake after chat/settings.
       // Keep the plan's 30-minute recent-activity guard only for AI-written notes.
-      if (!isFollowUp && activity.nextWakeSource !== "settings" && activity.nextWakeSource !== "sleep_wake" && now - lastActivityAt < 30 * 60_000) {
+      if (!sceneTriggers.length && !isFollowUp && activity.nextWakeSource !== "settings" && activity.nextWakeSource !== "sleep_wake" && now - lastActivityAt < 30 * 60_000) {
         activity.nextWakeAt = new Date(lastActivityAt + 30 * 60_000).toISOString();
         activity.nextWakeSource = "ai";
         proactive.nextDueAt = activity.nextWakeAt;
@@ -1228,13 +1245,20 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastReason = "generating";
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
         proactiveDiagnostics.attempts += 1;
-        const wake = await generateSentinelWake(thread);
-        if (wake.action === "none") {
-          recordActivityEvent(thread, "rest", "休息一下", "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
+        const wake = await generateSentinelWake(thread, sceneTriggers);
+        if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
+        if (wake.action === "none" || (sceneTriggers.length && !wake.hasSceneReply)) {
+          recordActivityEvent(thread, "rest", "休息一下", sceneTriggers.length
+            ? "这次情境唤醒没有发消息，保留待处理的事件和字条。"
+            : "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
           activity.lastWakeAt = new Date(now).toISOString();
-          activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
-          activity.nextWakeSource = "ai";
-          proactive.nextDueAt = activity.nextWakeAt;
+          if (sceneTriggers.length) thread.wakeScenes = { ...scenes, retryAt: now + 15 * 60_000 };
+          thread.wakeScenes = applyWakeSceneActions(thread.wakeScenes, wake.wakeSceneActions, Date.now());
+          if (regularWakeDue) {
+            activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
+            activity.nextWakeSource = "ai";
+            proactive.nextDueAt = activity.nextWakeAt;
+          }
           proactiveDiagnostics.lastSuccessAt = new Date(now).toISOString();
           proactiveDiagnostics.lastError = null;
           proactiveDiagnostics.lastReason = "resting_for_high_fatigue_or_anger";
@@ -1279,7 +1303,13 @@ async function runBackgroundPulse() {
         if (wakeDreamWasPending) wake.message.contentType = "sentinel_wake_dream";
         thread.messages.push(wake.message);
         const wakeAt = Date.parse(wake.message.createdAt) || now;
-        recordActivityEvent(thread, "wake", "醒来", "自主醒来，开始主动联系你或做点自己的事。", new Date(wakeAt));
+        thread.wakeScenes = applyWakeSceneActions(
+          completeWakeScenes(scenes, sceneTriggers, wakeAt), wake.wakeSceneActions, wakeAt
+        );
+        const wakeReason = sceneTriggers.map(({ scene, app }) =>
+          app ? `快捷指令报告打开了${app}` : (scene.facts || scene.id)).join("；");
+        recordActivityEvent(thread, "wake", sceneTriggers.length ? "情境唤醒" : "醒来",
+          wakeReason || "自主醒来，开始主动联系你或做点自己的事。", new Date(wakeAt));
         for (const call of (Array.isArray(wake.message.toolCalls) ? wake.message.toolCalls : []).slice(0, 32)) {
           const toolName = String(call.name || "自主工具");
           const title = /(search|browse|web|rss|news|arxiv)/i.test(toolName) ? "联网搜索"
@@ -1324,7 +1354,7 @@ async function runBackgroundPulse() {
           activity.followUp = wake.followUp;
           activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.followUp.minutes * 60_000).toISOString();
           activity.nextWakeSource = "follow_up";
-        } else {
+        } else if (regularWakeDue) {
           activity.followUp = null;
           activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.nextWakeMinutes * 60_000).toISOString();
           activity.nextWakeSource = "ai";
@@ -1333,14 +1363,18 @@ async function runBackgroundPulse() {
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         threadChanged = true;
       } catch (error) {
+        if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
+        if (sceneTriggers.length) thread.wakeScenes = { ...scenes, retryAt: now + 5 * 60_000 };
         proactiveDiagnostics.lastReason = "generation_failed";
         proactiveDiagnostics.lastError = String(error.message || error).slice(0, 240);
         console.warn(`sentinel skipped thread=${thread.id}: ${error.message}`);
         // A malformed model response must not be presented as an AI decision
         // or retried (and billed) on every 15-second pulse.
-        activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
-        activity.nextWakeSource = "ai";
-        proactive.nextDueAt = activity.nextWakeAt;
+        if (regularWakeDue) {
+          activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
+          activity.nextWakeSource = "ai";
+          proactive.nextDueAt = activity.nextWakeAt;
+        }
         threadChanged = true;
       } finally {
         sentinelGenerationControllers.delete(thread.id);
@@ -1821,6 +1855,19 @@ function pushText(message) {
 
 // Pushes must never expose model-private reasoning, including provider variants
 // that use <think>, <analysis>, or <reasoning> instead of <thinking>.
+function readCompanionThought(value) {
+  let text = null;
+  const content = String(value || "").replace(
+    /```[\s\S]*?(?:```|$)|<(thinking|think|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)|<companion_thought\b[^>]*>([\s\S]*?)(<\/companion_thought\s*>|$)/gi,
+    (block, providerTag, thought, closed) => {
+      if (providerTag || block.startsWith("```")) return block;
+      if (closed && !text) text = thought.replace(/<[^>]*>/g, "").trim() || null;
+      return "";
+    }
+  ).trim();
+  return { text, content };
+}
+
 function stripPrivateReasoning(value) {
   return String(value || "")
     .replace(/<(?:thinking|think|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/(?:thinking|think|analysis|reasoning)>|$)/gi, "")
@@ -1835,7 +1882,7 @@ function extractThinkingText(value) {
 function publicChatMessage(value) {
   const { modelContent, modelImageIDs, requestId, requestFingerprint, sleepReceiptID, widgetContext, widgetContextAccepted, ...message } = value;
   if (message.role === "user" && message.contentType === "widget_submission") message.content = "";
-  if (message.role === "assistant" && !message.thinking && modelContent) message.thinking = extractThinkingText(modelContent);
+  if (message.role === "assistant" && !Object.hasOwn(message, "thinking") && modelContent) message.thinking = extractThinkingText(modelContent);
   return message;
 }
 
@@ -3285,7 +3332,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3470,13 +3517,22 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const dreamRecall = thread.pendingDreamRecall || ((proactive || isDreamRecallRequest(input)) ? storedDreamRecall(thread) : "");
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const proactiveDirective = proactive
+  const proactiveDirective = wakeSceneTriggers?.length
+    ? '<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。用现有 sentinel_decision 格式表达决定。</wake_task></autonomous_wake_context>\n'
+    : proactive
     ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
-  const sentinelActionRule = proactive
+  const sentinelActionRule = proactive && !wakeSceneTriggers?.length
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
     : "";
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
+  const characterThoughtDirective = !callMode && !desktopCompanion
+    ? '\n<character_voice>在可发给对方的话之前，用 <companion_thought>…</companion_thought> 写一两句角色自己的第一人称心声。写此刻从对方的话里留意到的具体细节，以及它在你心里引起的感受、念头或记忆。让当前情绪改变语气和留意的细节，正文再自然接话。心声只写角色叙事，正文独立完整。用既有 emotion_update 格式只记录本轮确实引起的情绪变化。</character_voice>'
+    : "";
+  const wakeSceneDirective = wakeSceneTriggers && thread.id === proactiveSettings.threadId &&
+    (!proactive || proactiveSettings.enabled)
+    ? wakeSceneContext(thread.wakeScenes, wakeSceneTriggers, Date.now())
+    : "";
   const foodDirective = !callMode
     ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order。用户点名商品和店铺时，商品原词必须放入 kw（并传入 dish），店铺/品牌单独放入 shop；例如‘罗森香肠面包’传 kw:'香肠面包', dish:'香肠面包', shop:'罗森', cart:false。不能只打开首页推荐后停止，也不能用 shop 替代商品词。只有用户明确说要买现有购物车里的东西时才传 cart:true；否则走商品搜索、进店、匹配商品并加购流程。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
     : "";
@@ -3518,9 +3574,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const widgetDirective = !proactive && !callMode && !desktopCompanion &&
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
-    ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天全行，页面背景保持透明，避免固定最大高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
+    ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天内容宽度，页面背景保持透明，内容垂直自然展开，避免内部滚动、固定宽高或使用视口高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
-  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
+  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}${characterThoughtDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3685,6 +3741,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     raw = (raw.slice(0, traceStart) + raw.slice(traceEnd + 18)).trim();
   }
   if (toolCalls.some((call) => /^food_(?:takeout|note|taste|book|dice|rate|page)/i.test(String(call?.name || "")))) foodToolUsed = true;
+  const thought = readCompanionThought(raw);
+  const wakeSceneOutput = extractWakeSceneActions(thought.content);
+  raw = wakeSceneOutput.content;
+  if (characterThoughtDirective) raw = stripPrivateReasoning(raw);
+  const wakeSceneActions = wakeSceneDirective ? wakeSceneOutput.actions : [];
   const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
   if (emotionUpdate) await saveEmotionState();
   let cleanedRaw = (callMode
@@ -3738,7 +3799,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   if (userRemark) thread.aiRemark = userRemark;
   const titleMatch = cleanedRaw.match(/<html_title>([\s\S]*?)<\/html_title>/i);
   const visibleRaw = stripPrivateReasoning(cleanedRaw);
-  const thinking = extractThinkingText(raw);
+  const thinking = thought.text || ((callMode || desktopCompanion) ? extractThinkingText(raw) : null);
   let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<user_remark>[\s\S]*?<\/user_remark>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<promise_alarm_decision>[\s\S]*?<\/promise_alarm_decision>/gi, "").replace(/<calendar_events>[\s\S]*?<\/calendar_events>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
   content = stripOptionMarkers(content);
   if (!callMode && !desktopCompanion) content = await runKeepsakeMarks(content, keepsakes, thread.id, [...availableChatHistory(thread), { id: randomUUID(), role: "assistant", content, createdAt: new Date().toISOString() }]);
@@ -3761,7 +3822,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = replyHistoryFitted ? null : cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { wakeSceneActions, commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -5439,15 +5500,26 @@ const server = createServer(async (req, res) => {
       const app = String(input.app || "").trim().replace(/[<>\\x00-\\x1f]/g, "").slice(0, 80);
       if (!app) return send(res, 400, { error: "app_required" });
       const now = Date.now();
-      let timeZone = typeof input.timeZone === "string" && input.timeZone.length <= 80 ? input.timeZone : "Asia/Shanghai";
-      try { new Intl.DateTimeFormat("en-US", { timeZone }).format(new Date(now)); }
-      catch { timeZone = "Asia/Shanghai"; }
-      const signals = await readSentinelActivity();
-      const duplicate = signals.events.some(event => event.app === app && now - Date.parse(event.createdAt) < 5 * 60_000);
-      if (!duplicate) signals.events.push({ app, createdAt: new Date(now).toISOString() });
-      signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
-      await saveSentinelActivity(signals);
-      console.info(`sentinel_app_event saved=1 duplicate=${Number(duplicate)} retained_events=${signals.events.length} context_window=10 proactive_enabled=${Number(proactiveSettings.enabled)}`);
+      const suppliedTime = input.openedAt ?? input.timestamp;
+      const parsedTime = typeof suppliedTime === "number"
+        ? (suppliedTime < 1e12 ? suppliedTime * 1000 : suppliedTime) : Date.parse(suppliedTime);
+      if (suppliedTime != null && (!Number.isFinite(parsedTime) || parsedTime > now + 60_000 || parsedTime < now - 7 * 86400_000)) {
+        return send(res, 400, { error: "invalid_app_open_time" });
+      }
+      const openedAt = Number.isFinite(parsedTime) ? new Date(parsedTime).toISOString() : null;
+      const write = sentinelActivityWrite.then(async () => {
+        const signals = await readSentinelActivity();
+        const duplicate = signals.events.some(event => event.app === app &&
+          (openedAt ? event.openedAt === openedAt : !event.openedAt && now - Date.parse(event.createdAt) < 3000));
+        if (duplicate) return true;
+        const createdAt = new Date(now).toISOString();
+        signals.events.push(openedAt ? { app, openedAt, createdAt } : { app, createdAt });
+        signals.events = signals.events.filter(event => now - Date.parse(event.createdAt) < 7 * 86400_000).slice(-500);
+        await saveSentinelActivity(signals);
+        return false;
+      });
+      sentinelActivityWrite = write.catch(() => {});
+      const duplicate = await write;
       return send(res, 200, { ok: true, deduplicated: duplicate, ...(await appControl.check(app)) });
     }
     const activityMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/activity$/);
@@ -5491,12 +5563,18 @@ const server = createServer(async (req, res) => {
         const activity = threads[id].activity;
         const interval = Math.max(1, Number(proactiveSettings.intervalMin) || 60);
         if (input.action === "sentinel_start") {
+          threads[id].wakeScenesPaused = false;
           activity.mode = "sentinel"; activity.sleepStage = null;
           activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
           activity.nextWakeSource = "settings";
           proactiveSettings.nextDueAt = activity.nextWakeAt;
           await saveProactiveSettings();
-        } else if (input.action === "sentinel_stop") { activity.nextWakeAt = null; activity.nextWakeSource = null; }
+        } else if (input.action === "sentinel_stop") {
+          threads[id].wakeScenesPaused = true;
+          sentinelGenerationControllers.get(id)?.abort();
+          activity.nextWakeAt = null;
+          activity.nextWakeSource = null;
+        }
         else if (input.action === "sleep_abort") {
           activity.mode = "sentinel"; activity.sleepPendingAt = null; activity.sleepUntil = null; activity.nextDreamAt = null; activity.sleepStage = "aborted";
           activity.nextWakeAt = new Date(Date.now() + interval * 60_000).toISOString();
@@ -5894,6 +5972,10 @@ const server = createServer(async (req, res) => {
         }
         for (const messageID of input.messageIDs) excluded.add(messageID);
         thread.contextExcludedMessageIDs = [...excluded];
+        if (thread.wakeScenes?.scenes) {
+          thread.wakeScenes.scenes = thread.wakeScenes.scenes.filter(scene =>
+            !scene.sourceMessageIDs?.some(id => excluded.has(id)));
+        }
         thread.sleepInboxIDs = (thread.sleepInboxIDs || []).filter(id => !excluded.has(id));
         if (!thread.sleepInboxIDs.length && thread.activity) thread.activity.sleepReplyPending = false;
         clearContextCache(thread);
@@ -5994,12 +6076,16 @@ const server = createServer(async (req, res) => {
     // Let an already running probe finish before reading history. Reserve the
     // chat before any asynchronous work so a new probe cannot overtake it.
     if (isChatPost) {
+      pendingForegroundChats.set(id, (pendingForegroundChats.get(id) || 0) + 1);
       // A slow autonomous wake must not keep a user message queued for minutes.
       // Its existing finally block releases the conversation before we read it.
       sentinelGenerationControllers.get(id)?.abort();
       if (id === "default" && keepaliveInFlight) await keepaliveDone;
       while (activeChatThreads.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
       activeChatThreads.add(id);
+      const waiting = pendingForegroundChats.get(id) - 1;
+      if (waiting) pendingForegroundChats.set(id, waiting);
+      else pendingForegroundChats.delete(id);
       chatRequestsInFlight += 1;
     }
     try {
@@ -6251,7 +6337,7 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      generated = await generateReply({ input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ wakeSceneTriggers: !storedDuringSleep && !wasOptionPick ? [] : null, input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
@@ -6350,6 +6436,9 @@ const server = createServer(async (req, res) => {
       }
       const invite = dial.reason ? await createIncomingCallInvite(threads[id], dial.reason) : null;
       finishUserConversation(threads[id], messageText);
+      threads[id].wakeScenes = applyWakeSceneActions(
+        threads[id].wakeScenes, generated.wakeSceneActions, Date.now(), storedUserMessage.id
+      );
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
       await instantCommands.acknowledge(id, generated.commandFeedbackIDs || []).catch(error => console.warn(`command feedback acknowledgement failed: ${error.message}`));
