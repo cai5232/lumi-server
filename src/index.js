@@ -1,3 +1,4 @@
+import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
 import { createFriendCircleProxy, isFriendCirclePath } from "./friend-circle-proxy.js";
 import { createFriendCircleTools, friendCircleAccess } from "./friend-circle-tools.js";
 import { createKeepsakeStore, keepsakeContext, runKeepsakeMarks } from "./keepsakes.js";
@@ -50,6 +51,14 @@ const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const appControl = createAppControlStore(dataDir);
+const nativeAlarms = openNativeAlarms(join(dataDir, "native-alarms.json"));
+async function nativeAlarmDeviceForModel() {
+  try { return (await nativeAlarms.get()).device; }
+  catch (error) {
+    console.warn(`[native-alarm] device state unavailable: ${error.message}`);
+    return null;
+  }
+}
 const keepsakes = createKeepsakeStore(dataDir);
 const desktopCompanion = createDesktopCompanionService({
   dataDir,
@@ -1817,7 +1826,7 @@ function apnsBearerToken() {
   return apnsJwtCache.token;
 }
 
-async function sendAPNs(device, message, metadata = null, voip = false) {
+async function sendAPNs(device, message, metadata = null, voip = false, background = false) {
   const host = device.environment === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
   const bearer = apnsBearerToken();
   const client = connect(host);
@@ -1831,8 +1840,9 @@ async function sendAPNs(device, message, metadata = null, voip = false) {
       ":path": `/3/device/${device.token}`,
       authorization: `bearer ${bearer}`,
       "apns-topic": `${process.env.LUMI_APNS_TOPIC || "com.cai5232.LumiPush"}${voip ? ".voip" : ""}`,
-      "apns-push-type": voip ? "voip" : "alert",
-      "apns-priority": "10",
+      "apns-push-type": background ? "background" : voip ? "voip" : "alert",
+      "apns-priority": background ? "5" : "10",
+      ...(background ? { "apns-collapse-id": "lumi-native-alarms" } : {}),
       ...(voip ? { "apns-expiration": "0" } : {}),
       "content-type": "application/json"
     });
@@ -1844,10 +1854,22 @@ async function sendAPNs(device, message, metadata = null, voip = false) {
       resolve({ status, body: responseBody });
     });
     request.on("error", (error) => { clearTimeout(timeout); client.destroy(); reject(error); });
-    request.end(JSON.stringify(voip
+    request.end(JSON.stringify(background ? { aps: { "content-available": 1 }, ...(metadata || {}) } : voip
       ? { aps: {}, ...(metadata || {}) }
       : { aps: { alert: { title: metadata?.kind === "incoming_call" ? "沈屿来电" : "沈屿", body: pushText(message) }, category: "LUMI_MESSAGE", sound: "default", "mutable-content": 1 }, ...(metadata || {}) }));
   });
+}
+
+let nextAlarmPushAt = 0;
+async function notifyNativeAlarmDevice() {
+  if (nextAlarmPushAt > Date.now() || !apnsConfigured()) return;
+  nextAlarmPushAt = Date.now() + 60_000;
+  try {
+    const device = await nativeAlarms.pushTarget();
+    if (!device) { nextAlarmPushAt = 0; return; }
+    const result = await sendAPNs(device, "", { kind: "native_alarm_sync" }, false, true);
+    if (result.status >= 300) console.warn(`[native-alarm] APNs HTTP ${result.status}`);
+  } catch (error) { console.warn(`[native-alarm] wake attempt failed: ${error.message}`); }
 }
 
 function pushText(message) {
@@ -2339,7 +2361,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
 
 const loadFriendCircleTools = createFriendCircleTools(process.env.LUMI_FRIEND_CIRCLE_HOST_DIR);
 
-async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], circleAccess = null, signal, returnMetadata = false, stream = true, knownInputTokens = null, singleAttempt = false, fitReplyHistory = false, onHistoryFitted }) {
+async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], circleAccess = null, nativeAlarmTurn = null, signal, returnMetadata = false, stream = true, knownInputTokens = null, singleAttempt = false, fitReplyHistory = false, onHistoryFitted }) {
   // Only a frontend-selected custom route may issue a model request.
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
@@ -2495,8 +2517,27 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `共享日历：${tool.description}`, parameters: tool.inputSchema } });
     }
   }
+  if (nativeAlarmTurn && !singleAttempt) {
+    const device = await nativeAlarmDeviceForModel();
+    if (device?.allowAI && (!proactive || device.allowAutonomous)) {
+      for (const tool of nativeAlarmTools) {
+        mcpToolMap.set(tool.name, { tool, nativeAlarmTool: true, allowWrite: true, execute: async args => {
+          if (tool.name === "list_alarms") return nativeAlarms.get();
+          if (tool.name === "get_alarm_status") return nativeAlarms.status(args.operationID);
+          const hash = createHash("sha256").update(JSON.stringify([nativeAlarmTurn, tool.name, args], (key, value) =>
+            value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest("hex");
+          const operationID = [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join("-");
+          const kind = tool.name.split("_")[0];
+          const task = await nativeAlarms.mutate({ ...args, kind }, { source: "ai", autonomous: proactive, operationID });
+          void notifyNativeAlarmDevice();
+          return { ...task, message: "仅 applied 表示 iPhone 已确认执行。推送和待同步状态都不等于成功。" };
+        } });
+        mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+      }
+    }
+  }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool)
+    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool || mcpToolMap.get(tool.name)?.nativeAlarmTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
@@ -2639,7 +2680,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
   const nativeMcpBlocks = Array.isArray(data?.content) && data.content.some(block => ["mcp_tool_use", "mcp_tool_result"].includes(block?.type));
   const nativeMcpHasText = Array.isArray(data?.content) && data.content.some(block => block?.type === "text" && String(block.text || "").trim());
   if (!singleAttempt && nativeAnthropic && mcpThreadId && mcpRound < 4 && (data?.stop_reason === "pause_turn" || (nativeMcpBlocks && !nativeMcpHasText))) {
-    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, { role: "assistant", content: data.content || [] }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, nativeAlarmTurn, returnMetadata });
   }
   const nativeToolUses = nativeAnthropic && Array.isArray(data?.content)
     ? data.content.filter((block) => block?.type === "tool_use")
@@ -2676,7 +2717,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, { role: "assistant", content: data.content }, { role: "user", content: results }], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, nativeAlarmTurn, returnMetadata });
   }
   const requestedToolCalls = !nativeAnthropic ? data?.choices?.[0]?.message?.tool_calls : null;
   if (!singleAttempt && Array.isArray(requestedToolCalls) && requestedToolCalls.length && mcpRound < 4) {
@@ -2684,7 +2725,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
       if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
-      if (!entry.internalCalendar && !entry.lubdubTool && !entry.friendCircleTool && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      if (!entry.internalCalendar && !entry.lubdubTool && !entry.friendCircleTool && !entry.nativeAlarmTool && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
@@ -2704,7 +2745,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
-    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, returnMetadata });
+    return callModel({ signal, stream, knownInputTokens, fitReplyHistory, onHistoryFitted, messages: [...messages, data.choices[0].message, ...results], temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound: mcpRound + 1, disableThinkingRetry, emptyResponseRetried, proactive, toolTrace, circleAccess, nativeAlarmTurn, returnMetadata });
   }
   cacheStats.modelCalls += 1;
   const usage = data?.usage || {};
@@ -2746,7 +2787,7 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     : typeof rawContent === "string" ? rawContent : "";
   if (!content.trim() && !singleAttempt && !emptyResponseRetried && !responseOutput.some(item => item?.type === "function_call")) {
     console.warn(`[model] empty text response provider=${provider} model=${model} stop=${data?.stop_reason || data?.choices?.[0]?.finish_reason || "unknown"}; retrying once as JSON on the same route`);
-    return callModel({ signal, stream: false, knownInputTokens, fitReplyHistory, onHistoryFitted, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, circleAccess, returnMetadata });
+    return callModel({ signal, stream: false, knownInputTokens, fitReplyHistory, onHistoryFitted, messages, temperature, maxOutputTokens, useMaximumModelOutput, cacheCurrentUser, onUsage, provider, model: requestedModel, mailThreadId, autonomous, customProvider, mcpThreadId, mcpRound, disableThinkingRetry: disableThinkingRetry || (nativeAnthropic && Boolean(requestBody.thinking)), emptyResponseRetried: true, proactive, toolTrace, circleAccess, nativeAlarmTurn, returnMetadata });
   }
   if (!content.trim()) {
     const finishReason = data?.stop_reason || data?.choices?.[0]?.finish_reason || data?.status || "unknown";
@@ -3339,7 +3380,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null }) {
+async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3543,6 +3584,11 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const foodDirective = !callMode
     ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order。用户点名商品和店铺时，商品原词必须放入 kw（并传入 dish），店铺/品牌单独放入 shop；例如‘罗森香肠面包’传 kw:'香肠面包', dish:'香肠面包', shop:'罗森', cart:false。不能只打开首页推荐后停止，也不能用 shop 替代商品词。只有用户明确说要买现有购物车里的东西时才传 cart:true；否则走商品搜索、进店、匹配商品并加购流程。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
     : "";
+  const alarmDevice = !callMode && !desktopCompanion && (proactive || nativeAlarmMessageID) ? await nativeAlarmDeviceForModel() : null;
+  const nativeAlarmDirective = alarmDevice?.allowAI && (!proactive || alarmDevice.allowAutonomous)
+    ? `<native_alarm_tools>处理 iPhone 原生闹钟时用 create_alarm、update_alarm、delete_alarm、list_alarms 和 get_alarm_status。可以在用户已开启权限时主动使用。注册设备时区为 ${alarmDevice.timeZone}；用 list_alarms 查询设备当地日期时间。一次性闹钟用 fireLocal；明确指定其他时区时用带偏移量的 fireAt，重复闹钟跟随设备当地时间。避免同时用约定提醒登记同一个闹钟。queued、pending 或 applying 都只表示请求，只有 iPhone 回执 applied 表示操作已执行；不要声称未确认的闹钟已设置。</native_alarm_tools>
+`
+    : "";
   const alarmContext = promiseAlarmEnabled && !proactive && !callMode && !thread.contextResetAt ? await promiseAlarmContext(thread?.id || "default") : "";
   const alarmDirective = promiseAlarmEnabled && !proactive && !callMode
     ? `\n\n<promise_alarm_instructions>如果她要求提醒、叫醒或回来找她，但没有明确钟点或可计算的时长，先问清楚具体时间，不要猜。她给出时间且你明确答应后，在正常回复末尾附加隐藏标签 <promise_alarm_decision>{"action":"create","due_local":"YYYY-MM-DD HH:MM","task":"提醒内容","call_requested":boolean}</promise_alarm_decision>。修改用 action=replace 并提供 target_id；取消用 action=cancel 和 target_id。仅在确实形成/修改/取消约定时输出标签；其他情况不输出。电话提醒设 call_requested=true，普通提醒为 false。不要展示标签，也不要声称已登记成功。</promise_alarm_instructions>${alarmContext ? `\n${alarmContext}` : ""}`
@@ -3583,7 +3629,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
     ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天内容宽度，页面背景保持透明，内容垂直自然展开，避免内部滚动、固定宽高或使用视口高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
-  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}${characterThoughtDirective}`;
+  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}${characterThoughtDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3669,7 +3715,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   }
   let replyHistoryFitted = false;
   let raw = await callModel({
-    toolTrace: performedToolCalls, circleAccess, signal, knownInputTokens: previousChatInputTokens(thread),
+    toolTrace: performedToolCalls, circleAccess,
+    nativeAlarmTurn: alarmDevice ? (nativeAlarmMessageID || randomUUID()) : null, signal, knownInputTokens: previousChatInputTokens(thread),
     fitReplyHistory: !proactive && !callMode && !desktopCompanion,
     onHistoryFitted: () => { replyHistoryFitted = true; },
     // Calls use the same model output settings as ordinary chats; do not add a
@@ -5050,6 +5097,31 @@ const server = createServer(async (req, res) => {
           !timingSafeEqual(Buffer.from(expected), Buffer.from(supplied))) return send(res, 401, { error: "unauthorized" });
       return send(res, 200, await checkCacheKeepalive());
     }
+    if (url.pathname === "/v1/native-alarms" || url.pathname.startsWith("/v1/native-alarms/")) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const operation = url.pathname.slice("/v1/native-alarms".length);
+      if (req.method === "GET" && !operation) return send(res, 200, await nativeAlarms.get());
+      if (req.method === "POST" && ["/device", "/mutate", "/claim", "/receipt", "/observe", "/audio"].includes(operation)) {
+        const input = await limitedJSONBody(req, 96_000);
+        if (!input || typeof input !== "object" || Array.isArray(input)) return send(res, 400, { error: "无效闹钟请求。" });
+        if (operation === "/device") return send(res, 200, await nativeAlarms.register(input));
+        if (operation === "/mutate") return send(res, 200, await nativeAlarms.mutate(input, {
+          source: "user", deviceID: input.deviceID, operationID: input.operationID
+        }));
+        if (operation === "/claim") return send(res, 200, await nativeAlarms.claim(input.deviceID, input.operationID));
+        if (operation === "/receipt") return send(res, 200, await nativeAlarms.receipt(input.deviceID, input.operationID, input));
+        if (operation === "/observe") return send(res, 200, await nativeAlarms.observe(input.deviceID, input.observations));
+        const { device } = await nativeAlarms.get();
+        if (!device || device.id !== input.deviceID) return send(res, 403, { error: "设备未绑定。" });
+        const task = await nativeAlarms.status(input.operationID);
+        if (task.status !== "applying" || task.config?.sound !== "voice" || !task.config?.enabled) return send(res, 409, { error: "没有待合成的闹钟声音。" });
+        if (task.source === "ai" && (!device.allowAI || (task.autonomous && !device.allowAutonomous))) return send(res, 403, { error: "AI 闹钟权限已关闭。" });
+        const speech = await synthesizeSpeech(task.config.voiceText || task.config.title, { ...input.tts, callDeadline: true });
+        if (!speech?.audioBase64) return send(res, 502, { error: "语音服务没有返回闹钟铃声。" });
+        return send(res, 200, { audio: speech.audioBase64 });
+      }
+      return send(res, 405, { error: "method_not_allowed" });
+    }
     const callRoute = /^\/v1\/chats\/[^/]+\/calls(?:\/[^/]+(?:\/(?:answer|messages|end))?)?$/.test(url.pathname);
     if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/settings/solo", "/v1/solo/metrics", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
@@ -6378,7 +6450,7 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      generated = await generateReply({ wakeSceneTriggers: !storedDuringSleep && !wasOptionPick ? [] : null, input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ nativeAlarmMessageID: requestId ? id + ":" + requestId : storedUserMessage.id, wakeSceneTriggers: !storedDuringSleep && !wasOptionPick ? [] : null, input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
@@ -6607,7 +6679,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   });
 }
 setInterval(() => { void checkCacheKeepalive(); }, 60_000);
-setInterval(() => { runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, backgroundPulseIntervalMs);
+setInterval(() => { void notifyNativeAlarmDevice(); runBackgroundPulse().catch((error) => console.warn(`background pulse failed: ${error.message}`)); }, backgroundPulseIntervalMs);
 
 // Discover unavailable tool servers in the background rather than adding their timeout to every chat.
 let mcpDiscoveryInFlight = false;
