@@ -634,6 +634,7 @@ async function generateSentinelWake(thread, sceneTriggers) {
     message: { id: randomUUID(), role: "assistant", content: generated.content || "我刚刚想到你，想来找你说说话。", toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
     action,
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
+    callOpening: typeof decision.callOpening === "string" ? decision.callOpening.trim() : "",
     nextWakeMinutes,
     followUp: followUpDecision,
     wakeSceneActions: generated.wakeSceneActions,
@@ -1332,7 +1333,7 @@ async function runBackgroundPulse() {
           pushMessage = "自动截屏还没送达，请检查快捷指令的邮件自动化";
           pushMetadata = { kind: "screen_peek_missing" };
         } else if (wake.action === "phone") {
-          const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content);
+          const invite = await createIncomingCallInvite(thread, wake.actionReason || wake.message.content, wake.callOpening);
           proactiveSettings.lastPhoneCallDate = localDateAndHour().date;
           await saveProactiveSettings();
           pendingPushes.push({ threadId: thread.id, message: `📞 ${invite.reason}`, call: invite, startCallRing: () => startIncomingCallRing(thread.id, invite) });
@@ -1988,13 +1989,14 @@ function extractScreenMarker(content) {
   return { requested: Boolean(match), content: match ? source.replace(match[0], "").replace(/\n{3,}/g, "\n\n").trim() : source };
 }
 
-async function createIncomingCallInvite(thread, reason) {
+async function createIncomingCallInvite(thread, reason, openingLine = "") {
   const now = new Date();
   const call = {
     id: randomUUID(),
     initiator: "assistant",
     state: "pending",
     reason: String(reason || "想听听你的声音").slice(0, 120),
+    ...(openingLine ? { openingLine: spokenReply(openingLine).slice(0, 180) } : {}),
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + 30_000).toISOString(),
     turns: []
@@ -3520,7 +3522,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const proactiveDirective = wakeSceneTriggers?.length
     ? '<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。用现有 sentinel_decision 格式表达决定。</wake_task></autonomous_wake_context>\n'
     : proactive
-    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。选择 phone 时，在同一个 sentinel_decision 中加 callOpening，写一句接通后会直接说给言言的简短开场白。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive && !wakeSceneTriggers?.length
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
@@ -3987,7 +3989,7 @@ async function synthesizeSpeech(text, settings) {
           ? { stability: settings.softVoice ? 0.72 : 0.5, similarity_boost: 0.75 }
           : { stability: settings.softVoice ? 0.72 : 0.5, similarity_boost: 0.75, style: 0, use_speaker_boost: !settings.softVoice }
       }),
-      signal: AbortSignal.timeout(ttsTimeoutMs)
+      signal: AbortSignal.timeout(settings.callDeadline === true ? Math.min(20_000, ttsTimeoutMs) : ttsTimeoutMs)
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => "");
@@ -4017,7 +4019,7 @@ async function synthesizeSpeech(text, settings) {
       voice_setting: { voice_id: settings.voiceID, speed: settings.softVoice ? 0.86 : 1, vol: settings.softVoice ? 0.68 : 1, pitch: 0 },
       audio_setting: { sample_rate: 32000, bitrate: 128000, format: "mp3", channel: 1 }
     }),
-    signal: AbortSignal.timeout(ttsTimeoutMs)
+    signal: AbortSignal.timeout(settings.callDeadline === true ? Math.min(20_000, ttsTimeoutMs) : ttsTimeoutMs)
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || result?.base_resp?.status_code) throw new Error(result?.base_resp?.status_msg || `MiniMax TTS 返回 ${response.status}`);
@@ -5759,8 +5761,16 @@ const server = createServer(async (req, res) => {
         await saveEmotionState();
         return send(res, 200, { callId: call.id, status: "declined", assistantMessage, callStatusMessage });
       }
+      const nativeAudio = input.nativeAudio === true;
+      if (nativeAudio && (!input.tts?.enabled || !input.tts?.apiKey || !input.tts?.voiceID)) {
+        return send(res, 400, { error: "call_voice_not_configured" });
+      }
       let generated;
-      try {
+      if (nativeAudio) {
+        // The call invite already knows its opening. Only synthesize the
+        // audio on answer using the same provider and voice as in-app calls.
+        generated = { content: call.openingLine || "喂，听得到吗？" };
+      } else try {
         generated = await generateReply({
           input: `<internal_call_accepted>言言接起了你主动发起的电话。请自然地说出接通后的第一句话，可以分成多段短句，每句单独换行。${input.softVoice ? "请用温柔、轻声、稍慢的语气。" : ""}不要提及内部标签。</internal_call_accepted>`,
           systemPrompt: input.systemPrompt,
@@ -5787,14 +5797,17 @@ const server = createServer(async (req, res) => {
       call.state = "active";
       call.startedAt = now;
       call.turns = [opening];
+      if (nativeAudio) await saveThreads(threads);
       let speech = null;
       let speechError = null;
       if (input.tts?.enabled && openingText) {
-        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, softVoice: Boolean(input.softVoice), maxChars: 900 }); }
+        try { speech = await synthesizeSpeech(openingSpeechText, { ...input.tts, softVoice: Boolean(input.softVoice), maxChars: 900, ...(nativeAudio ? { callDeadline: true } : {}) }); }
         catch (error) { speechError = (error.message || String(error)).slice(0, 200); }
       } else if (openingText) speechError = "客户端没有提供 MiniMax TTS 配置";
-      await saveThreads(threads);
-      await saveEmotionState();
+      if (!nativeAudio) {
+        await saveThreads(threads);
+        await saveEmotionState();
+      }
       const firstMessage = { id: opening.id, role: opening.role, content: opening.content, createdAt: opening.createdAt, speechScript: opening.speechScript };
       return send(res, 200, { callId: call.id, status: "accepted", firstMessage, speechAudioBase64: speech?.audioBase64 || null, speechDuration: speech?.duration || null, speechScript: speech ? openingSpeechText : null, speechError });
     }
