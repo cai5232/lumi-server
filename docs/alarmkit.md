@@ -27,3 +27,9 @@
 3. 修改为工作日闹钟，再关闭并删除。确认只影响 Lumi 的闹钟。
 4. 在有/无静默推送执行机会时各创建一次 VPS 任务。分别确认后台回执，以及打开 App 后才执行的待同步任务。
 5. 检查取消授权、强制退出、跨时区和设备重启场景。尤其核对重启后第一次解锁之前，自定义语音的实际可用性。
+
+## Lumi 闹钟 MCP
+
+「Settings → Tools」会自动列出后端管理的「iPhone 系统闹钟」MCP。Lumi 在现有模型请求中提供五个闹钟工具，沿用手机端的 AI 闹钟权限。MCP 的开关控制工具可用性。
+
+服务端提供 `/v1/native-alarms/mcp`，使用 Streamable HTTP 和现有 Lumi Bearer 鉴权。外部 MCP 调用按自主活动权限执行，写操作需传入唯一的 `operationID`，重试时应复用该 UUID。工具返回手机回执，`pending` 表示已排队，`applied` 表示 iPhone 已执行。

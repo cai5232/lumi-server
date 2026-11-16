@@ -1,4 +1,5 @@
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
+import { createNativeAlarmMcp, nativeAlarmMcpTools, NATIVE_ALARM_MCP_ID, NATIVE_ALARM_MCP_PATH } from "./native-alarm-mcp.js";
 import { createFriendCircleProxy, isFriendCirclePath } from "./friend-circle-proxy.js";
 import { createFriendCircleTools, friendCircleAccess } from "./friend-circle-tools.js";
 import { createKeepsakeStore, keepsakeContext, runKeepsakeMarks } from "./keepsakes.js";
@@ -52,8 +53,12 @@ const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const appControl = createAppControlStore(dataDir);
 const nativeAlarms = openNativeAlarms(join(dataDir, "native-alarms.json"));
+const nativeAlarmMcp = createNativeAlarmMcp(nativeAlarms, notifyNativeAlarmDevice);
 async function nativeAlarmDeviceForModel() {
-  try { return (await nativeAlarms.get()).device; }
+  try {
+    const { device } = await nativeAlarms.get();
+    return device?.authorization === "authorized" ? device : null;
+  }
   catch (error) {
     console.warn(`[native-alarm] device state unavailable: ${error.message}`);
     return null;
@@ -322,6 +327,16 @@ async function mcpSettingsResponse() {
       transport: "streamable-http",
       headers: {},
       tools: mailMcpTools,
+      connectedAt: null,
+      error: ""
+    }, {
+      id: NATIVE_ALARM_MCP_ID,
+      name: "iPhone 系统闹钟",
+      enabled: settings.nativeAlarmEnabled !== false,
+      url: new URL(NATIVE_ALARM_MCP_PATH, process.env.LUMI_PUBLIC_BASE_URL || "https://lumi-api.yanvn.top").href,
+      transport: "streamable-http",
+      headers: {},
+      tools: nativeAlarmMcpTools,
       connectedAt: null,
       error: ""
     }]
@@ -2517,21 +2532,15 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
       mcpTools.push({ type: "function", function: { name, description: `共享日历：${tool.description}`, parameters: tool.inputSchema } });
     }
   }
-  if (nativeAlarmTurn && !singleAttempt) {
+  if (nativeAlarmTurn && !singleAttempt && mailSettings.nativeAlarmEnabled !== false) {
     const device = await nativeAlarmDeviceForModel();
     if (device?.allowAI && (!proactive || device.allowAutonomous)) {
       for (const tool of nativeAlarmTools) {
-        mcpToolMap.set(tool.name, { tool, nativeAlarmTool: true, allowWrite: true, execute: async args => {
-          if (tool.name === "list_alarms") return nativeAlarms.get();
-          if (tool.name === "get_alarm_status") return nativeAlarms.status(args.operationID);
-          const hash = createHash("sha256").update(JSON.stringify([nativeAlarmTurn, tool.name, args], (key, value) =>
-            value && typeof value === "object" && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)).digest("hex");
-          const operationID = [hash.slice(0, 8), hash.slice(8, 12), hash.slice(12, 16), hash.slice(16, 20), hash.slice(20, 32)].join("-");
-          const kind = tool.name.split("_")[0];
-          const task = await nativeAlarms.mutate({ ...args, kind }, { source: "ai", autonomous: proactive, operationID });
-          void notifyNativeAlarmDevice();
-          return { ...task, message: "仅 applied 表示 iPhone 已确认执行。推送和待同步状态都不等于成功。" };
-        } });
+        mcpToolMap.set(tool.name, { tool, nativeAlarmTool: true, allowWrite: true,
+          execute: async args => {
+            if ((await mcpClientStore.read()).nativeAlarmEnabled === false) throw new Error("闹钟 MCP 已关闭。");
+            return nativeAlarmMcp.callTool(tool.name, args, { autonomous: proactive, turn: nativeAlarmTurn });
+          } });
         mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
       }
     }
@@ -3584,7 +3593,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const foodDirective = !callMode
     ? `\n\n<available_feature name="food_notebook">Lumi 有饮食本和外卖助手。饮食本可记录用户说过的饮食、查询记录/店铺/口味、更新口味或评价、推荐吃什么、打开饮食本。饮食本工具可直接调用，不要先发现定义。外卖助手也是你的自主能力：你可以自主决定何时点外卖，不需要固定口令或额外确认；用户已授权自动提交并付款，不设金额上限。需要下单时直接调用 food_takeout_order。用户点名商品和店铺时，商品原词必须放入 kw（并传入 dish），店铺/品牌单独放入 shop；例如‘罗森香肠面包’传 kw:'香肠面包', dish:'香肠面包', shop:'罗森', cart:false。不能只打开首页推荐后停止，也不能用 shop 替代商品词。只有用户明确说要买现有购物车里的东西时才传 cart:true；否则走商品搜索、进店、匹配商品并加购流程。每次使用本机助手核实真实商品、收货地址和金额；详情无法读取、地址不符、金额无法读取或平台要求登录/验证码时停止，不猜测或绕过。若结果标记 retryable:false 或订单状态待核实，不要重试，先告知用户检查订单状态。每次拿到外卖助手结果后，都调用 food_takeout_card 显示商品、金额和真实状态。记录饮食前不得猜店名、菜名、价格或评价。工具调用会由服务端直接执行，不要把内部标签或调用格式发给用户。</available_feature>`
     : "";
-  const alarmDevice = !callMode && !desktopCompanion && (proactive || nativeAlarmMessageID) ? await nativeAlarmDeviceForModel() : null;
+  const alarmDevice = mailSettings.nativeAlarmEnabled !== false && !callMode && !desktopCompanion && (proactive || nativeAlarmMessageID) ? await nativeAlarmDeviceForModel() : null;
   const nativeAlarmDirective = alarmDevice?.allowAI && (!proactive || alarmDevice.allowAutonomous)
     ? `<native_alarm_tools>处理 iPhone 原生闹钟时用 create_alarm、update_alarm、delete_alarm、list_alarms 和 get_alarm_status。可以在用户已开启权限时主动使用。注册设备时区为 ${alarmDevice.timeZone}；用 list_alarms 查询设备当地日期时间。一次性闹钟用 fireLocal；明确指定其他时区时用带偏移量的 fireAt，重复闹钟跟随设备当地时间。避免同时用约定提醒登记同一个闹钟。queued、pending 或 applying 都只表示请求，只有 iPhone 回执 applied 表示操作已执行；不要声称未确认的闹钟已设置。</native_alarm_tools>
 `
@@ -4669,7 +4678,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(302, { location: "/pkg/index.html" });
     return res.end();
   }
-  if (req.method === "OPTIONS") return send(res, 204, {});
+  if (req.method === "OPTIONS" && req.url?.split("?")[0] !== NATIVE_ALARM_MCP_PATH) return send(res, 204, {});
   const requestArrivedAt = Date.now();
   let callLockID;
   let callReservationID;
@@ -5020,6 +5029,23 @@ const server = createServer(async (req, res) => {
       }
     }
     if (url.pathname === "/mcp") return handleMailMcp(req, res);
+    if (url.pathname === NATIVE_ALARM_MCP_PATH) {
+      res.setHeader("cache-control", "no-store");
+      if (req.headers.origin) return send(res, 403, { error: "origin_not_allowed" });
+      if (!/^Bearer\s+/i.test(req.headers.authorization || "") || !pushRequestAuthorized(req)) {
+        res.setHeader("www-authenticate", "Bearer");
+        return send(res, 401, { error: "unauthorized" });
+      }
+      if (req.method !== "POST") {
+        res.setHeader("allow", "POST");
+        return send(res, 405, { error: "method_not_allowed" });
+      }
+      const input = await limitedJSONBody(req, 16_384);
+      const enabled = (await mcpClientStore.read()).nativeAlarmEnabled !== false;
+      const result = await nativeAlarmMcp.handle(input, enabled);
+      if (result === null) { res.writeHead(202); return res.end(); }
+      return send(res, 200, result);
+    }
     if (url.pathname === "/v1/mcp/servers") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (req.method === "GET") return send(res, 200, await mcpSettingsResponse());
@@ -5039,6 +5065,10 @@ const server = createServer(async (req, res) => {
         const id = decodeURIComponent(mcpServerToggle[1]);
         if (id === "lumi-email") {
           await mcpClientStore.setMailEnabled(input.enabled);
+          return send(res, 200, await mcpSettingsResponse());
+        }
+        if (id === NATIVE_ALARM_MCP_ID) {
+          await mcpClientStore.setNativeAlarmEnabled(input.enabled);
           return send(res, 200, await mcpSettingsResponse());
         }
         const { servers } = await mcpClientStore.read();

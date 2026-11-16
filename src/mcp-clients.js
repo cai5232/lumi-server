@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { NATIVE_ALARM_MCP_ID } from './native-alarm-mcp.js';
 
 const MAX_SERVERS = 30;
 export const ENGAWA_SERVER_ID = 'engawa-porch';
@@ -31,7 +32,7 @@ export function normalizeMcpServers(input) {
   return input.map(item => {
     if (!item || typeof item !== 'object') throw new Error('MCP 服务器格式无效');
     const id = String(item.id || randomUUID());
-    if (id === 'lumi-email') throw new Error('此 ID 为内置邮箱 MCP 保留');
+    if (id === 'lumi-email' || id === NATIVE_ALARM_MCP_ID) throw new Error('此 ID 为内置 MCP 保留');
     if (ids.has(id)) throw new Error('MCP 服务器 ID 重复');
     ids.add(id);
     const headers = {};
@@ -106,7 +107,7 @@ export class McpClientStore {
     const action = this.queue.then(async () => {
       const current = await this.read();
       const servers = normalizeMcpServers(input.servers);
-      const next = { servers, revision: current.revision + 1, mailEnabled: current.mailEnabled !== false };
+      const next = { ...current, servers, revision: current.revision + 1 };
       await mkdir(dirname(this.path), { recursive: true });
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       await writeFile(temporary, JSON.stringify(next, null, 2)); await rename(temporary, this.path);
@@ -134,9 +135,15 @@ export class McpClientStore {
     this.queue = action.catch(() => {}); return action;
   }
   async setMailEnabled(enabled) {
+    return this.setBuiltInEnabled("mailEnabled", enabled);
+  }
+  async setNativeAlarmEnabled(enabled) {
+    return this.setBuiltInEnabled("nativeAlarmEnabled", enabled);
+  }
+  async setBuiltInEnabled(key, enabled) {
     const action = this.queue.then(async () => {
       const current = await this.read();
-      const next = { ...current, servers: current.servers, revision: current.revision + 1, mailEnabled: enabled === true };
+      const next = { ...current, servers: current.servers, revision: current.revision + 1, [key]: enabled === true };
       await mkdir(dirname(this.path), { recursive: true });
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       await writeFile(temporary, JSON.stringify(next, null, 2)); await rename(temporary, this.path);

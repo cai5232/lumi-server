@@ -89,5 +89,48 @@ for (const format of ["openai", "anthropic"]) {
     const operationID = queue.alarms[0].task.id;
     assert.equal((await send("/v1/native-alarms/claim", { deviceID, operationID })).status, 200);
     assert.equal((await send("/v1/native-alarms/receipt", { deviceID, operationID, status:"applied", ringtone:"system" })).status, 200);
+    if (format === "openai") {
+      const path = "/v1/native-alarms/mcp";
+      const rpc = (method, params) => ({ jsonrpc: "2.0", id: 1, method, params });
+      const mcp = async (method, params) => {
+        const response = await send(path, rpc(method, params));
+        assert.equal(response.status, 200);
+        return response.json();
+      };
+      const call = (name, args) => mcp("tools/call", { name, arguments: args });
+      const unauthenticated = await fetch(url + path, { method: "POST" });
+      assert.equal(unauthenticated.status, 401);
+      const crossOrigin = await fetch(url + path, { method: "POST", headers: { ...auth, origin: "https://example.test" } });
+      assert.equal(crossOrigin.status, 403);
+      assert.equal((await fetch(url + path, { headers: auth })).status, 405);
+      assert.equal((await send(path, { jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
+      assert.equal((await mcp("initialize", { protocolVersion: "2025-03-26" })).result.protocolVersion, "2025-03-26");
+      assert.deepEqual((await mcp("tools/list")).result.tools.map(tool => tool.name).sort(), allowedNames);
+      assert.equal((await call("list_alarms")).result.isError, true);
+
+      const enableAutonomous = await send("/v1/native-alarms/device", { deviceID, authorization: "authorized",
+        timeZone: "Asia/Shanghai", allowAI: true, allowAutonomous: true });
+      assert.equal(enableAutonomous.status, 200);
+      const status = await call("get_alarm_status", { operationID });
+      assert.equal(JSON.parse(status.result.content[0].text).status, "applied");
+
+      const args = { operationID: randomUUID(), config: configuration };
+      for (let i = 0; i < 2; i++) {
+        const queued = JSON.parse((await call("create_alarm", args)).result.content[0].text);
+        assert.equal(queued.id, args.operationID);
+        assert.equal(queued.status, "pending");
+        assert.equal(queued.autonomous, true);
+      }
+      const list = JSON.parse((await call("list_alarms")).result.content[0].text);
+      assert.equal(list.alarms.length, 2);
+
+      const toggle = await fetch(url + "/v1/mcp/servers/lumi-native-alarms", {
+        method: "PATCH", headers: auth, body: JSON.stringify({ enabled: false })
+      });
+      assert.equal(toggle.status, 200);
+      assert.equal((await toggle.json()).servers.find(server => server.id === "lumi-native-alarms").enabled, false);
+      assert.deepEqual((await mcp("tools/list")).result.tools, []);
+      assert.equal((await call("list_alarms")).error.code, -32602);
+    }
   });
 }
