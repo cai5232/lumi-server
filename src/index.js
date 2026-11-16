@@ -1834,6 +1834,7 @@ function extractThinkingText(value) {
 
 function publicChatMessage(value) {
   const { modelContent, modelImageIDs, requestId, requestFingerprint, sleepReceiptID, ...message } = value;
+  if (message.role === "user" && message.contentType === "widget_submission") message.content = "";
   if (message.role === "assistant" && !message.thinking && modelContent) message.thinking = extractThinkingText(modelContent);
   return message;
 }
@@ -3517,7 +3518,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : "";
   const widgetDirective = !proactive && !callMode && !desktopCompanion &&
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
-    ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(用于发回当前聊天的可读文字)，系统会让用户确认。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
+    ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天全行，页面背景保持透明，避免固定最大高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(用于发回当前聊天的可读文字)，系统会让用户确认。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
   const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}`;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
@@ -5957,13 +5958,26 @@ const server = createServer(async (req, res) => {
       const job=chatJobs.start(decodeURIComponent(asyncChatMatch[1]),id,await body(req),req.headers.authorization);
       return send(res,job.status,job.body);
     }
-    const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
+    const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls|\/widget-submissions)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
     const id = decodeURIComponent(match[1]);
+    const isWidgetSubmission = match[2] === "/widget-submissions";
+    if (isWidgetSubmission) {
+      if (req.method !== "POST") return send(res, 405, { error: "method_not_allowed" });
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+    }
     const isChatPost = req.method === "POST" && Boolean(match[2]);
     let messageInput;
-    if (req.method === "POST" && match[2] === "/messages") {
+    if (req.method === "POST" && (match[2] === "/messages" || isWidgetSubmission)) {
       messageInput = await body(req);
+      if (!isWidgetSubmission && messageInput.contentType === "widget_submission") {
+        return send(res, 400, { error: "widget_submission_requires_private_route" });
+      }
+      if (isWidgetSubmission && (typeof messageInput.content !== "string" || !messageInput.content.trim() ||
+        messageInput.images?.length || messageInput.galleryImageIDs?.length ||
+        (messageInput.contentType && messageInput.contentType !== "widget_submission"))) {
+        return send(res, 400, { error: "widget_submission_requires_text" });
+      }
       const requestId = String(req.headers["idempotency-key"] || "");
       const fingerprint = createHash("sha256").update(JSON.stringify(messageInput)).digest("hex");
       const key = `${id}:${requestId || fingerprint}`;
@@ -5995,7 +6009,8 @@ const server = createServer(async (req, res) => {
       const limit = Math.max(1, Math.min(200, Number.isFinite(requestedLimit) ? requestedLimit : 100));
       const before = new Date(url.searchParams.get("before") || "").valueOf();
       const all = Array.isArray(threads[id].messages) ? threads[id].messages : [];
-      const eligible = Number.isFinite(before) ? all.filter((message) => new Date(message.createdAt).valueOf() < before) : all;
+      const eligible = all.filter(message => message.contentType !== "widget_submission" &&
+        (!Number.isFinite(before) || new Date(message.createdAt).valueOf() < before));
       const messages = eligible.slice(-limit).map(publicChatMessage);
       const hasMore = eligible.length > messages.length;
       return send(res, 200, { id: threads[id].id, title: threads[id].title, messages, hasMore, nextBefore: hasMore ? messages[0]?.createdAt || null : null });
@@ -6122,8 +6137,8 @@ const server = createServer(async (req, res) => {
       const result = (async () => {
       const messageText = String(input.content || "").trim();
       const incomingActivity = ensureActivity(threads[id]);
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" } : {}), createdAt: new Date().toISOString() };
-      const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" } : isWidgetSubmission ? { contentType: "widget_submission" } : {}), createdAt: new Date().toISOString() };
+      const updatedOptionMessage = isWidgetSubmission ? null : answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
       const storedUserMessage = { ...userMessage, requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
@@ -6145,6 +6160,9 @@ const server = createServer(async (req, res) => {
         ? (await stickerStore.list()).stickers.find(sticker => sticker.image === stickerImageURL)
         : null;
       let modelMessageContent = isStickerMessage ? stickerMessageForModel(input, catalogSticker) : userMessage.content;
+      if (isWidgetSubmission) {
+        modelMessageContent = "用户主动私下提交了聊天卡片的内容。自然回应，除非用户要求，否则不逐项复述提交原文。\n" + userMessage.content;
+      }
       if (isXHSMessage) {
         try {
           const card = JSON.parse(messageText);
