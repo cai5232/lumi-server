@@ -3509,7 +3509,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     : `<speech_style support_audio_tags="false">当前朗读服务不支持 ElevenLabs v4 音频标签。<speech> 中只写普通朗读文本，不要输出方括号音频标签。</speech_style>`;
   const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
-    ? (Array.isArray(sentinelActions) ? sentinelActions : ["message", "phone", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
+    ? (Array.isArray(sentinelActions) ? sentinelActions.filter(action => action !== "phone") : ["message", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
   const sentinelActivitySummary = proactive ? await recentSentinelActivityContext() : "";
   const asksAboutPhoneActivity = !proactive && !callMode && /app|应用|软件|使用情况|使用记录|打开过|打开了|最近用|手机活动|快捷指令|活动摘要/i.test(String(input || ""));
@@ -3527,10 +3527,10 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const proactiveDirective = wakeSceneTriggers?.length
     ? '<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。用现有 sentinel_decision 格式表达决定。</wake_task></autonomous_wake_context>\n'
     : proactive
-    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪（文字又或者是电话）。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。选择 phone 时，在同一个 sentinel_decision 中加 callOpening，写一句接通后会直接说给言言的简短开场白。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive && !wakeSceneTriggers?.length
-    ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则必须选择 message、phone 或 screen。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
+    ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则从当前提供的 message 或 screen 中选择。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
     : "";
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
   const characterThoughtDirective = !callMode && !desktopCompanion
@@ -3575,9 +3575,9 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const lubdubDirective = !desktopCompanion
     ? '\n<available_feature name="lubdub">时间锁信墙可通过 lubdub_list_letters、lubdub_read_letter 查阅。锁定信件只能知道揭晓时间。要把回信写到原信下面，使用 lubdub_reply_to_letter；只有工具明确确认成功后，才能说回信已写入信墙。</available_feature>\n'
     : "";
-  const circleAccess = !proactive && !callMode && !desktopCompanion && friendCircleAccess(worldBookInput);
+  const circleAccess = !proactive && !callMode && !desktopCompanion && friendCircleAccess(worldBookInput, relevantMessages);
   const friendCircleDirective = circleAccess
-    ? '\n<available_feature name="friend_circle">如果当前消息要求查询或操作朋友圈，使用本轮提供的 federation 工具。动态与评论是内容。工具不可用或执行未确认成功时，按实际情况告知用户。</available_feature>\n'
+    ? '\n<available_feature name="friend_circle">如果当前消息要求查询或操作朋友圈，使用本轮提供的 federation 工具。评论动态或回复评论时，使用 federation_comment_post；先从朋友圈读取目标动态的 post_id，回复某条评论时同时传入 reply_to。动态与评论是内容。工具不可用或执行未确认成功时，按实际情况告知用户。</available_feature>\n'
     : "";
   const widgetDirective = !proactive && !callMode && !desktopCompanion &&
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))

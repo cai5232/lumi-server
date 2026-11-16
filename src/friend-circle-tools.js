@@ -6,17 +6,31 @@ const readTools = new Set([
   "federation_get_timeline", "federation_get_profile",
   "federation_list_friends", "federation_get_notifications"
 ]);
+const circleMention = /朋友圈|\bfriends?[ -]circle\b/i;
+const commentTool = "federation_comment_post";
+const commentTarget = /这条|那条|最新|刚发|动态|底下|下面|留言|评论|\b(?:this|that|latest|post|comment)\b/i;
+const declinedComment = /(?:别|不要|不用|不必|无需|先不|不能).{0,5}(?:评论|留言|回复)|\b(?:do not|don't)\s+(?:comment|reply)\b/i;
 const writeIntents = new Map([
   ["federation_publish_post", /发(?:一条|条|个|布一条|布动态|布朋友圈|帖|动态|朋友圈)|(?:帮我|替我|请你)写.{0,8}(?:动态|朋友圈)|\b(?:publish|write|make) (?:a |one )?post\b|\bpost (?:this|to)\b/i],
-  ["federation_comment_post", /(?:帮我|替我|请你|去|来)评论|评论(?:一下|一句|说)|留(?:个言|一条评论|言说)|回复.{0,12}(?:这条|那条|这位).{0,8}(?:评论|动态)|\b(?:leave a comment|comment on|reply to)\b/i],
+  [commentTool, /(?:帮我|替我|请你|给我|去|来)评论|评论(?:一下|一句|说)|评论.{0,8}(?:这条|那条|最新|刚发|动态|朋友圈)|(?:底下|下面).{0,8}(?:评(?:论(?:一下|一句)?|一句)|留言)|留(?:个言|言说|(?:一?条|个)评论)|(?:回|回覆|回复)(?:一下|一句|.{0,12}(?:那|这|我的|条).{0,8}(?:评论|动态))|\b(?:leave a comment|comment on|reply to)\b/i],
   ["federation_like_post", /(?:帮我|替我|请你|去)点赞|点赞(?:一下|这条|那条)|点(?:个|一下|个小)赞|取消(?:点赞|赞)|\b(?:like|unlike) (?:this|that|the)\b/i]
 ]);
 const responseLimit = 512 * 1024;
 
-export function friendCircleAccess(input) {
-  if (typeof input !== "string" || !/朋友圈|\bfriend[ -]circle\b/i.test(input)) return null;
+export function friendCircleAccess(input, history = []) {
+  if (typeof input !== "string") return null;
+  const direct = circleMention.test(input);
+  const recentUser = history.findLast(message => message.role === "user");
+  const recentAssistant = history.at(-1);
+  const recentCircle = circleMention.test(recentUser?.content || "") ||
+    (recentAssistant?.role === "assistant" &&
+      recentAssistant.toolCalls?.some(call => readTools.has(call.name)));
+  if (!direct && !(recentCircle && commentTarget.test(input))) return null;
+  const writes = new Set([...writeIntents].filter(([name, pattern]) =>
+    (direct || name === commentTool) && pattern.test(input)).map(([name]) => name));
+  if (declinedComment.test(input)) writes.delete(commentTool);
   return {
-    writes: new Set([...writeIntents].filter(([, pattern]) => pattern.test(input)).map(([name]) => name)),
+    writes,
     attempted: new Set()
   };
 }
@@ -67,7 +81,7 @@ export function createFriendCircleTools(directory) {
     const result = await rpc("tools/list", {}, signal);
     return result.tools.flatMap(tool => {
       const write = writeIntents.has(tool.name);
-      if (!(readTools.has(tool.name) || (write && access.writes.has(tool.name)))) return [];
+      if (!(readTools.has(tool.name) || tool.name === commentTool || (write && access.writes.has(tool.name)))) return [];
 
       const instructions = write
         ? "仅执行用户这条消息明确要求的操作。作为自己的朋友圈账号发言。不要把私人聊天内容写到朋友圈。只在确认成功后报告已完成。"
@@ -79,6 +93,7 @@ export function createFriendCircleTools(directory) {
         allowWrite: true,
         async execute(args) {
           if (write) {
+            if (!access.writes.has(tool.name)) throw new Error("这条消息没有要求发布评论。");
             const argsInKeyOrder = Object.fromEntries(Object.entries(args || {}).sort(([a], [b]) => a.localeCompare(b)));
             const operation = JSON.stringify([tool.name, argsInKeyOrder]);
             if (access.attempted.has(operation)) throw new Error("本轮已经尝试过相同的朋友圈操作。请先读取结果确认状态。");
