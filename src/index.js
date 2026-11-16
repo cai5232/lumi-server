@@ -142,6 +142,7 @@ const keepaliveIntervalMs = cacheTTL === "1h" ? 45 * 60_000 : 4 * 60_000;
 const keepaliveMaxIdleMs = Number(process.env.LUMI_CACHE_KEEPALIVE_MAX_IDLE_MS || (cacheTTL === "1h" ? 24 * 60 * 60_000 : 12 * 60_000));
 const keepaliveState = { lastRequestAt: 0, lastThreadId: "", disabledForMessageId: "", attempts: 0, successes: 0, readTokens: 0, writeTokens: 0, lastReadTokens: 0, lastWriteTokens: 0, lastAt: null, lastError: "" };
 let keepaliveInFlight = false;
+let keepaliveController;
 let backgroundPulseInFlight = false;
 // Process-local locks recover automatically after a restart; persisted running flags do not.
 const sleepDreamsInFlight = new Set();
@@ -163,6 +164,7 @@ const callAlertFallbacks = new Set();
 let apnsJwtCache = { token: "", createdAt: 0 };
 const activeChatThreads = new Set();
 const pendingForegroundChats = new Map();
+const foregroundCalls = new Map();
 const sentinelGenerationControllers = new Map();
 const recentMessageRequests = new Map();
 const chatPersistenceQueues = new Map();
@@ -689,7 +691,7 @@ async function completeLateScreenPeek(threadId) {
   const request = screenPeekRequests.get(threadId);
   const frame = screenPeekFrames.get(threadId);
   if (request?.status !== "fallback_sent" || !frame || frame.capturedAt < request.requestedAt) return;
-  if (activeChatThreads.has(threadId)) {
+  if (activeChatThreads.has(threadId) || foregroundCalls.has(threadId)) {
     setTimeout(() => { void completeLateScreenPeek(threadId); }, 2_000).unref();
     return;
   }
@@ -1123,7 +1125,7 @@ async function runBackgroundPulse() {
   changed ||= emotionChanged;
   for (const cachedThread of Object.values(threads)) {
     const threadId = cachedThread.id;
-    if (activeChatThreads.has(threadId) || pendingForegroundChats.has(threadId)) continue;
+    if (activeChatThreads.has(threadId) || pendingForegroundChats.has(threadId) || foregroundCalls.has(threadId)) continue;
     activeChatThreads.add(threadId);
     sentinelGenerationControllers.set(threadId, new AbortController());
     let threadChanged = false;
@@ -1131,6 +1133,9 @@ async function runBackgroundPulse() {
     try {
     thread = (await readThreads())[threadId] || cachedThread;
     if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
+    // Between spoken turns there is no request lock, but the phone is still in use.
+    if (thread.calls?.some(call => call.nativeAudio && call.state === "active" &&
+        now - Date.parse(call.turns?.at(-1)?.createdAt || call.startedAt) < 30 * 60_000)) continue;
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
     // Repair pending-bedtime flags retained by older chat handlers.
@@ -3832,8 +3837,10 @@ async function checkCacheKeepalive() {
     return { attempted: false, reason: "disabled_or_busy" };
   }
   const id = "default";
-  if (activeChatThreads.has(id)) return { attempted: false, reason: "chat_in_progress" };
+  if (activeChatThreads.has(id) || foregroundCalls.has(id)) return { attempted: false, reason: "chat_in_progress" };
   keepaliveInFlight = true;
+  const controller = new AbortController();
+  keepaliveController = controller;
   keepaliveDone = new Promise((resolve) => { finishKeepalive = resolve; });
   let lastUserMessageId = "";
   try {
@@ -3897,6 +3904,7 @@ async function checkCacheKeepalive() {
     let keepaliveUsage = {};
     await callModel({
       messages: keepaliveMessages,
+      signal: controller.signal,
       maxOutputTokens: 16,
       temperature: 0,
       cacheCurrentUser: false,
@@ -3905,6 +3913,7 @@ async function checkCacheKeepalive() {
       customProvider: modelRoute.customProvider,
       onUsage: (usage) => { keepaliveUsage = usage; }
     });
+    if (controller.signal.aborted) return { attempted: false, reason: "interrupted_by_call" };
     const { read: readTokens, created: writeTokens } = cacheUsage(keepaliveUsage);
     thread.cacheKeepaliveAt = startedAt;
     thread.cacheKeepalivePrefixHash = assistantPrefixHash;
@@ -3925,11 +3934,13 @@ async function checkCacheKeepalive() {
     keepaliveState.lastError = "模型未报告缓存读取；已停止本轮保活";
     return { attempted: true, hit: false, readTokens, writeTokens };
   } catch (error) {
+    if (controller.signal.aborted) return { attempted: false, reason: "interrupted_by_call" };
     if (lastUserMessageId) keepaliveState.disabledForMessageId = lastUserMessageId;
     keepaliveState.lastError = String(error.message || error).slice(0, 200);
     console.warn(`cache keepalive skipped: ${keepaliveState.lastError}`);
     return { attempted: false, reason: "error", error: keepaliveState.lastError };
   } finally {
+    keepaliveController = undefined;
     keepaliveInFlight = false;
     finishKeepalive();
     finishKeepalive = null;
@@ -4612,7 +4623,9 @@ const server = createServer(async (req, res) => {
     return res.end();
   }
   if (req.method === "OPTIONS") return send(res, 204, {});
+  const requestArrivedAt = Date.now();
   let callLockID;
+  let callReservationID;
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
     if (url.pathname.startsWith("/v1/lubdub/")) return await proxyLubdub(req, res, url);
@@ -5045,7 +5058,18 @@ const server = createServer(async (req, res) => {
     const existingCallOperation = req.method === "POST" && url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/[^/]+\/(?:answer|messages|end)$/);
     if (existingCallOperation) {
       const id = decodeURIComponent(existingCallOperation[1]);
-      if (activeChatThreads.has(id)) return send(res, 409, { error: "聊天正在处理，请稍后再试。" });
+      callReservationID = id;
+      foregroundCalls.set(id, (foregroundCalls.get(id) || 0) + 1);
+      sentinelGenerationControllers.get(id)?.abort();
+      cancelSoloRun(id);
+      if (id === "default") keepaliveController?.abort();
+      const deadline = Date.now() + 6_000;
+      while (activeChatThreads.has(id) || (id === "default" && keepaliveInFlight)) {
+        if (res.destroyed) return;
+        if (Date.now() >= deadline) return send(res, 409, { error: "聊天正在处理，请稍后再试。" });
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (res.destroyed) return;
       activeChatThreads.add(id);
       callLockID = id;
     }
@@ -5713,12 +5737,15 @@ const server = createServer(async (req, res) => {
     const pendingCallMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/calls\/pending$/);
     if (req.method === "GET" && pendingCallMatch) {
       const [, rawThreadID] = pendingCallMatch;
+      const threadID = decodeURIComponent(rawThreadID);
       const threads = await readThreads();
-      const thread = threads[decodeURIComponent(rawThreadID)];
+      const thread = threads[threadID];
       if (!thread) return send(res, 200, { call: null });
       const pending = (thread.calls || []).find((item) => item.initiator === "assistant" && item.state === "pending");
       if (!pending) return send(res, 200, { call: null });
       if (Date.now() >= new Date(pending.expiresAt || 0).getTime()) {
+        // A timely answer could already be waiting for the conversation lock.
+        if (foregroundCalls.has(threadID)) return send(res, 200, { call: null });
         pending.state = "ended";
         pending.endedAt = new Date().toISOString();
         if (afterContextReset(thread, [pending]).length) thread.messages.push({ id: randomUUID(), role: "assistant", content: `我刚刚想打电话给你，但你没有接到。${pending.reason || "等你有空再找我"}，不急，回来再和我说话。`, contentType: "call_status", callID: pending.id, callInitiator: "assistant", callStatus: "missed", createdAt: pending.endedAt });
@@ -5737,7 +5764,7 @@ const server = createServer(async (req, res) => {
       const call = thread?.calls?.find((item) => item.id === callID && item.initiator === "assistant");
       if (!call) return send(res, 404, { error: "call_not_found" });
       if (call.state !== "pending") return send(res, 409, { error: "call_not_pending" });
-      if (Date.now() >= new Date(call.expiresAt || 0).getTime()) return send(res, 410, { error: "call_expired" });
+      if (requestArrivedAt >= new Date(call.expiresAt || 0).getTime()) return send(res, 410, { error: "call_expired" });
       const now = new Date().toISOString();
       if (action === "decline") {
         call.state = "ended";
@@ -5795,6 +5822,7 @@ const server = createServer(async (req, res) => {
         createdAt: now, speechScript: openingSpeechText
       };
       call.state = "active";
+      if (nativeAudio) call.nativeAudio = true;
       call.startedAt = now;
       call.turns = [opening];
       if (nativeAudio) await saveThreads(threads);
@@ -6094,7 +6122,7 @@ const server = createServer(async (req, res) => {
       // Its existing finally block releases the conversation before we read it.
       sentinelGenerationControllers.get(id)?.abort();
       if (id === "default" && keepaliveInFlight) await keepaliveDone;
-      while (activeChatThreads.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
+      while (activeChatThreads.has(id) || foregroundCalls.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
       activeChatThreads.add(id);
       const waiting = pendingForegroundChats.get(id) - 1;
       if (waiting) pendingForegroundChats.set(id, waiting);
@@ -6510,7 +6538,14 @@ const server = createServer(async (req, res) => {
       }
     }
   } catch (error) { console.error(`[http] ${req.method} ${req.url}:`, error?.stack || error); return send(res, error.statusCode || 500, { error: error.message }); }
-  finally { if (callLockID) activeChatThreads.delete(callLockID); }
+  finally {
+    if (callLockID) activeChatThreads.delete(callLockID);
+    if (callReservationID) {
+      const waiting = foregroundCalls.get(callReservationID) - 1;
+      if (waiting) foregroundCalls.set(callReservationID, waiting);
+      else foregroundCalls.delete(callReservationID);
+    }
+  }
 });
 
 server.on("upgrade", (req, socket, head) => {
