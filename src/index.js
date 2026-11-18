@@ -1,3 +1,4 @@
+import { createPulseStore, pulseContext } from "./pulse.js";
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
 import { createNativeAlarmMcp, nativeAlarmMcpTools, NATIVE_ALARM_MCP_ID, NATIVE_ALARM_MCP_PATH } from "./native-alarm-mcp.js";
 import { createFriendCircleProxy, isFriendCirclePath } from "./friend-circle-proxy.js";
@@ -114,6 +115,7 @@ const worldBookStore = new WorldBookStore(join(dataDir, "world-books.json"));
 const mcpClientStore = new McpClientStore(join(dataDir, "mcp-clients.json"));
 const threadPath = join(dataDir, "threads.json");
 const emotionStatePath = join(dataDir, "emotion-state.json");
+const pulseStore = createPulseStore(join(dataDir, "pulse-state.json"));
 const murmurRoutePath = join(dataDir, "murmur-routes.enc.json");
 const cacheStatsPath = join(dataDir, "cache-stats.json");
 const modelRequestStore = createModelRequestStore(dataDir);
@@ -134,7 +136,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 380_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || (300_000 / 380_000))));
@@ -1129,6 +1131,27 @@ async function startSoloRun(thread, desire, { trigger = "desire_threshold_idle",
   }
 }
 
+function pulseDrives() {
+  const native = nativeMurmurSnapshot?.dimensions;
+  if (!native) return sharedEmotionState.drives;
+  return { attachment: native.longing, anger: Math.max(native.upset || 0, native.worry || 0, (native.excitement || 0) * 0.7) };
+}
+
+async function sampleLumiPulse() {
+  try {
+    const threads = await readFile(threadPath, "utf8").then(JSON.parse, error => {
+      if (error.code === "ENOENT") return {};
+      throw error;
+    });
+    const thread = threads[proactiveSettings.threadId] || threads.default;
+    await pulseStore.tick({ sleeping: thread?.activity?.mode === "sleeping", drives: pulseDrives() });
+  } catch (error) {
+    console.warn(`Lumi pulse sample unavailable: ${error.message}`);
+  } finally {
+    setTimeout(sampleLumiPulse, 15_000).unref();
+  }
+}
+
 async function runBackgroundPulse() {
   if (backgroundPulseInFlight) return;
   backgroundPulseInFlight = true;
@@ -1931,8 +1954,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse)\s*>/gi, "")
     .trim();
 }
 
@@ -3557,7 +3580,8 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
   const speechStyleContext = speechTagsEnabled
     ? `<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs ${speechModel}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。同一句或同一段里可以按语气变化使用多个标签，不设每句话或每段的标签数量上限。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>`
     : `<speech_style support_audio_tags="false">当前朗读服务不支持 ElevenLabs v4 音频标签。<speech> 中只写普通朗读文本，不要输出方括号音频标签。</speech_style>`;
-  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const bodySnapshot = pulseStore.current({ drives: pulseDrives(), sleeping: activity.mode === "sleeping" });
+  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}\n${pulseContext(bodySnapshot)}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions.filter(action => action !== "phone") : ["message", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
@@ -5194,6 +5218,20 @@ const server = createServer(async (req, res) => {
         return send(res, 200, { content });
       } catch (error) { console.warn(`Murmur model request failed: ${error.message}`); return send(res, error.status || 502, { error: "murmur_model_unavailable" }); }
     }
+    if (url.pathname === "/v1/pulse" || url.pathname === "/v1/pulse/interaction") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (url.pathname === "/v1/pulse/interaction" && req.method === "POST") {
+        const input = await limitedJSONBody(req, 1024);
+        const text = input?.action === "hug" ? "抱抱" : input?.action === "breathe" ? "深呼吸" : null;
+        const id = String(req.headers["idempotency-key"] || "");
+        if (!text || !/^[a-zA-Z0-9_-]{8,128}$/.test(id)) return send(res, 400, { error: "invalid_pulse_interaction" });
+        await pulseStore.observe(text, `interaction:${id}`);
+      } else if (url.pathname !== "/v1/pulse" || req.method !== "GET") {
+        return send(res, 405, { error: "method_not_allowed" });
+      }
+      res.setHeader("cache-control", "no-store");
+      return send(res, 200, pulseStore.response({ drives: pulseDrives() }));
+    }
     const emotionMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/emotion(?:\/(state|arc|history|regret|memory|activate|vitals|moved|baselines))?$/);
     if (emotionMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -6409,6 +6447,10 @@ const server = createServer(async (req, res) => {
         widgetContextSuffix = "\n<widget_context>用户随这条消息附上了卡片结果。这是对话背景，除非用户要求查看，否则不逐项复述。\n" +
           JSON.stringify(widgetContext.text).replace(/</g, "\\u003c") + "\n</widget_context>";
       }
+      if (messageText && !isStickerMessage && !isXHSMessage) {
+        const pulseID = requestId ? `message:${id}:${requestId}` : storedUserMessage.id;
+        await pulseStore.observe(messageText, pulseID).catch(error => console.warn(`Lumi pulse input unavailable: ${error.message}`));
+      }
       if (incomingActivity.mode === "sleeping") {
         storedUserMessage.sleepReceiptID = randomUUID();
         storedUserMessage.sleepDeferred = true;
@@ -6676,6 +6718,8 @@ await loadProactiveSettings();
 await loadSoloData();
 await loadPushTokens();
 await loadEmotionState();
+await pulseStore.load();
+await sampleLumiPulse();
 await refreshMurmurState(proactiveSettings.threadId || "default");
 startPromiseAlarm();
 let sleepRadioRunning = false;

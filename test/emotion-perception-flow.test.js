@@ -24,7 +24,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
       requests.push(body);
       content = requests.length === 1
         ? '被你逗乐了，我也想逗你一下。<emotion_update>{"changes":{"mischief":0.02},"feeling":"被逗乐了","reason":"她拿刚才的小失误打趣"}</emotion_update>'
-        : '还惦记着刚才那个玩笑。';
+        : '<lumi_pulse>内部状态</lumi_pulse>还惦记着刚才那个玩笑。';
     }
     res.end(JSON.stringify({ choices: [{ message: { content } }], usage: {} }));
   });
@@ -34,7 +34,7 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
   await new Promise(resolve => portProbe.close(resolve));
   const env = { ...process.env, PORT: String(port), LUMI_DATA_DIR: folder,
     LUMI_TEST_MODEL_TARGET: `http://127.0.0.1:${providerPort}`, LUMI_MODEL_API_URL: `http://127.0.0.1:${providerPort}/v1`, LUMI_MODEL_API_KEY: 'test-only', LUMI_MODEL_NAME: 'test-model',
-    LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`, LUMI_BACKGROUND_PULSE_MS: '60000', LUMI_CACHE_KEEPALIVE_ENABLED: 'false' };
+    LUMI_MEMORY_API_URL: `http://127.0.0.1:${providerPort}`, LUMI_PUSH_API_TOKEN: 'pulse-test-token', LUMI_BACKGROUND_PULSE_MS: '60000', LUMI_CACHE_KEEPALIVE_ENABLED: 'false' };
   delete env.MURMUR_SERVICE_URL;
   const backend = spawn(process.execPath, ['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'], { cwd: new URL('..', import.meta.url), env, stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
@@ -46,13 +46,13 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.ok(ready);
-    for (const content of ['拿刚才的小失误开个玩笑', '还想着刚才的事吗']) {
+    for (const content of ['拿刚才的小失误开个玩笑', '抱抱，还想着刚才的事吗']) {
       const result = await fetch(`${base}/v1/chats/default/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } }) });
       assert.equal(result.status, 200);
       const data = await result.json();
       assert.equal(typeof data.assistantMessage?.content, 'string');
       assert.match(data.assistantMessage.content, /被你逗乐|还惦记/);
-      assert.doesNotMatch(data.assistantMessage.content, /<emotion_update|"changes"/);
+      assert.doesNotMatch(data.assistantMessage.content, /<emotion_update|<lumi_pulse|内部状态|"changes"/);
     }
     assert.equal(requests.length, 2);
     const nextInput = requests[1].messages.filter(m => m.role === 'user').at(-1).content;
@@ -65,6 +65,20 @@ test('chat saves a contextual feeling and presents its cause on the next turn wi
     const saved = JSON.parse(await readFile(join(folder, 'emotion-state.json'), 'utf8'));
     assert.equal(saved.recentChanges.at(-1).reason, '她拿刚才的小失误打趣');
     assert.ok(Math.abs(saved.drives.mischief - .22) < 1e-9);
+    assert.match(nextInput, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
+    assert.equal((await fetch(`${base}/v1/pulse`)).status, 401);
+    const headers = { authorization: 'Bearer pulse-test-token' };
+    const snapshot = await (await fetch(`${base}/v1/pulse`, { headers })).json();
+    assert.equal(snapshot.history.length, 1);
+    assert.equal(snapshot.events[0].text, '刚刚的触感还留了一会儿。');
+    const interact = () => fetch(`${base}/v1/pulse/interaction`, {
+      method: 'POST', headers: { ...headers, 'content-type': 'application/json', 'idempotency-key': 'pulse-breathe-1' },
+      body: JSON.stringify({ action: 'breathe' })
+    });
+    assert.equal((await interact()).status, 200);
+    const replay = await (await interact()).json();
+    assert.equal(replay.events.length, snapshot.events.length + 1);
+    assert.equal(replay.events[0].text, '呼吸慢慢拉长。');
   } finally {
     if (backend.exitCode === null) {
       const exit = new Promise(resolve => backend.once('exit', resolve));
