@@ -69,6 +69,7 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     assert.equal(saved.recentChanges.at(-1).reason, '她拿刚才的小失误打趣');
     assert.ok(Math.abs(saved.drives.mischief - .22) < 1e-9);
     assert.match(nextInput, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
+    assert.match(nextInput, /<user_message_timing\b[^>]*new_message="true"[^>]*previous_gap_seconds="\d+"/);
     assert.equal((await fetch(`${base}/v1/pulse`)).status, 401);
     const headers = { authorization: 'Bearer pulse-test-token' };
     const snapshot = await (await fetch(`${base}/v1/pulse`, { headers })).json();
@@ -93,6 +94,9 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     Object.assign(threads.default.activity, {
       mode: 'sentinel', nextWakeAt: new Date(Date.now() - 1000).toISOString(), sleepPendingAt: null
     });
+    const sentMessages = threads.default.messages.filter(message => message.role === 'user');
+    sentMessages[0].createdAt = new Date(Date.now() - 120 * 60_000).toISOString();
+    sentMessages[1].createdAt = new Date(Date.now() - 65 * 60_000).toISOString();
     await writeFile(threadPath + '.test', JSON.stringify(threads));
     await rename(threadPath + '.test', threadPath);
     let events = [];
@@ -116,6 +120,10 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
     assert.match(wakePrompt, /<autonomous_wake_context>/);
     assert.match(wakePrompt, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
+    const timing = wakePrompt.match(/<user_message_timing\b[^>]*>/)?.[0];
+    assert.ok(timing?.includes(`last_sent_at="${sentMessages[1].createdAt}"`));
+    assert.ok(Number(timing.match(/elapsed_seconds="(\d+)"/)?.[1]) >= 65 * 60);
+    assert.doesNotMatch(timing, /new_message=/);
   } finally {
     if (backend.exitCode === null) {
       const exit = new Promise(resolve => backend.once('exit', resolve));

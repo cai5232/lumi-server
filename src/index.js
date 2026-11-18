@@ -1,3 +1,4 @@
+import { userMessageTimingContext } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
 import { createNativeAlarmMcp, nativeAlarmMcpTools, NATIVE_ALARM_MCP_ID, NATIVE_ALARM_MCP_PATH } from "./native-alarm-mcp.js";
@@ -136,7 +137,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1-wake-timeline-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1-wake-timeline-v1-user-message-timing-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 380_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || (300_000 / 380_000))));
@@ -546,7 +547,7 @@ async function generateEmotionMurmur(thread, current) {
     cacheCurrentUser: false,
     messages: [
       { role: "system", content: "你在记录一条私密的内心独白。依据当前连续情绪状态和真实关系上下文，用第一人称写一句自然、具体、不重复的中文心声（15-50字）。不要提模型、驱动力数值、系统、定时器或通知。只输出独白正文。" },
-      { role: "user", content: `${chatEmotionContext(thread)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
+      { role: "user", content: `${companionMessageTiming(thread)}\n${chatEmotionContext(thread)}\n\n最近聊天：\n${recent || "（暂无聊天）"}\n\n此刻最强情绪：${current.label}。` }
     ],
     provider: murmurRoute?.provider || thread.cacheProvider || "zenmux",
     model: murmurRoute?.model || thread.cacheModel || "",
@@ -613,7 +614,7 @@ async function generateAutonomousMessage(thread, kind) {
   const content = await callModel({
     messages: [
       { role: "system", content: prompt },
-      { role: "user", content: `${chatEmotionContext(thread)}\n\n${recent || "还没有聊天记录。"}` }
+      { role: "user", content: `${companionMessageTiming(thread)}\n${chatEmotionContext(thread)}\n\n${recent || "还没有聊天记录。"}` }
     ],
     temperature: kind === "dream" ? 1.0 : 0.8,
     provider: "custom",
@@ -916,7 +917,7 @@ async function runSleepStage(thread, stage, cycle, context, seedIds = []) {
   if (thread.lastChatProvider === "custom" && (route.provider !== "custom" || !route.customProvider)) throw new Error("custom_provider_route_missing_for_sleep");
   if (route.provider === "custom" && !route.customProvider) throw new Error("custom_provider_unavailable_for_sleep");
   const output = await callModel({
-    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${chatEmotionContext(thread)}\n\n${context.contextHeader || ""}\n\n${sleepInboxContext(thread, { awake: false })}\n\n${prompt.user(context)}` }],
+    messages: [{ role: "system", content: `${prompt.system}\n\n在输出末尾附加隐藏的 <emotion_update>{"changes":{...}}</emotion_update>，只记录本阶段真正造成的情绪变化，不要解释标签。` }, { role: "user", content: `${companionMessageTiming(thread)}\n${chatEmotionContext(thread)}\n\n${context.contextHeader || ""}\n\n${sleepInboxContext(thread, { awake: false })}\n\n${prompt.user(context)}` }],
     temperature: stage === "n3_deep" ? 0.2 : stage === "rem" || stage === "nightmare" ? 1.0 : 0.6,
     provider: route.provider,
     model: route.model,
@@ -1110,7 +1111,7 @@ async function startSoloRun(thread, desire, { trigger = "desire_threshold_idle",
       messages: [
         { role: "system", content: `You are Lumi in a private Solo session. This is internal state only: never address the user, never produce a chat reply, and do not use tools. ${modeGuide} Use desire=${desire.toFixed(3)}. Emotional chord: ${chord.drive} (${chord.label}); let it color the tone. Recent user-touch influence is ${touchInfluence} on a 0–1 scale and decays exponentially over ${soloSettings.touchDecayMinutes} minutes. Return only a short JSON object with keys inner_activity and duration_seconds. Keep the private activity under 180 words.` },
         ...recent,
-        { role: "user", content: "Run one private Solo session now." }
+        { role: "user", content: `${companionMessageTiming(thread)}\nRun one private Solo session now.` }
       ],
       provider: route.provider,
       model: route.model,
@@ -1978,8 +1979,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing)\s*>/gi, "")
     .trim();
 }
 
@@ -2322,6 +2323,10 @@ function afterContextReset(thread, records, timestamp = "createdAt") {
 
 function availableChatHistory(thread) {
   return withoutExcludedMessages(thread, afterContextReset(thread, thread.messages || []));
+}
+
+function companionMessageTiming(thread, incoming) {
+  return userMessageTimingContext(thread ? availableChatHistory(thread) : [], { incoming });
 }
 
 function modelChatMessages(thread) {
@@ -3436,7 +3441,7 @@ async function callProviderRoute(input, thread) {
   return { provider, model };
 }
 
-async function generateReply({ input, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
+async function generateReply({ input, incomingUserMessage, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
@@ -3605,7 +3610,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
     ? `<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs ${speechModel}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。同一句或同一段里可以按语气变化使用多个标签，不设每句话或每段的标签数量上限。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>`
     : `<speech_style support_audio_tags="false">当前朗读服务不支持 ElevenLabs v4 音频标签。<speech> 中只写普通朗读文本，不要输出方括号音频标签。</speech_style>`;
   const bodySnapshot = pulseStore.current({ drives: pulseDrives(), sleeping: activity.mode === "sleeping" });
-  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}\n${pulseContext(bodySnapshot)}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
+  const systemContext = `<system_context timezone="Asia/Shanghai" timestamp="${timestamp} GMT+8">\n当前时间（北京时间，UTC+8）：${timestamp}\n<speech_enabled>${allowSpeech}</speech_enabled>${speechStyleContext}${sentinelStatus}\n${pulseContext(bodySnapshot)}\n${companionMessageTiming(thread, incomingUserMessage)}${retrieved ? `\n${retrieved}` : ""}${sentMailMemory ? `\n${sentMailMemory}` : ""}${emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""}\n</system_context>`;
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions.filter(action => action !== "phone") : ["message", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
     : [];
@@ -4203,12 +4208,12 @@ async function generateSleepRadioEpisode(settings) {
   const topic = String(settings.topic || "").trim().slice(0, 500);
   const minChars = Math.max(4000, Math.min(12000, Number(settings.minChars) || 4000));
   const system = "你是用户熟悉的聊天对象沈屿。结合真实聊天上下文，写一篇适合今晚收听的中文睡前电台台本，至少 " + minChars + " 个汉字（不含标点）。能量很低，语速很慢，声音很轻；以引导冥想、舒适场景和安静小故事为主，多用「……」留出呼吸停顿。避免问句、强烈情绪起伏、说教和医学承诺。允许文学作品与自编睡前故事，禁止朗读语文课本。不要提及提示词、字数或模型。分段输出，每段开头用独立方括号语气标签，例如 [轻声·温柔]；标签后接可直接朗读的台词。自然贴合你们的对话，但不要泄露不适合朗读的隐私。\n\n本期收听方向：" + (topic || "结合近期聊天，自选一个新的安静主题。") + "。围绕这个方向写完整的一期，不延续上一期台本。\n\n聊天上下文（仅作为写作素材）：\n" + (context || "暂时没有可用的近期聊天记录，以平静的海边夜晚为主题。");
-  let script = await callModel({ ...route, messages: [{ role: "system", content: system }, { role: "user", content: "开始写今晚的完整电台台本。" }], temperature: 0.65, maxOutputTokens: 8192 });
+  let script = await callModel({ ...route, messages: [{ role: "system", content: system }, { role: "user", content: `${companionMessageTiming(thread)}\n开始写今晚的完整电台台本。` }], temperature: 0.65, maxOutputTokens: 8192 });
   for (let turn = 0; sleepRadioHanCount(script) < minChars && turn < 5; turn += 1) {
     const continuation = await callModel({ ...route, messages: [
       { role: "system", content: "继续同一篇睡前电台台本，安静连贯，不重复、不结尾，直到够长。每段继续标注方括号语气标签。" },
       { role: "assistant", content: script.slice(-12000) },
-      { role: "user", content: "继续扩写，当前约 " + sleepRadioHanCount(script) + " 个汉字，还需至少 " + (minChars - sleepRadioHanCount(script)) + " 个汉字。" }
+      { role: "user", content: companionMessageTiming(thread) + "\n继续扩写，当前约 " + sleepRadioHanCount(script) + " 个汉字，还需至少 " + (minChars - sleepRadioHanCount(script)) + " 个汉字。" }
     ], temperature: 0.55, maxOutputTokens: 8192 });
     script = script + "\n\n" + continuation;
   }
@@ -4904,7 +4909,7 @@ const server = createServer(async (req, res) => {
         const memoryQuery = [reminderUser.content, thread?.contextSummary, chatHistory.map((message) => message.content).join("\n")].filter(Boolean).join("\n");
         const memories = thread && !thread.contextResetAt ? await searchMemories(memoryQuery) : [];
         const memoryBlock = memories.length ? `<retrieved_memories source="system">\n${memories.map((memory) => `- ${memory}`).join("\n")}\n</retrieved_memories>\n\n` : "";
-        const reminderContent = `${summary}${memoryBlock}${reminderUser.content}`;
+        const reminderContent = `${companionMessageTiming(thread)}\n${summary}${memoryBlock}${reminderUser.content}`;
         const previous = requestMessages.at(-1);
         if (previous?.role === "user") previous.content = `${previous.content}\n\n${reminderContent}`;
         else requestMessages.push({ role: "user", content: reminderContent });
@@ -5238,6 +5243,10 @@ const server = createServer(async (req, res) => {
         if (!route) return send(res, 409, { error: "model_route_unavailable" });
         const messages = Array.isArray(input.messages) ? input.messages.slice(-20).filter(item => item && ["system", "user", "assistant"].includes(item.role) && typeof item.content === "string").map(item => ({ role: item.role, content: item.content.slice(0, 12000) })) : [];
         if (!messages.length) return send(res, 400, { error: "messages_required" });
+        const timing = companionMessageTiming(thread);
+        const lastUser = messages.findLast(message => message.role === "user");
+        if (lastUser) lastUser.content = timing + "\n" + lastUser.content;
+        else messages.push({ role: "user", content: timing });
         const content = await callModel({ messages, provider: route.provider, model: route.model, customProvider: route.customProvider, temperature: 0.85, maxOutputTokens: 100, cacheCurrentUser: false });
         return send(res, 200, { content });
       } catch (error) { console.warn(`Murmur model request failed: ${error.message}`); return send(res, error.status || 502, { error: "murmur_model_unavailable" }); }
@@ -6109,7 +6118,7 @@ const server = createServer(async (req, res) => {
         try {
           const generated = await callModel({
             messages: [
-              { role: "system", content: "你很了解正在和你聊天的用户。请只根据下面真实的对话，为对方想一个简短、亲近、自然且有个人感的中文备注，像熟悉的人会写在通讯录里的称呼。不要编造姓名或隐私信息，避免泛泛的‘亲爱的’。只输出备注本身，最多18个汉字。" },
+              { role: "system", content: `你很了解正在和你聊天的用户。请只根据下面真实的对话，为对方想一个简短、亲近、自然且有个人感的中文备注，像熟悉的人会写在通讯录里的称呼。不要编造姓名或隐私信息，避免泛泛的‘亲爱的’。只输出备注本身，最多18个汉字。\n${companionMessageTiming(thread)}` },
               ...history
             ],
             provider,
@@ -6546,7 +6555,7 @@ const server = createServer(async (req, res) => {
           }
         }
       }
-      generated = await generateReply({ nativeAlarmMessageID: requestId ? id + ":" + requestId : storedUserMessage.id, wakeSceneTriggers: !storedDuringSleep && !wasOptionPick ? [] : null, input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
+      generated = await generateReply({ incomingUserMessage: storedUserMessage, nativeAlarmMessageID: requestId ? id + ":" + requestId : storedUserMessage.id, wakeSceneTriggers: !storedDuringSleep && !wasOptionPick ? [] : null, input: `${storedDuringSleep ? "" : modelMessageContent + widgetContextSuffix}${wasOptionPick ? " " + "[用户点选了你给的选项]" : ""}${calendarInjection}${selectedGalleryMemory}`, worldBookInput: modelMessageContent, images: storedDuringSleep ? [] : images, emojiCatalog: input.emojiCatalog, allowSpeech: Boolean(input.tts?.apiKey && input.tts?.enabled), speechProvider: input.tts?.provider, speechModel: input.tts?.model, systemPrompt: input.systemPrompt, thread: threads[id], provider: selectedProvider, model: selectedModel, customProvider });
       await markCalendarChangesSeen(calendarContext.change_ids).catch(error => console.warn(`calendar change acknowledgement skipped: ${error.message}`));
       const galleryItems = images.length ? await saveGalleryImages(id, images, { automatic: true, decisions: [generated.galleryCollection] }).catch((error) => { console.warn(`gallery save skipped: ${error.message}`); return []; }) : [];
       if (!storedDuringSleep) storedUserMessage.modelContent = withoutStaleCompactionDirective(generated.userModelContent);
