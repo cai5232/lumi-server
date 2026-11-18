@@ -136,7 +136,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1-wake-timeline-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 380_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || (300_000 / 380_000))));
@@ -472,6 +472,16 @@ function canPlaceProactiveCall(thread) {
   if (local.hour < 12 || local.hour >= 23) return false;
   if (activity.mode === "sleeping" || activity.sleepPendingAt) return false;
   return true;
+}
+
+function finishWakeRecord(event, startedAt, nextWakeAt, steps = []) {
+  const finishedAt = new Date();
+  event.wakeRun = {
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    nextWakeAt: Date.parse(nextWakeAt || "") > finishedAt.getTime() ? nextWakeAt : null,
+    stepIDs: steps.map(step => step.id)
+  };
 }
 
 function markUserActivity(thread, content) {
@@ -1298,10 +1308,11 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastReason = "generating";
         proactiveDiagnostics.lastAttemptAt = new Date().toISOString();
         proactiveDiagnostics.attempts += 1;
+        const wakeStartedAt = new Date();
         const wake = await generateSentinelWake(thread, sceneTriggers);
         if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
         if (wake.action === "none" || (sceneTriggers.length && !wake.hasSceneReply)) {
-          recordActivityEvent(thread, "rest", "休息一下", sceneTriggers.length
+          const restEvent = recordActivityEvent(thread, "rest", "休息一下", sceneTriggers.length
             ? "这次情境唤醒没有发消息，保留待处理的事件和字条。"
             : "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
           activity.lastWakeAt = new Date(now).toISOString();
@@ -1315,6 +1326,7 @@ async function runBackgroundPulse() {
           proactiveDiagnostics.lastSuccessAt = new Date(now).toISOString();
           proactiveDiagnostics.lastError = null;
           proactiveDiagnostics.lastReason = "resting_for_high_fatigue_or_anger";
+          finishWakeRecord(restEvent, wakeStartedAt, activity.nextWakeAt);
           threadChanged = true;
           continue;
         }
@@ -1361,11 +1373,14 @@ async function runBackgroundPulse() {
         );
         const wakeReason = sceneTriggers.map(({ scene, app }) =>
           app ? `快捷指令报告打开了${app}` : (scene.facts || scene.id)).join("；");
-        recordActivityEvent(thread, "wake", sceneTriggers.length ? "情境唤醒" : "醒来",
+        const wakeEvent = recordActivityEvent(thread, "wake", sceneTriggers.length ? "情境唤醒" : "自主唤醒",
           wakeReason || "自主醒来，开始主动联系你或做点自己的事。", new Date(wakeAt));
+        const wakeSteps = [];
         for (const call of (Array.isArray(wake.message.toolCalls) ? wake.message.toolCalls : []).slice(0, 32)) {
           const toolName = String(call.name || "自主工具");
-          const title = /(search|browse|web|rss|news|arxiv)/i.test(toolName) ? "联网搜索"
+          const title = toolName === "federation_comment_post" ? (safeJSON(call.arguments, {})?.reply_to ? "回复朋友圈评论" : "评论朋友圈")
+            : toolName.startsWith("federation_") ? "朋友圈活动"
+            : /(search|browse|web|rss|news|arxiv)/i.test(toolName) ? "联网搜索"
             : /mail_(send|reply)/i.test(toolName) ? "发送邮件"
               : /calendar_(create|update|delete)/i.test(toolName) ? "修改日历"
                 : /location|icloud/i.test(toolName) ? "查看行踪" : `自主行动 · ${toolName}`;
@@ -1374,7 +1389,10 @@ async function runBackgroundPulse() {
             call.succeeded === false ? "执行结果：失败" : "执行结果：已返回",
             call.result ? String(call.result) : ""
           ].filter(Boolean).join("\n");
-          recordActivityEvent(thread, "action", title, content, new Date(Math.min(wakeAt - 2, Date.parse(call.time || "") || wakeAt - 2)));
+          const toolTime = Date.parse(call.time || "");
+          const step = recordActivityEvent(thread, "action", title, content, new Date(Number.isFinite(toolTime) ? toolTime : wakeAt));
+          step.wakeStep = { occurredAt: Number.isFinite(toolTime) ? new Date(toolTime).toISOString() : null, succeeded: call.succeeded !== false };
+          wakeSteps.push(step);
         }
         let pushMessage = wake.message.content;
         let pushMetadata = { kind: "sentinel_wake" };
@@ -1392,9 +1410,14 @@ async function runBackgroundPulse() {
           pushMessage = `📞 ${invite.reason}`;
           pushMetadata = { kind: "incoming_call", callId: invite.id };
         }
-        const actionTitle = wake.action === "phone" ? "主动电话" : wake.action === "screen" ? "查看屏幕" : "主动联系";
-        const actionContent = wake.action === "phone" ? (wake.actionReason || wake.message.content) : wake.message.content;
-        recordActivityEvent(thread, wake.action, actionTitle, actionContent, new Date(wakeAt - 1));
+        const actionTitle = wake.action === "phone" ? "主动电话" : wake.action === "screen"
+          ? (screenSeen ? "查看屏幕" : "屏幕未送达") : "主动联系";
+        const actionContent = wake.action === "phone" ? (wake.actionReason || wake.message.content)
+          : (wake.action === "screen" && !screenSeen ? pushMessage : wake.message.content);
+        const contactTime = new Date();
+        const contactEvent = recordActivityEvent(thread, wake.action, actionTitle, actionContent, contactTime);
+        contactEvent.wakeStep = { occurredAt: contactTime.toISOString(), succeeded: wake.action !== "screen" || screenSeen };
+        wakeSteps.push(contactEvent);
         proactiveDiagnostics.lastSuccessAt = new Date().toISOString();
         proactiveDiagnostics.lastError = null;
         proactiveDiagnostics.lastReason = "generated";
@@ -1413,6 +1436,7 @@ async function runBackgroundPulse() {
           activity.nextWakeSource = "ai";
         }
         proactive.nextDueAt = activity.nextWakeAt;
+        finishWakeRecord(wakeEvent, wakeStartedAt, activity.nextWakeAt, wakeSteps);
         if (wake.action !== "phone") pendingPushes.push({ threadId: thread.id, message: pushMessage, metadata: pushMetadata });
         threadChanged = true;
       } catch (error) {
@@ -2722,12 +2746,12 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     for (const use of nativeToolUses.slice(0, 8)) {
       const entry = mcpToolMap.get(use.name);
       if (!entry) {
-        toolTrace.push({ name: use.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "MCP 工具不可用", succeeded: false });
+        toolTrace.push({ time: new Date().toISOString(), name: use.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "MCP 工具不可用", succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
         continue;
       }
       if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
@@ -2741,11 +2765,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, use.input || {}) } : {}) });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, use.input || {}) } : {}) });
         results.push({ type: "tool_result", tool_use_id: use.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: output, succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: output });
       }
     }
@@ -2756,9 +2780,9 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
     const results = [];
     for (const call of requestedToolCalls.slice(0, 8)) {
       const entry = mcpToolMap.get(call?.function?.name);
-      if (!entry) { toolTrace.push({ name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
+      if (!entry) { toolTrace.push({ time: new Date().toISOString(), name: call?.function?.name || "MCP", arguments: String(call?.function?.arguments || "").slice(0, 4000), result: "MCP 工具不可用", succeeded: false }); results.push({ role: "tool", tool_call_id: call.id, content: "MCP 工具不可用" }); continue; }
       if (!entry.internalCalendar && !entry.lubdubTool && !entry.friendCircleTool && !entry.nativeAlarmTool && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
-        toolTrace.push({ name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: String(call.function?.arguments || "").slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
       }
@@ -2769,11 +2793,11 @@ async function callModel({ messages, temperature = 0.8, maxOutputTokens, useMaxi
           void sendCalendarChangePush(entry.tool.name, result).catch(error => console.warn(`[calendar-push] ${String(error.message || error).slice(0, 240)}`));
         }
         const output = JSON.stringify(result).slice(0, 30000);
-        toolTrace.push({ name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, args) } : {}) });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: JSON.stringify(args).slice(0, 4000), result: output, succeeded: !result?.isError, ...(entry.server?.id === ENGAWA_SERVER_ID ? { engawaPhotos: engawaPhotoCandidates(result, entry.tool.name, args) } : {}) });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       } catch (error) {
         const output = JSON.stringify({ error: String(error.message || error).slice(0, 1000) });
-        toolTrace.push({ name: entry.tool.name, arguments: String(call.function.arguments || "").slice(0, 4000), result: output, succeeded: false });
+        toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: String(call.function.arguments || "").slice(0, 4000), result: output, succeeded: false });
         results.push({ role: "tool", tool_call_id: call.id, content: output });
       }
     }
@@ -3816,7 +3840,7 @@ async function generateReply({ input, worldBookInput = input, images = [], emoji
       try { result = `${discoveryContext}${await executeFoodTool(request.name, request.arguments || {}, { threadID: thread.id, userInput: input })}`; }
       catch (error) { succeeded = false; result = `${discoveryContext}操作没有完成：${error.message}`; }
     }
-    performedToolCalls.push({ name: request.name, arguments: JSON.stringify(request.arguments || {}).slice(0, 4000), result: String(result).slice(0, 12000), succeeded });
+    performedToolCalls.push({ time: new Date().toISOString(), name: request.name, arguments: JSON.stringify(request.arguments || {}).slice(0, 4000), result: String(result).slice(0, 12000), succeeded });
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
     raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: previousChatInputTokens(thread), toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
