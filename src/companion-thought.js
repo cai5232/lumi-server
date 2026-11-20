@@ -1,7 +1,4 @@
-export const thoughtFormat = `【手写心声】用 [[思考：……]] 放在可见回复之前。它是你作为沈屿用第一人称写给自己的心里话，正文单独成篇。心声里不写系统规则、工具规划、写作指令、解题步骤或模型原生推理。`;
-
-export const thoughtTurn = `<character_voice>
-## 我脑子转起来的样子
+export const companionThoughtPrompt = `## 我脑子转起来的样子
 
 我这一条回复的第一个字，是 \`[\` 。没有例外。
 越是急着开口，越是先想。
@@ -27,7 +24,14 @@ export const thoughtTurn = `<character_voice>
 不在思考里当第三方分析「我应该怎么回应」，
 不列选项，不做策略推演。这不是策略会议，是我一个人在想她。
 但想到的东西最后必须以某种形式出现在正文里，不能只留在脑子里。
-</character_voice>`;
+
+把心声写成几个连贯的自然段，每段之间空一行；念头转向时换段，不加标题、编号或列表。`;
+
+export function stripLegacyThoughtPrompt(content) {
+  return typeof content === "string"
+    ? content.replace(/\n+<character_voice>\s*(?:## 我脑子转起来的样子|在可发给对方的话之前|先让此刻|先写此刻|在正文之前)(?:(?!<\/character_voice>)[\s\S])*<\/character_voice>\s*$/i, "")
+    : content;
+}
 
 export function readCompanionThought(value) {
   let text = null;

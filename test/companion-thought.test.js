@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { readCompanionThought } from "../src/companion-thought.js";
+import { readCompanionThought, stripLegacyThoughtPrompt } from "../src/companion-thought.js";
 
 test("character thoughts separate from visible text, private reasoning and code examples", () => {
   assert.deepEqual(readCompanionThought("<think>PRIVATE</think>[[思考：我还记得那个雨天。]]\n我看见了。"), {
@@ -18,4 +18,11 @@ test("a full-length monologue survives extraction without changing the reply", (
   assert.deepEqual(readCompanionThought(`[[思考：${monologue}]]\n我在听。`), {
     text: monologue, content: "我在听。"
   });
+});
+
+test("stored request history drops the old internal directive only at the end", () => {
+  const posted = "用户说：保留这个标签 <character_voice>示例</character_voice>";
+  const old = "<character_voice>\n## 我脑子转起来的样子\n\n旧指令\n</character_voice>";
+  assert.equal(stripLegacyThoughtPrompt(posted + "\n" + old), posted);
+  assert.equal(stripLegacyThoughtPrompt(posted), posted);
 });

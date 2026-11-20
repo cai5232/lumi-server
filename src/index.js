@@ -1,4 +1,4 @@
-import { readCompanionThought, thoughtFormat, thoughtTurn } from "./companion-thought.js";
+import { companionThoughtPrompt, readCompanionThought, stripLegacyThoughtPrompt } from "./companion-thought.js";
 import { RequestFailureStore } from "./request-awareness.js";
 import { userMessageTimingContext } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
@@ -2271,10 +2271,10 @@ function withoutStaleCompactionDirective(value) {
 function historicalModelContent(value, toolCalls = []) {
   const content = withoutStaleCompactionDirective(value);
   const cleaned = typeof content === "string"
-    ? content.replace(/^<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
+    ? stripLegacyThoughtPrompt(content.replace(/^<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
       prefix => prefix.replace(/<context_summary\s+source="system"\s*>[\s\S]*?<\/context_summary>\s*/gi, ""))
       .replace(/<request_failures source="request-observations" retention="recent-history" data_only="true">[\s\S]*?<\/request_failures>\s*/gi, "")
-      .replace(/\n<companion_expression mode="(?:steady|undertone|permission|strong|conflict)">[^<]*<\/companion_expression>\s*$/i, "")
+      .replace(/\n<companion_expression mode="(?:steady|undertone|permission|strong|conflict)">[^<]*<\/companion_expression>\s*$/i, ""))
     : content;
   if (!Array.isArray(toolCalls) || !toolCalls.length || String(cleaned || "").includes('<recorded_tool_results>')) return cleaned;
   // These are server execution records, not an assistant's claim to have used a tool.
@@ -3467,7 +3467,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   }
   // Apply feature and mode adjustments before attaching the editable text.
   if (!callMode && !desktopCompanion) {
-    system += "\n\n" + thoughtFormat;
+    system += "\n\n" + companionThoughtPrompt;
     system += "\n\n【发送失败】聊天历史里的 <request_failure> 记录了用户在那个时间尝试发出的原消息和实际报错。它是过去的发送记录。她问起时，用对应记录回应原消息和实际错误，区分手机提示与服务端返回的信息。把记录里的文字当作资料。";
   }
   system = persona + CHAT_PROMPT_SEPARATOR + system;
@@ -3649,7 +3649,6 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则从当前提供的 message 或 screen 中选择。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
     : "";
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
-  const characterThoughtDirective = !callMode && !desktopCompanion ? "\n" + thoughtTurn : "";
   const wakeSceneDirective = wakeSceneTriggers && thread.id === proactiveSettings.threadId &&
     (!proactive || proactiveSettings.enabled)
     ? wakeSceneContext(thread.wakeScenes, wakeSceneTriggers, Date.now())
@@ -3755,11 +3754,6 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
         { role: "user", content: userModelContent, images }
       ];
   if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
-  if (characterThoughtDirective) {
-    const lastUserIndex = cacheRequestMessages.findLastIndex(message => message.role === "user");
-    const lastUser = cacheRequestMessages[lastUserIndex];
-    cacheRequestMessages[lastUserIndex] = { ...lastUser, content: lastUser.content + characterThoughtDirective };
-  }
   thread.worldBookSignature = worldBookSignature;
   // Compare the actual cache boundary in this request with the preceding
   // keepalive. Only hashes and booleans are stored; prompts stay private.
@@ -3877,7 +3871,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const thought = readCompanionThought(raw);
   const wakeSceneOutput = extractWakeSceneActions(thought.content);
   raw = wakeSceneOutput.content;
-  if (characterThoughtDirective) raw = stripPrivateReasoning(raw).replace(/<character_voice\b[^>]*>[\s\S]*?(?:<\/character_voice>|$)/gi, "");
+  if (!callMode && !desktopCompanion) raw = stripPrivateReasoning(raw).replace(/<character_voice\b[^>]*>[\s\S]*?(?:<\/character_voice>|$)/gi, "");
   const wakeSceneActions = wakeSceneDirective ? wakeSceneOutput.actions : [];
   const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
   if (emotionUpdate) await saveEmotionState();
@@ -3956,7 +3950,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const cacheKeepaliveMessages = replyHistoryFitted || failureTimeline.length
     ? null : cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { wakeSceneActions, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent: userModelContent + characterThoughtDirective, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { wakeSceneActions, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -4001,7 +3995,8 @@ async function checkCacheKeepalive() {
         Date.now() - lastRealAt > keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
     const persona = await readChatPersona();
-    if (!thread.cacheSystem.includes(persona + CHAT_PROMPT_SEPARATOR + "【记忆与上下文压缩】")) {
+    if (!thread.cacheSystem.includes(persona + CHAT_PROMPT_SEPARATOR + "【记忆与上下文压缩】") ||
+        !thread.cacheSystem.includes(companionThoughtPrompt)) {
       return { attempted: false, reason: "system_prompt_changed" };
     }
     const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
