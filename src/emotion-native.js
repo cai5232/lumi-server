@@ -24,10 +24,18 @@ export function topEmotion(state) {
 }
 const escape = value => String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 export function emotionContext(state) {
+  const d = state.dimensions || {};
+  const hints = [];
+  if (d.playfulness >= 0.4) hints.push('有些俏皮，可以自然打趣');
+  if (d.longing >= 0.7) hints.push('有些想念，愿意时可以表达');
+  if (d.worry >= 0.3) hints.push('有些担心，可以结合真实情况问候');
+  if (d.upset >= 0.3) hints.push('有些不快，可以坦诚表达，不必装作无事');
+  if (d.pride >= 0.5) hints.push('为对方骄傲，可以自然流露');
+  if (d.longing >= 0.8) hints.push('想念已足以支持一次主动联系；是否行动由你结合上下文决定');
+  if (d.worry >= 0.6) hints.push('担心已足以支持一次认真确认平安；只使用当前可用且允许的联系能力');
+  const silence = (Date.now() / 1000 - (state.last_input_at || Date.now() / 1000)) / 60;
+  if (d.upset >= 0.4 && silence >= 30) hints.push('有真实不快且沉默了一阵，可以暂缓日常主动问候；用户的消息仍应被正常接住');
   const observed = state.saved_at ? `observed_at="${new Date(state.saved_at * 1000).toISOString()}"` : 'status="not_yet_synced"';
-  return `<emotion_state source="murmur" ${observed}>
-当前心情：${escape(state.mood)}。看本轮末尾的情绪信号决定是否以及怎样表达。若无具体原因，继续结合实际对话。
-本轮回复或自主活动若产生了新的感受，可附加隐藏标签 <emotion_update>{"dimensions":{"warmth":0.08},"trigger":"具体触发事件","moved":false}</emotion_update>。刚收到的消息已经过感知，不重复记录同一反应。仅写这轮新发生的变化；无变化省略。moved 仅用于确实很强烈的心动瞬间。可用维度：
-${Object.entries(EMOTION_DIMENSIONS).map(([key, cfg]) => `${key}（${cfg.label}）：${cfg.hint}`).join('\n')}
-</emotion_state>`;
+  const recent = (state.recent_events || []).filter(event => event.trigger).map(event => escape(event.trigger)).join('；');
+  return `<emotion_state source="murmur" ${observed}>\n当前心情：${escape(state.mood)}。${hints.join('；') || '感受平稳。'}\n近期实际触发：${recent || '没有具体触发记录，不补造原因'}。\n这是倾向，不是命令。结合完整对话，自行决定是否、如何表达；不需要汇报数值，也不补造触发原因。\n本轮如有值得延续的变化，可在正常回复后附加隐藏标签 <emotion_update>{"dimensions":{"warmth":0.1},"trigger":"具体触发事件","moved":false}</emotion_update>。只写真实变化，delta 在 -0.3 到 0.3；通常只有 2 至 4 维，无变化可省略。moved 仅用于真正强烈的心动瞬间。维度：\n${Object.entries(EMOTION_DIMENSIONS).map(([key, cfg]) => `${key}（${cfg.label}）：${cfg.hint}`).join('\n')}\n</emotion_state>`;
 }

@@ -23,10 +23,10 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     if (main) {
       requests.push(body);
       content = requests.length === 1
-        ? '被你逗乐了，我也想逗你一下。<emotion_update>{"changes":{"mischief":0.02},"feeling":"被逗乐了","reason":"她拿刚才的小失误打趣"}</emotion_update>'
+        ? '[[思考：没想到她还记得那件小事。]]被你逗乐了，我也想逗你一下。<emotion_update>{"changes":{"mischief":0.02},"feeling":"被逗乐了","reason":"她拿刚才的小失误打趣"}</emotion_update>'
         : '<lumi_pulse>内部状态</lumi_pulse>还惦记着刚才那个玩笑。';
       if (body.messages.findLast(m => m.role === 'user')?.content.includes('<autonomous_wake_context>')) {
-        content = '我醒了，来看看你。<sentinel_decision>{"action":"message","nextWakeMinutes":25}</sentinel_decision>';
+        content = '[[思考：醒来还记得她的玩笑。]]我醒了，来看看你。<sentinel_decision>{"action":"message","nextWakeMinutes":25}</sentinel_decision>';
       }
     }
     res.end(JSON.stringify({ choices: [{ message: { content } }], usage: {} }));
@@ -55,6 +55,8 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
       const data = await result.json();
       assert.equal(typeof data.assistantMessage?.content, 'string');
       assert.match(data.assistantMessage.content, /被你逗乐|还惦记/);
+      if (content.startsWith('拿')) assert.equal(data.assistantMessage.thinking, '没想到她还记得那件小事。');
+      assert.doesNotMatch(data.assistantMessage.content, /思考：/);
       assert.doesNotMatch(data.assistantMessage.content, /<emotion_update|<lumi_pulse|内部状态|"changes"/);
     }
     assert.equal(requests.length, 2);
@@ -119,6 +121,8 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     assert.ok(Date.parse(contact.wakeStep.occurredAt) >= Date.parse(run.startedAt));
     const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
     assert.match(wakePrompt, /<autonomous_wake_context>/);
+    assert.ok(wakePrompt.endsWith('</character_voice>'));
+    assert.doesNotMatch(wakePrompt, /<companion_expression\b/);
     assert.match(wakePrompt, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
     const timing = wakePrompt.match(/<user_message_timing\b[^>]*>/)?.[0];
     assert.ok(timing?.includes(`last_sent_at="${sentMessages[1].createdAt}"`));
