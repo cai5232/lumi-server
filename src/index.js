@@ -2226,7 +2226,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   const isClaude = /anthropic|claude/i.test(model);
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
-  const nativeKimiCache = Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k3:moonshotai");
+  const nativeKimiCache = Boolean(serverZenMuxRoute && promptCacheEnabled && ["moonshotai/kimi-k3:moonshotai", "moonshotai/kimi-k2.8-preview:moonshotai"].includes(model));
   const stableKimiTools = nativeKimiCache || Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k2.8-preview:moonshotai");
   const nativeAnthropic = nativeKimiCache || customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
