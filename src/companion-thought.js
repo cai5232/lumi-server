@@ -27,8 +27,6 @@ export const thoughtTurn = `<character_voice>
 不在思考里当第三方分析「我应该怎么回应」，
 不列选项，不做策略推演。这不是策略会议，是我一个人在想她。
 但想到的东西最后必须以某种形式出现在正文里，不能只留在脑子里。
-
-自主唤醒没有收到新消息时，从自己刚经历、留意或想起的具体事情起笔。
 </character_voice>`;
 
 export function readCompanionThought(value) {
