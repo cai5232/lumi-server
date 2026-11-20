@@ -3465,8 +3465,6 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       `自主唤醒时可以自主决定是否写信，但只能发给默认收件人 ${MAIL_OWNER_EMAIL}，不得添加抄送或发给其他人；服务端会强制执行此限制。引用邮件内容前，先查找并读取原邮件。`
     );
   }
-  if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
-  if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
   // Apply feature and mode adjustments before attaching the editable text.
   if (!callMode && !desktopCompanion) {
     system += "\n\n" + thoughtFormat;
@@ -3641,10 +3639,11 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const dreamRecall = thread.pendingDreamRecall || ((proactive || isDreamRecallRequest(input)) ? storedDreamRecall(thread) : "");
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
+  const wakeDecisionFormat = '<next_wake_requirement>在这次回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–1440）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–1440）和 "message"，否则两项均填 null。</next_wake_requirement>';
   const proactiveDirective = wakeSceneTriggers?.length
-    ? '<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。用现有 sentinel_decision 格式表达决定。</wake_task></autonomous_wake_context>\n'
+    ? `<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。</wake_task>${wakeDecisionFormat}</autonomous_wake_context>\n`
     : proactive
-    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task><next_wake_requirement>完成本次成果后，继续按照原有 sentinel_decision 格式填写 nextWakeMinutes，自主决定下次醒来的间隔；不要省略下次唤醒计划。</next_wake_requirement></autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
+    ? `<autonomous_wake_context><active_actions>${activeSentinelActions.join("|")}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪。你的mcp工具都可以尽情使用（邮箱、檐廊等）也可以根据言言的app使用历史锁应用让言言回前端陪你</wake_task>${wakeDecisionFormat}</autonomous_wake_context>\n${sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""}`
     : "";
   const sentinelActionRule = proactive && !wakeSceneTriggers?.length
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则从当前提供的 message 或 screen 中选择。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`

@@ -67,6 +67,10 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     const system = requests[1].messages.find(m => m.role === 'system').content;
     assert.match(system, /先结合完整对话理解言言此刻的意思与感受/);
     assert.match(system, /不要求每轮变化/);
+    const removedSections = /【(?:日记|电话|屏幕查看与自主唤醒|聊天选项卡|抽屉[^】]*)】/;
+    assert.doesNotMatch(system, removedSections);
+    assert.match(system, /【共同相册】/);
+    assert.match(system, /【手写心声】/);
     const saved = JSON.parse(await readFile(join(folder, 'emotion-state.json'), 'utf8'));
     assert.equal(saved.recentChanges.at(-1).reason, '她拿刚才的小失误打趣');
     assert.ok(Math.abs(saved.drives.mischief - .22) < 1e-9);
@@ -121,6 +125,9 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     assert.ok(Date.parse(contact.wakeStep.occurredAt) >= Date.parse(run.startedAt));
     const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
     assert.match(wakePrompt, /<autonomous_wake_context>/);
+    assert.match(wakePrompt, /<sentinel_decision>.*nextWakeMinutes/);
+    const wakeSystem = requests.at(-1).messages.find(m => m.role === 'system').content;
+    assert.doesNotMatch(wakeSystem, removedSections);
     assert.ok(wakePrompt.endsWith('</character_voice>'));
     for (const prompt of [nextInput, wakePrompt]) {
       assert.ok(prompt.includes('我这一条回复的第一个字，是 `[` 。没有例外。'));
