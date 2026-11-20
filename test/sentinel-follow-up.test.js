@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeFollowUpDecision } from "../src/sentinel-follow-up.js";
+import { normalizeFollowUpDecision, wakeIntervalMinutes } from "../src/sentinel-follow-up.js";
 
 test("accepts an enabled message follow-up and maps call to phone", () => {
   assert.deepEqual(
@@ -19,4 +19,13 @@ test("rejects incomplete, out-of-range, and disabled follow-up decisions", () =>
   assert.equal(normalizeFollowUpDecision({ followUpMinutes: 1441, followUpAction: "message" }, ["message"]), null);
   assert.equal(normalizeFollowUpDecision({ followUpMinutes: 5, followUpAction: "call" }, ["message"]), null);
   assert.equal(normalizeFollowUpDecision({ followUpMinutes: 5, followUpAction: "screen" }, ["screen"]), null);
+});
+
+test("caps regular wakes and follow-ups at 50 minutes", () => {
+  assert.equal(wakeIntervalMinutes(240), 50);
+  assert.equal(wakeIntervalMinutes(undefined), 50);
+  assert.equal(wakeIntervalMinutes(31), 31);
+  assert.equal(wakeIntervalMinutes(null, 25), 25);
+  assert.deepEqual(normalizeFollowUpDecision({ followUpMinutes: 60, followUpAction: "message" }, ["message"]),
+    { minutes: 50, action: "message" });
 });

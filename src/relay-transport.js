@@ -48,6 +48,7 @@ export function decodeRelayResponse(raw) {
       const block = blocks.get(frame.index) || { type: 'text', text: '' }, delta = frame.delta || {};
       if (delta.text) block.text = (block.text || '') + delta.text;
       if (delta.thinking) block.thinking = (block.thinking || '') + delta.thinking;
+      if (delta.signature) block.signature = (block.signature || '') + delta.signature;
       if (delta.partial_json) block.partialJSON = (block.partialJSON || '') + delta.partial_json;
       blocks.set(frame.index, block);
     }

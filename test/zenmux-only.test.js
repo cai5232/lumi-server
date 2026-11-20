@@ -44,6 +44,18 @@ globalThis.fetch = async (input, options) => {
     if (body.messages.at(-1).content.includes('模拟上游失败')) {
       return Response.json({ error: { message: 'no available channel' } }, { status: 503 });
     }
+    if (url.pathname === '/api/anthropic/v1/messages') {
+      const usage = { input_tokens: 512, cache_read_input_tokens: 1024, cache_creation_input_tokens: 512 };
+      const content = { type: 'text', text: '我在这里。' };
+      if (!body.stream) return Response.json({ content: [content], stop_reason: 'end_turn', usage: { ...usage, output_tokens: 6 } });
+      const frames = [
+        { type: 'message_start', message: { usage } },
+        { type: 'content_block_start', index: 0, content_block: content },
+        { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 6 } },
+        { type: 'message_stop' }
+      ];
+      return new Response(frames.map(frame => 'data: ' + JSON.stringify(frame) + '\\n\\n').join(''));
+    }
     const usage = { prompt_tokens: 2048, prompt_tokens_details: { cached_tokens: 1024 }, completion_tokens: 6 };
     if (!body.stream) return Response.json({ choices: [{ message: { content: '我在这里。' } }], usage });
     const frames = [{ choices: [{ delta: { content: '我在这里。' } }] }, { choices: [], usage }];
@@ -114,20 +126,34 @@ globalThis.fetch = async (input, options) => {
     assert.equal(watched.status, 200);
     assert.equal((await watched.json()).model, pinnedModel);
     assert.equal((await send(messages, { ...legacy, content: '模拟上游失败' })).status, 503);
+    const updatedSchedule = await fetch(base + '/v1/settings/proactive', {
+      method: 'PUT', headers: { 'content-type': 'application/json', ...authorization },
+      body: JSON.stringify({ enabled: true, intervalMin: 120, intervalMax: 240 })
+    });
+    assert.equal(updatedSchedule.status, 200);
+    const schedule = await updatedSchedule.json();
+    assert.equal(schedule.intervalMin, 50);
+    assert.equal(schedule.intervalMax, 50);
+    assert.ok(Date.parse(schedule.nextDueAt) - Date.now() <= 50 * 60_000);
+    assert.ok(Date.parse(schedule.nextDueAt) - Date.now() >= 49 * 60_000);
 
     const records = (await readFile(capture, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.equal(records.length, 4);
     for (const record of records) {
-      assert.equal(record.url, 'https://zenmux.ai/api/v1/chat/completions');
       assert.equal(record.authorization, 'Bearer server-test-key');
       assert.equal(record.body.model, pinnedModel);
     }
-    assert.deepEqual(records[1].body.stream_options, { include_usage: true });
+    for (const index of [0, 1, 3]) {
+      assert.equal(records[index].url, 'https://zenmux.ai/api/anthropic/v1/messages');
+      assert.deepEqual(records[index].body.cache_control, { type: 'ephemeral', ttl: '1h' });
+      assert.ok(records[index].body.tools.length);
+    }
+    assert.equal(records[2].url, 'https://zenmux.ai/api/v1/chat/completions');
     const providers = await (await fetch(base + '/v1/providers')).json();
     assert.deepEqual(providers.providers, [{ id: 'zenmux', models: [pinnedModel], configuredModel: pinnedModel }]);
     const usage = await (await fetch(base + '/v1/usage/requests', { headers: authorization })).json();
     assert.ok(usage.requests.some(request => request.provider === 'zenmux' &&
-      request.model === pinnedModel && request.cachedTokens === 1024));
+      request.model === pinnedModel && request.cachedTokens === 1024 && request.inputTokens === 2048));
 
     await stop(child);
     child = launch();

@@ -47,7 +47,7 @@ import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, 
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
-import { normalizeFollowUpDecision } from "./sentinel-follow-up.js";
+import { MAX_WAKE_MINUTES, normalizeFollowUpDecision, wakeIntervalMinutes } from "./sentinel-follow-up.js";
 import { createStickerStore, stickerMessageForModel } from "./stickers.js";
 import { createDesktopCompanionService } from "./desktop-companion.js";
 import { applyLiveAttentionUpdate, buildLiveAttentionContext } from "./live-attention.js";
@@ -177,7 +177,7 @@ let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
-const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
 const soloSettings = { enabled: true, mode: "mix", desireThreshold: 0.78, idleMinutes: 30, touchDecayMinutes: 30, cooldownMinutes: 60 };
 let soloMetrics = [];
 const activeSoloRuns = new Map();
@@ -449,14 +449,14 @@ const seed = () => ({
   id: "default",
   title: "沈屿",
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }],
-  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } },
+  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } },
   activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, nextWakeSource: null, sleepPendingAt: null, sleepStage: null },
   sleep: { episodic: [], semantic: [], dreams: [], reflections: [], pendingDreams: [], nextCycle: 0, running: false, dreamArc: "", nightmare: null }
 });
 
 function ensureProactive(thread) {
   if (!thread.proactive) {
-    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: 60, intervalMax: 60, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
   }
   if (!thread.proactive.actions || typeof thread.proactive.actions !== "object") thread.proactive.actions = { message: true, phone: true, screen: false };
   return thread.proactive;
@@ -541,7 +541,7 @@ function markUserActivity(thread, content) {
   // also carry a copied per-thread object. Prefer the live global setting so
   // a newly sent message immediately gets a real next-wake timestamp.
   const configured = proactiveSettings.threadId === thread.id ? proactiveSettings : proactive;
-  const interval = Math.max(1, Number(configured.intervalMin) || 60);
+  const interval = wakeIntervalMinutes(configured.intervalMin);
   activity.nextWakeAt = configured.enabled ? new Date(now.getTime() + interval * 60_000).toISOString() : null;
   activity.nextWakeSource = configured.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
@@ -568,7 +568,7 @@ function finishUserConversation(thread, content) {
   activity.followUp = null;
   activity.lastUserActivityAt = nowISO;
   activity.nextWakeAt = proactive.enabled
-    ? new Date(now + Math.max(1, Number(proactive.intervalMin) || 60) * 60_000).toISOString()
+    ? new Date(now + wakeIntervalMinutes(proactive.intervalMin) * 60_000).toISOString()
     : null;
   activity.nextWakeSource = proactive.enabled ? "settings" : null;
   proactive.nextDueAt = activity.nextWakeAt;
@@ -706,11 +706,7 @@ async function generateSentinelWake(thread, sceneTriggers) {
   const decision = generated.sentinelDecision || {};
   const requestedAction = allowedActions.includes(decision.action) ? decision.action : "message";
   const action = requestedAction === "none" && !restAllowed ? "message" : requestedAction;
-  const requestedNextWakeMinutes = Number(decision.nextWakeMinutes);
-  const fallbackMinutes = Math.max(1, Number(proactive.intervalMin) || 60);
-  const nextWakeMinutes = Number.isFinite(requestedNextWakeMinutes) && requestedNextWakeMinutes >= 1 && requestedNextWakeMinutes <= 1440
-    ? Math.round(requestedNextWakeMinutes)
-    : fallbackMinutes;
+  const nextWakeMinutes = wakeIntervalMinutes(decision.nextWakeMinutes, wakeIntervalMinutes(proactive.intervalMin));
   const followUpDecision = normalizeFollowUpDecision(decision, allowedActions);
   return {
     message: { id: randomUUID(), role: "assistant", content: generated.content || "我刚刚想到你，想来找你说说话。", toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
@@ -1237,6 +1233,12 @@ async function runBackgroundPulse() {
         now - Date.parse(call.turns?.at(-1)?.createdAt || call.startedAt) < 30 * 60_000)) continue;
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
+    const latestWakeAt = now + MAX_WAKE_MINUTES * 60_000;
+    if (proactive.enabled && activity.mode === "sentinel" && Date.parse(activity.nextWakeAt || "") > latestWakeAt) {
+      activity.nextWakeAt = new Date(latestWakeAt).toISOString();
+      proactive.nextDueAt = activity.nextWakeAt;
+      threadChanged = true;
+    }
     // Repair pending-bedtime flags retained by older chat handlers.
     const latestUserMessage = availableChatHistory(thread).findLast(message => message.role === "user");
     if (activity.mode === "sentinel" && activity.sleepPendingAt && latestUserMessage && !isFarewell(latestUserMessage.content)) {
@@ -1294,7 +1296,7 @@ async function runBackgroundPulse() {
       thread.sleep.nightmare = null;
       thread.sleep.pendingDreams = [];
       activity.sleepPendingAt = null;
-      const nextInterval = Math.max(1, Number(proactive.intervalMin) || 60);
+      const nextInterval = wakeIntervalMinutes(proactive.intervalMin);
       activity.nextWakeAt = proactive.enabled ? new Date(Date.parse(activity.sleepUntil) + nextInterval * 60_000).toISOString() : null;
       activity.nextWakeSource = proactive.enabled ? "settings" : null;
       // The countdown is observable immediately, even if the first dream takes minutes.
@@ -1465,7 +1467,8 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastReason = "generated";
         activity.lastWakeAt = wake.message.createdAt;
         if (followUpForWake) {
-          activity.followUp = activity.followUp || followUpForWake;
+          const followUp = activity.followUp || followUpForWake;
+          activity.followUp = { ...followUp, minutes: wakeIntervalMinutes(followUp.minutes) };
           activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + activity.followUp.minutes * 60_000).toISOString();
           activity.nextWakeSource = "follow_up";
         } else if (wake.followUp) {
@@ -1775,6 +1778,8 @@ async function loadProactiveSettings() {
   catch (error) { if (error?.code !== "ENOENT") console.warn(`proactive settings unavailable: ${error.message}`); }
   if (!proactiveSettings.actions || typeof proactiveSettings.actions !== "object") proactiveSettings.actions = { message: true, phone: true, screen: false };
   proactiveSettings.dnd = Boolean(proactiveSettings.dnd);
+  proactiveSettings.intervalMin = wakeIntervalMinutes(proactiveSettings.intervalMin);
+  proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, wakeIntervalMinutes(proactiveSettings.intervalMax));
   if (typeof proactiveSettings.lastPhoneCallDate !== "string") proactiveSettings.lastPhoneCallDate = null;
 }
 
@@ -2477,10 +2482,12 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   const isClaude = /anthropic|claude/i.test(model);
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
-  const nativeAnthropic = customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
+  const nativeKimiCache = Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k3:moonshotai");
+  const nativeAnthropic = nativeKimiCache || customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
-  const apiURL = relayEndpoint(normalizedBaseURL, customProvider.chatPath || (nativeAnthropic ? "/messages" : "/chat/completions"));
+  const apiURL = nativeKimiCache ? "https://zenmux.ai/api/anthropic/v1/messages"
+    : relayEndpoint(normalizedBaseURL, customProvider.chatPath || (nativeAnthropic ? "/messages" : "/chat/completions"));
   const mailMcpURL = String(process.env.LUMI_MAIL_MCP_URL || "").trim();
   const mailMcpToken = String(process.env.LUMI_MAIL_MCP_TOKEN || "").trim();
 
@@ -2630,7 +2637,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool || mcpToolMap.get(tool.name)?.nativeAlarmTool)
+    ? mcpTools.filter(({ function: tool }) => nativeKimiCache || customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.foodTool || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool || mcpToolMap.get(tool.name)?.nativeAlarmTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   const outputTokenLimit = Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192));
@@ -2650,12 +2657,18 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
     ? {
         model: customProvider ? model : (process.env.LUMI_NATIVE_ANTHROPIC_MODEL || zenmuxAnthropicModel(model)),
         max_tokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
+        // ZenMux passes the Kimi cache TTL through its Messages endpoint.
+        ...(nativeKimiCache ? { cache_control: { type: "ephemeral", ttl: "1h" } } : {}),
         // Keep cache_control on system blocks for native Anthropic custom
         // providers. Flattening to a string silently discards that marker.
-        system: preparedMessages.filter((message) => message.role === "system")
+        system: [
+          // An existing five-minute prefix keeps its original TTL on a hit.
+          ...(nativeKimiCache ? [{ type: "text", text: "<!-- Lumi -->" }] : []),
+          ...preparedMessages.filter((message) => message.role === "system")
           .flatMap((message) => Array.isArray(message.content)
             ? message.content
-            : [{ type: "text", text: String(message.content || "") }]),
+            : [{ type: "text", text: String(message.content || "") }])
+        ],
         messages: preparedMessages.filter((message) => message.role !== "system"),
         ...(disableThinkingRetry && isClaude ? quietThinking
           : nativeThinkingEnabled && nativeThinkingBudget >= 1024 ? { thinking: { type: "enabled", budget_tokens: nativeThinkingBudget } } : {}),
@@ -2739,7 +2752,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   const { response, data } = relay;
   requestBody = relay.requestBody;
   const providerUsage = data?.usage || {};
-  const cachedTokens = cacheUsage(providerUsage).read;
+  const { read: cachedTokens, created: cacheWriteTokens } = cacheUsage(providerUsage);
   await recordModelRequest({
     id: randomUUID(),
     createdAt: new Date(startedAt).toISOString(),
@@ -2747,7 +2760,8 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
     model: String(requestBody.model || model),
     status: response.status,
     durationMs: Date.now() - startedAt,
-    inputTokens: Number(providerUsage.prompt_tokens ?? providerUsage.input_tokens ?? 0) || 0,
+    inputTokens: (Number(providerUsage.prompt_tokens ?? providerUsage.input_tokens ?? 0) || 0)
+      + (nativeKimiCache && providerUsage.prompt_tokens == null ? cachedTokens + cacheWriteTokens : 0),
     outputTokens: Number(providerUsage.completion_tokens ?? providerUsage.output_tokens ?? 0) || 0,
     cachedTokens,
     requestJSON: modelRequestLogJSON(requestBody),
@@ -2793,7 +2807,10 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
         results.push({ type: "tool_result", tool_use_id: use.id, is_error: true, content: "MCP 工具不可用" });
         continue;
       }
-      if (!entry.allowWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
+      const mayWrite = nativeKimiCache
+        ? entry.lubdubTool || entry.friendCircleTool || entry.nativeAlarmTool
+        : entry.allowWrite;
+      if (!mayWrite && !entry.internalCalendar && /(send|delete|remove|write|create|update|edit|run|exec|purchase|payment|publish|commit|transfer|post|message)/i.test(entry.tool.name)) {
         toolTrace.push({ time: new Date().toISOString(), name: entry.tool.name, arguments: JSON.stringify(use.input || {}).slice(0, 4000), result: "此工具可能修改或发送数据；未执行", succeeded: false });
         results.push({ type: "tool_result", tool_use_id: use.id, content: "此工具可能修改或发送数据；请在 Lumi 设置 → MCP 工具中手动执行。" });
         continue;
@@ -3690,7 +3707,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const dreamRecall = thread.pendingDreamRecall || ((proactive || isDreamRecallRequest(input)) ? storedDreamRecall(thread) : "");
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const wakeDecisionFormat = '<next_wake_requirement>在这次回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–1440）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–1440）和 "message"，否则两项均填 null。</next_wake_requirement>';
+  const wakeDecisionFormat = `<next_wake_requirement>在这次回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–${MAX_WAKE_MINUTES}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–${MAX_WAKE_MINUTES}）和 "message"，否则两项均填 null。</next_wake_requirement>`;
   const proactiveDirective = wakeSceneTriggers?.length
     ? `<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。</wake_task>${wakeDecisionFormat}</autonomous_wake_context>\n`
     : proactive
@@ -5528,9 +5545,11 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/settings/proactive" && req.method === "PUT") {
       const input = await body(req);
       if (typeof input.enabled !== "boolean") return send(res, 400, { error: "enabled_must_be_boolean" });
-      const min = Number(input.intervalMin);
-      const max = Number(input.intervalMax ?? min);
-      if (!Number.isFinite(min) || !Number.isFinite(max) || min < 10 || max < min || max > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
+      const requestedMin = Number(input.intervalMin);
+      const requestedMax = Number(input.intervalMax ?? requestedMin);
+      if (!Number.isFinite(requestedMin) || !Number.isFinite(requestedMax) || requestedMin < 10 || requestedMax < requestedMin || requestedMax > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
+      const min = wakeIntervalMinutes(requestedMin);
+      const max = wakeIntervalMinutes(requestedMax);
       proactiveSettings.enabled = input.enabled;
       proactiveSettings.dnd = input.dnd === true;
       proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
@@ -5811,8 +5830,8 @@ const server = createServer(async (req, res) => {
         proactiveSettings.enabled = Boolean(input.enabled);
         proactiveSettings.threadId = input.threadId || "default";
         if (typeof input.message === "string" && input.message.trim()) proactiveSettings.message = input.message.trim();
-        proactiveSettings.intervalMin = Math.max(1, Number(input.intervalMin) || 60);
-        proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, Number(input.intervalMax) || proactiveSettings.intervalMin);
+        proactiveSettings.intervalMin = wakeIntervalMinutes(input.intervalMin);
+        proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, wakeIntervalMinutes(input.intervalMax, proactiveSettings.intervalMin));
         if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
         if (typeof input.dnd === "boolean") proactiveSettings.dnd = input.dnd;
         if (!proactiveSettings.enabled) proactiveSettings.nextDueAt = null;
@@ -5841,7 +5860,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST") {
         const input = await body(req);
         const activity = threads[id].activity;
-        const interval = Math.max(1, Number(proactiveSettings.intervalMin) || 60);
+        const interval = wakeIntervalMinutes(proactiveSettings.intervalMin);
         if (input.action === "sentinel_start") {
           threads[id].wakeScenesPaused = false;
           activity.mode = "sentinel"; activity.sleepStage = null;

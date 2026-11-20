@@ -35,6 +35,8 @@ npm run dev
 
 也可以用 `LUMI_ZENMUX_ONLY=true` 和 `LUMI_MODEL_API_KEY` 直接从部署环境启用独占模式。App 保存的 Key 优先于环境变量。
 
+锁定 Moonshot AI 的 Kimi K3 时，聊天和自主唤醒通过 ZenMux 的 Messages 接口申请一小时提示词缓存。自主唤醒和跟进最多安排 50 分钟后的下一轮，休眠和勿扰继续按原设置执行。
+
 ## 聊天贴纸库
 
 iOS 聊天输入框的贴纸按钮读取 `GET /v1/stickers`，新增贴纸使用 `POST /v1/stickers`（JSON 字段：`name`、`category`、`dataURL`，支持 JPEG、PNG、GIF、WebP，单张最大 2.5 MB）。读取和新增接口，以及贴纸图片读取接口，都使用现有 `LUMI_PUSH_API_TOKEN` Bearer 鉴权。贴纸目录和目录清单分别保存在 `LUMI_DATA_DIR/stickers/` 与 `LUMI_DATA_DIR/stickers.json`。
