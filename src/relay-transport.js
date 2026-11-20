@@ -76,7 +76,8 @@ export function relayCompatibilityPatch(body, message) {
     return { remove: ["temperature"] };
   }
   if (!/unsupported|not support|not allowed|not permitted|unrecognized|unknown|extra inputs|extra fields|unexpected|不支持|不允许/.test(error)) return null;
-  if (/\bstream(?:ing)?\b/.test(error) && body.stream === true) return { remove: ['stream'] };
+  if (/\bstream_options\b/.test(error) && body.stream_options) return { remove: ['stream_options'] };
+  if (/\bstream(?:ing)?\b/.test(error) && body.stream === true) return { remove: ['stream', 'stream_options'] };
   if (/cache_control|cache control|\bttl\b/.test(error)) return /\bttl\b/.test(error) ? { removeDeep: 'ttl' } : { removeDeep: 'cache_control' };
   if (/\btools?\b|tool_choice|function calling|工具/.test(error) && body.tools) return { remove: ['tools', 'tool_choice', 'mcp_servers'] };
   if (/\bthinking\b/.test(error) && body.thinking) return { remove: ['thinking'] };

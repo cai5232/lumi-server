@@ -14,6 +14,7 @@ for (const explicit of [true, false]) {
     const provider = { baseURL: 'https://example.invalid/v1', apiKey: 'test-only' };
     const route = { provider: 'custom', model: 'chosen-model', customProvider: provider };
     const context = {
+      serverZenMuxRoute: null,
       normalizeCustomProvider: value => value,
       resolveMurmurRoute: async (id) => { assert.equal(id, 'default'); return route; },
       readThreads: async () => ({ default: { messages: [], lastChatProvider: 'custom' } }),

@@ -60,12 +60,31 @@ test('network failures and timeouts carry gateway status instead of internal-ser
 });
 test('explicit stream rejection retries once as JSON without changing model, messages or auth',async()=>{
  const attempts=[];
- const result=await requestRelay({url:'https://json-only.test/v1/messages',headers:{authorization:'Bearer fake'},body:{model:'json-only',stream:true,messages:[{role:'user',content:'完整原文'}]},fetchImpl:async(_,request)=>{
+ const result=await requestRelay({url:'https://json-only.test/v1/messages',headers:{authorization:'Bearer fake'},body:{model:'json-only',stream:true,stream_options:{include_usage:true},messages:[{role:'user',content:'完整原文'}]},fetchImpl:async(_,request)=>{
   const body=JSON.parse(request.body);attempts.push(body);assert.equal(request.headers.authorization,'Bearer fake');
   return body.stream?new Response('{"error":{"message":"stream is not supported"}}',{status:400}):new Response('{"content":[{"type":"text","text":"OK"}]}');
  }});
  assert.equal(attempts.length,2);assert.equal(result.data.content[0].text,'OK');
  assert.equal(attempts[1].model,'json-only');assert.deepEqual(attempts[1].messages,attempts[0].messages);
+ assert.equal(attempts[1].stream_options,undefined);
+});
+test('an unsupported usage option is removed without disabling streaming', async () => {
+ const attempts = [];
+ const result = await requestRelay({
+  url: 'https://no-stream-options.test/v1/chat/completions',
+  headers: {},
+  body: { model: 'stream-only', stream: true, stream_options: { include_usage: true } },
+  fetchImpl: async (_, request) => {
+   const body = JSON.parse(request.body);
+   attempts.push(body);
+   return body.stream_options
+    ? Response.json({ error: { message: 'unknown field stream_options' } }, { status: 400 })
+    : new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n');
+  }
+ });
+ assert.equal(attempts.length, 2);
+ assert.equal(attempts[1].stream, true);
+ assert.equal(result.data.choices[0].message.content, 'OK');
 });
 const sse=(chunks,{gapMS=0,close=true}={})=>new Response(new ReadableStream({async start(c){for(const s of chunks){if(gapMS)await new Promise(r=>setTimeout(r,gapMS));c.enqueue(new TextEncoder().encode(s));}if(close)c.close();}}));
 test('a slow but live stream is not cut by the idle timeout even when its total time exceeds it',async()=>{

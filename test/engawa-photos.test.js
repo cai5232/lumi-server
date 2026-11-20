@@ -78,7 +78,7 @@ for (const format of ['openai', 'anthropic']) test(`${format} model can browse E
   let round = 0, upstreamCalls = 0;
   const trace = [];
   const context = {
-    URL, Date, Math, Map, JSON, Number, String, Array, Boolean, console, process: { env: {} },
+    URL, Date, Math, Map, JSON, Number, String, Array, Boolean, console, process: { env: {} }, serverZenMuxRoute: null,
     relayEndpoint, responseThinking, removeMalformedAnthropicThinkingBlocks: messages => messages,
     assertChatContextBudget: () => {}, contextLimitTokens: 200000,
     ENGAWA_SERVER_ID, ENGAWA_PHOTO_TOOL, engawaPhotoTool, engawaPhotoCandidates, shareEngawaPhoto, modelToolsForServer,

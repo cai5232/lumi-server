@@ -29,7 +29,10 @@ def load() -> dict:
     except (OSError, ValueError):
         pass
     settings["api_base"] = os.environ.get("PROMISE_API_BASE", "") or str(settings["api_base"] or "")
-    settings["api_key"] = os.environ.get("PROMISE_API_KEY", "") or str(settings["api_key"] or "")
+    if os.environ.get("LUMI_ZENMUX_ONLY") == "true":
+        settings["api_key"] = os.environ.get("PROMISE_API_KEY", "")
+    else:
+        settings["api_key"] = os.environ.get("PROMISE_API_KEY", "") or str(settings["api_key"] or "")
     settings["model"] = os.environ.get("PROMISE_MODEL", "") or str(settings["model"] or "")
     settings["persona"] = os.environ.get("PROMISE_PERSONA", "") or str(settings["persona"] or "")
     settings["webhook_url"] = os.environ.get("PROMISE_WEBHOOK_URL", "") or str(settings["webhook_url"] or "")

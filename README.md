@@ -27,6 +27,14 @@ npm run dev
 - `LETTERS_MAP_BASE_URL`：藏宝地图服务地址，默认 `https://lumi-hidden-letters.zeabur.app`
 - `LETTERS_MAP_PASSWORD`：藏宝地图服务密码，仅由后端代理使用，不要放入 iOS 客户端；配置后会把该服务的 MCP 自动加入 Lumi
 
+## 后端独占 ZenMux
+
+在 iOS 打开「设置 → 模型线路 → ZenMux API Key」，填入 Key 后保存。Lumi 用现有 `LUMI_PUSH_API_TOKEN` 鉴权，把 Key 加密保存到 `LUMI_DATA_DIR`，并启用后端独占模式。客户端只读取配置状态和模型名。
+
+默认模型为 `moonshotai/kimi-k3`，供应商为 `moonshotai`。后端统一请求 `https://zenmux.ai/api/v1`，使用 [模型名供应商后缀](https://zenmux.ai/docs/guide/advanced/provider-routing.html) 将请求锁定到 `moonshotai/kimi-k3:moonshotai`。如需切换，可在服务端设置 `LUMI_ZENMUX_MODEL` 和 `LUMI_ZENMUX_PROVIDER`。请清除对应 ZenMux 项目的[全局备用模型](https://zenmux.ai/docs/guide/advanced/fallback.html)，这样指定供应商不可用时会直接返回错误。
+
+也可以用 `LUMI_ZENMUX_ONLY=true` 和 `LUMI_MODEL_API_KEY` 直接从部署环境启用独占模式。App 保存的 Key 优先于环境变量。
+
 ## 聊天贴纸库
 
 iOS 聊天输入框的贴纸按钮读取 `GET /v1/stickers`，新增贴纸使用 `POST /v1/stickers`（JSON 字段：`name`、`category`、`dataURL`，支持 JPEG、PNG、GIF、WebP，单张最大 2.5 MB）。读取和新增接口，以及贴纸图片读取接口，都使用现有 `LUMI_PUSH_API_TOKEN` Bearer 鉴权。贴纸目录和目录清单分别保存在 `LUMI_DATA_DIR/stickers/` 与 `LUMI_DATA_DIR/stickers.json`。

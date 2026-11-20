@@ -13,9 +13,20 @@ export const promiseAlarmPort = Number(process.env.LUMI_PROMISE_ALARM_PORT || de
 let child = null;
 let stopping = false;
 let restartTimer = null;
+let serverZenMuxRoute = null;
 
-export function startPromiseAlarm() {
-  if (!promiseAlarmEnabled || child || stopping) return child;
+export function startPromiseAlarm(route = serverZenMuxRoute) {
+  const routeChanged = route !== serverZenMuxRoute;
+  serverZenMuxRoute = route;
+  if (!promiseAlarmEnabled || stopping) return child;
+  if (child) {
+    if (routeChanged) child.kill();
+    return child;
+  }
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
   const apiURL = String(process.env.LUMI_MODEL_API_URL || "").replace(/\/?chat\/completions\/?$/i, "").replace(/\/$/, "");
   const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
   child = spawn(process.env.PYTHON || process.env.PYTHON_EXECUTABLE || "python3", ["server.py"], {
@@ -25,12 +36,13 @@ export function startPromiseAlarm() {
       ...process.env,
       PROMISE_PORT: String(promiseAlarmPort),
       PROMISE_DATA_DIR: join(dataDir, "promise-alarm"),
-      PROMISE_API_BASE: process.env.PROMISE_API_BASE || apiURL,
-      PROMISE_API_KEY: process.env.PROMISE_API_KEY || process.env.LUMI_MODEL_API_KEY || "",
-      PROMISE_MODEL: process.env.PROMISE_MODEL || process.env.LUMI_MODEL_NAME || "",
+      PROMISE_API_BASE: serverZenMuxRoute?.customProvider.url || process.env.PROMISE_API_BASE || apiURL,
+      LUMI_ZENMUX_ONLY: serverZenMuxRoute ? "true" : "",
+      PROMISE_API_KEY: serverZenMuxRoute ? serverZenMuxRoute.customProvider.key : process.env.PROMISE_API_KEY || process.env.LUMI_MODEL_API_KEY || "",
+      PROMISE_MODEL: serverZenMuxRoute?.model || process.env.PROMISE_MODEL || process.env.LUMI_MODEL_NAME || "",
       PROMISE_PERSONA: process.env.PROMISE_PERSONA || process.env.LUMI_SYSTEM_PROMPT || "你是 Lumi，像平时聊天一样自然地兑现你答应过的提醒。",
       PROMISE_UTC_OFFSET_HOURS: process.env.PROMISE_UTC_OFFSET_HOURS || "8",
-      PROMISE_NATIVE_ANTHROPIC: process.env.PROMISE_NATIVE_ANTHROPIC || process.env.LUMI_NATIVE_ANTHROPIC || "",
+      PROMISE_NATIVE_ANTHROPIC: serverZenMuxRoute ? "false" : process.env.PROMISE_NATIVE_ANTHROPIC || process.env.LUMI_NATIVE_ANTHROPIC || "",
       PROMISE_WEBHOOK_URL: `http://127.0.0.1:${process.env.PORT || 8787}/v1/internal/promise-alarm/fire`,
       PROMISE_WEBHOOK_TOKEN: promiseAlarmToken,
       PYTHONUNBUFFERED: "1"

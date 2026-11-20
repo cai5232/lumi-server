@@ -16,6 +16,7 @@ import { createInstantCommandStore, parseInstantCommands, commandFeedbackText } 
 import { createChatJobs } from "./chat-jobs.js";
 import { createModelRequestStore, modelRequestLogJSON } from "./model-request-store.js";
 import { modelTemperature, relayEndpoint, requestRelay } from "./relay-transport.js";
+import { configuredZenMuxRoute } from "./zenmux-route.js";
 import { responseThinking } from "./response-thinking.js";
 import { activeWakeScenes, applyWakeSceneActions, completeWakeScenes, dueWakeScenes, extractWakeSceneActions, wakeSceneContext } from "./wake-scenes.js";
 import { failChatTextStream, finishChatTextStream, sendChatTextResponse, startChatTextStream } from "./chat-text-stream.js";
@@ -53,8 +54,11 @@ import { applyLiveAttentionUpdate, buildLiveAttentionContext } from "./live-atte
 import { ENGAWA_PHOTO_TOOL, engawaPhotoTool, engawaPhotoCandidates, shareEngawaPhoto, engawaPhotoCard } from "./engawa-photos.js";
 
 const port = Number(process.env.PORT || 8787);
+let serverZenMuxRoute = configuredZenMuxRoute(process.env);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const zenMuxKeyPath = join(dataDir, "zenmux-key.json");
+let zenMuxSettingsWrite = Promise.resolve();
 const requestFailures = new RequestFailureStore(join(dataDir, "request-failures.json"));
 const appControl = createAppControlStore(dataDir);
 const nativeAlarms = openNativeAlarms(join(dataDir, "native-alarms.json"));
@@ -89,10 +93,12 @@ const desktopCompanion = createDesktopCompanionService({
     const threads = await readThreads();
     const sourceThread = threads[conversationId];
     if (!sourceThread) throw new Error("conversation_not_found");
-    const savedRoutes = await readMurmurRoutes();
-    const exactRoute = [savedRoutes[conversationId], sourceThread.modelRoute]
-      .find(route => route?.provider === "custom" && route.customProvider);
-    if (!exactRoute) throw new Error("conversation_custom_route_unavailable");
+    if (!serverZenMuxRoute) {
+      const savedRoutes = await readMurmurRoutes();
+      const exactRoute = [savedRoutes[conversationId], sourceThread.modelRoute]
+        .find(route => route?.provider === "custom" && route.customProvider);
+      if (!exactRoute) throw new Error("conversation_custom_route_unavailable");
+    }
     const route = await resolveMurmurRoute(conversationId, sourceThread);
     if (route?.provider !== "custom" || !route.customProvider || !route.model) throw new Error("conversation_custom_route_unavailable");
     const isolatedThread = JSON.parse(JSON.stringify(sourceThread));
@@ -261,6 +267,41 @@ function decryptMurmurProvider(value) {
   }
   throw lastError || new Error("Unable to decrypt custom provider route");
 }
+
+async function loadSavedZenMuxKey() {
+  try {
+    const sealed = JSON.parse(await readFile(zenMuxKeyPath, "utf8"));
+    const { key } = decryptMurmurProvider(sealed);
+    if (typeof key !== "string" || !key) throw new Error("Missing saved key");
+    serverZenMuxRoute = configuredZenMuxRoute(process.env, key);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    console.warn("Saved ZenMux Key is unavailable. Re-enter it in Lumi settings.");
+    serverZenMuxRoute = configuredZenMuxRoute(process.env, "");
+  }
+}
+
+function zenMuxSettingsStatus() {
+  const route = serverZenMuxRoute || configuredZenMuxRoute(process.env, "");
+  return { enabled: Boolean(serverZenMuxRoute), configured: Boolean(route.customProvider.key), model: route.model };
+}
+
+async function saveZenMuxKey(key) {
+  const route = configuredZenMuxRoute(process.env, key);
+  const write = zenMuxSettingsWrite.then(async () => {
+    const temporary = `${zenMuxKeyPath}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(encryptMurmurProvider({ key })), { mode: 0o600 });
+      await rename(temporary, zenMuxKeyPath);
+      serverZenMuxRoute = route;
+      startPromiseAlarm(route);
+    } finally {
+      await unlink(temporary).catch(() => {});
+    }
+  });
+  zenMuxSettingsWrite = write.catch(() => {});
+  await write;
+}
 async function saveMurmurRoute(threadId, provider, model, customProvider = null, thread = null) {
   const routes = await readMurmurRoutes();
   const route = { provider, model, updatedAt: Date.now(), ...(customProvider ? { customProvider: encryptMurmurProvider(customProvider) } : {}) };
@@ -273,6 +314,7 @@ async function saveMurmurRoute(threadId, provider, model, customProvider = null,
   await rename(temporaryPath, murmurRoutePath);
 }
 async function resolveMurmurRoute(threadId = "", thread = null) {
+  if (serverZenMuxRoute) return serverZenMuxRoute;
   const routes = await readMurmurRoutes();
   const exactCustomRoute = [routes[threadId], thread?.modelRoute]
     .filter((route) => route?.provider === "custom")
@@ -1341,7 +1383,7 @@ async function runBackgroundPulse() {
           thread.cacheRequestStartedAt = wake.cacheSnapshot.requestStartedAt || Date.now();
           thread.cacheLastChatContinuity = wake.cacheSnapshot.continuity || null;
           thread.cacheProvider = thread.cacheProvider || "zenmux";
-          thread.cacheModel = thread.cacheModel || providerConfig(thread.cacheProvider).model;
+          thread.cacheModel = serverZenMuxRoute?.model || thread.cacheModel || providerConfig(thread.cacheProvider).model;
         }
         let screenSeen = false;
         if (wake.action === "screen") {
@@ -2418,7 +2460,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
 const loadFriendCircleTools = createFriendCircleTools(process.env.LUMI_FRIEND_CIRCLE_HOST_DIR);
 
 async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], circleAccess = null, nativeAlarmTurn = null, signal, returnMetadata = false, stream = true, knownInputTokens = null, singleAttempt = false, fitReplyHistory = false, onHistoryFitted }) {
-  // Only a frontend-selected custom route may issue a model request.
+  if (serverZenMuxRoute) ({ provider, model: requestedModel, customProvider } = serverZenMuxRoute);
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
   selected = { ...selected, model: requestedModel || selected.model };
@@ -2429,6 +2471,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   const apiKey = selected.key;
   const model = selected.model;
   if (!configuredURL || !apiKey || !model) {
+    if (serverZenMuxRoute) throw Object.assign(new Error("请在 Lumi 设置中填写 ZenMux API Key"), { statusCode: 503 });
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
   const isClaude = /anthropic|claude/i.test(model);
@@ -2634,9 +2677,13 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
       }
     : { model, messages: preparedMessages, ...(mcpTools.length && mcpRound < 4 ? { tools: mcpTools, tool_choice: "auto" } : {}), ...(useMaximumModelOutput ? { max_tokens: 128000 } : maxOutputTokens ? { max_tokens: maxOutputTokens } : {}) };
 
-  Object.assign(requestBody, modelTemperature(model, nativeAnthropic && ["enabled", "adaptive"].includes(requestBody.thinking?.type)));
+  Object.assign(requestBody, modelTemperature(model.split(":")[0], nativeAnthropic && ["enabled", "adaptive"].includes(requestBody.thinking?.type)));
   // Match streaming clients: collect SSE text/reasoning locally for the existing JSON API.
   requestBody.stream = stream;
+  if (stream && !nativeAnthropic && /^moonshotai\/kimi-/i.test(model) && new URL(apiURL).hostname === "zenmux.ai") {
+    // Kimi caches matching prefixes automatically. ZenMux reports the cached tokens in the final usage frame.
+    requestBody.stream_options = { include_usage: true };
+  }
   // This covers foreground chats, calls, desktop observations and autonomous wakes,
   // including follow-up tool requests. Distillation has its own bounded batches.
   if (fitReplyHistory) {
@@ -2652,7 +2699,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   const cacheDiagnostic = cacheDiagnosticCapture(requestBody, nativeAnthropic, provider, model);
   const startedAt = Date.now();
   const safeRequestMetrics = {
-    provider,
+    provider: serverZenMuxRoute ? "zenmux" : provider,
     format: nativeAnthropic ? "anthropic" : "openai-chat",
     model,
     messages: nativeAnthropic ? requestBody.messages?.length || 0 : requestBody.messages?.length || 0,
@@ -2696,7 +2743,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   await recordModelRequest({
     id: randomUUID(),
     createdAt: new Date(startedAt).toISOString(),
-    provider,
+    provider: safeRequestMetrics.provider,
     model: String(requestBody.model || model),
     status: response.status,
     durationMs: Date.now() - startedAt,
@@ -3404,6 +3451,7 @@ function withoutSpeechPlanning(content) {
 }
 
 async function callProviderRoute(input, thread) {
+  if (serverZenMuxRoute) return serverZenMuxRoute;
   // Calls must use the same durable chat route as the latest normal message.
   // cacheProvider is intentionally "zenmux" for custom chats so cache plumbing
   // stays compatible; it is not the provider to use for a phone call.
@@ -3437,7 +3485,9 @@ async function callProviderRoute(input, thread) {
 async function generateReply({ input, incomingUserMessage, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
-  if (!customProvider && savedModelRoute?.provider === "custom") {
+  if (serverZenMuxRoute) {
+    ({ model, customProvider } = serverZenMuxRoute);
+  } else if (!customProvider && savedModelRoute?.provider === "custom") {
     customProvider = savedModelRoute.customProvider;
     model = model || savedModelRoute.model || "";
   }
@@ -4324,9 +4374,10 @@ async function binaryBody(req, maxBytes) {
 
 async function analyzeWatchFrame(input) {
   const config = input.analysisConfig && typeof input.analysisConfig === "object" ? input.analysisConfig : {};
-  const baseURL = String(config.baseURL || process.env.LUMI_WATCH_ANALYSIS_API_URL || "").trim().replace(/\/+$/, "");
-  const apiKey = String(config.apiKey || process.env.LUMI_WATCH_ANALYSIS_API_KEY || "").trim();
-  const model = String(config.model || process.env.LUMI_WATCH_ANALYSIS_MODEL || "").trim();
+  const baseURL = String(serverZenMuxRoute?.customProvider.url || config.baseURL || process.env.LUMI_WATCH_ANALYSIS_API_URL || "").trim().replace(/\/+$/, "");
+  const apiKey = serverZenMuxRoute ? serverZenMuxRoute.customProvider.key
+    : String(config.apiKey || process.env.LUMI_WATCH_ANALYSIS_API_KEY || "").trim();
+  const model = String(serverZenMuxRoute?.model || config.model || process.env.LUMI_WATCH_ANALYSIS_MODEL || "").trim();
   if (!baseURL || !apiKey || !model) {
     const error = new Error("独立视频分析模型尚未配置");
     error.status = 503;
@@ -4362,6 +4413,7 @@ async function analyzeWatchFrame(input) {
   const playheadMS = Math.max(0, Math.min(Number(input.playheadMS) || 0, 7 * 24 * 60 * 60 * 1000));
   const response = await fetch(endpoint, {
     method: "POST",
+    ...(serverZenMuxRoute ? { redirect: "error" } : {}),
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(150_000),
     body: JSON.stringify({
@@ -5564,12 +5616,12 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/v1/watch/analysis-config") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
       if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
-      const configured = Boolean(
+      const configured = Boolean(serverZenMuxRoute ||
         process.env.LUMI_WATCH_ANALYSIS_API_URL &&
         process.env.LUMI_WATCH_ANALYSIS_API_KEY &&
         process.env.LUMI_WATCH_ANALYSIS_MODEL
       );
-      return send(res, 200, { configured, model: configured ? process.env.LUMI_WATCH_ANALYSIS_MODEL : null });
+      return send(res, 200, { configured, model: serverZenMuxRoute?.model || (configured ? process.env.LUMI_WATCH_ANALYSIS_MODEL : null) });
     }
     if (url.pathname === "/v1/watch/analyze") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -5605,7 +5657,21 @@ const server = createServer(async (req, res) => {
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });
     }
+    if (url.pathname === "/v1/settings/zenmux") {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      res.setHeader("cache-control", "no-store");
+      if (req.method === "GET") return send(res, 200, zenMuxSettingsStatus());
+      if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+      const input = await limitedJSONBody(req, 4096);
+      const key = typeof input?.apiKey === "string" ? input.apiKey.trim() : "";
+      if (!/^[\x21-\x7e]{1,1024}$/.test(key)) return send(res, 400, { error: "ZenMux API Key 格式无效" });
+      await saveZenMuxKey(key);
+      return send(res, 200, zenMuxSettingsStatus());
+    }
     if (req.method === "GET" && url.pathname === "/v1/providers") {
+      if (serverZenMuxRoute) return send(res, 200, { providers: [
+        { id: "zenmux", models: [serverZenMuxRoute.model], configuredModel: serverZenMuxRoute.model }
+      ] });
       const providers = await Promise.all(providerConfigs().map(async (config) => ({
         id: config.id,
         models: await listProviderModels(config),
@@ -6122,7 +6188,7 @@ const server = createServer(async (req, res) => {
       if (req.method === "POST" && remarksMatch[2] === "ai") {
         const input = await body(req);
         let customProvider = null;
-        try { customProvider = input.provider === "custom" ? normalizeCustomProvider(input.customProvider) : null; }
+        try { customProvider = !serverZenMuxRoute && input.provider === "custom" ? normalizeCustomProvider(input.customProvider) : null; }
         catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
         const provider = ["zenmux", "backup", "custom"].includes(input.provider) ? input.provider : "zenmux";
         const history = availableChatHistory(thread)
@@ -6276,6 +6342,9 @@ const server = createServer(async (req, res) => {
     if (!match) return send(res, 404, { error: "not_found" });
     const id = decodeURIComponent(match[1]);
     const isChatPost = req.method === "POST" && Boolean(match[2]);
+    if (serverZenMuxRoute && isChatPost && !pushRequestAuthorized(req)) {
+      return send(res, 401, { error: "unauthorized" });
+    }
     let messageInput;
     if (req.method === "POST" && match[2] === "/messages") {
       messageInput = await body(req);
@@ -6433,18 +6502,14 @@ const server = createServer(async (req, res) => {
         return messageInput?.stream === true ? sendChatTextResponse(res, replay) : send(res, 200, replay);
       }
       const requestedProvider = typeof input.provider === "string" ? input.provider : "zenmux";
-      // A frontend preset is self-contained. Treat its presence as the
-      // authoritative route even if an older client sends a stale provider
-      // selector value alongside it; otherwise the request silently falls
-      // back to server-side ZenMux variables and fails before using the preset.
-      const selectedProvider = input.customProvider && typeof input.customProvider === "object"
+      // Older clients may send a stale selector with a valid frontend preset.
+      const selectedProvider = serverZenMuxRoute || (input.customProvider && typeof input.customProvider === "object")
         ? "custom"
         : requestedProvider;
       if (selectedProvider !== "custom") return send(res, 400, { error: "frontend_custom_model_required" });
-      // The model and endpoint are owned by the frontend custom preset.
-      const selectedModel = selectedProvider === "zenmux" ? "" : (typeof input.model === "string" ? input.model : "");
-      let customProvider = null;
-      if (selectedProvider === "custom") {
+      const selectedModel = serverZenMuxRoute?.model || (typeof input.model === "string" ? input.model : "");
+      let customProvider = serverZenMuxRoute?.customProvider || null;
+      if (!serverZenMuxRoute) {
         try { customProvider = normalizeCustomProvider(input.customProvider); }
         catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
         if (!customProvider || !selectedModel) return send(res, 400, { error: "custom_provider_or_model_required" });
@@ -6472,15 +6537,9 @@ const server = createServer(async (req, res) => {
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
       const calendarContext = incomingActivity.mode === "sleeping" ? { text: "" } : await calendarEnvironment().catch(error => { console.warn(`calendar context unavailable: ${error.message}`); return { text: "" }; });
       const calendarInjection = calendarContext.text ? `\n\n${calendarContext.text}\n请把这些日历信息当作当前环境背景，仅在相关时自然使用。` : "";
-      // Save the frontend-selected route before generation, including failed turns.
-      // Otherwise a new relay timing out leaves background jobs on the old route.
-      // Missing encryption configuration must not turn an otherwise successful chat into HTTP 500.
-      // Never persist custom API credentials unencrypted or silently route background jobs to Zenmux.
-      try {
-        await saveMurmurRoute(id, selectedProvider, selectedModel || (selectedProvider === "custom" ? "" : providerConfig(selectedProvider).model), customProvider, threads[id]);
-      } catch (error) {
-        console.warn(`[Murmur route] encrypted route not saved; background custom-model wakes unavailable: ${error.message}`);
-        throw error;
+      // Background jobs can read the server route directly; persist only frontend presets.
+      if (!serverZenMuxRoute) {
+        await saveMurmurRoute(id, selectedProvider, selectedModel, customProvider, threads[id]);
       }
       const catalogSticker = isStickerMessage
         ? (await stickerStore.list()).stickers.find(sticker => sticker.image === stickerImageURL)
@@ -6778,6 +6837,7 @@ server.on("upgrade", (req, socket, head) => {
   socket.on("close", () => upstream.destroy());
 });
 
+await loadSavedZenMuxKey();
 await loadCacheStats();
 await loadProactiveSettings();
 await loadSoloData();
@@ -6786,7 +6846,7 @@ await loadEmotionState();
 await pulseStore.load();
 await sampleLumiPulse();
 await refreshMurmurState(proactiveSettings.threadId || "default");
-startPromiseAlarm();
+startPromiseAlarm(serverZenMuxRoute);
 let sleepRadioRunning = false;
 setInterval(async () => {
   if (sleepRadioRunning) return;
