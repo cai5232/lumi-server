@@ -1,3 +1,4 @@
+import { RequestFailureStore } from "./request-awareness.js";
 import { userMessageTimingContext } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
@@ -53,6 +54,7 @@ import { ENGAWA_PHOTO_TOOL, engawaPhotoTool, engawaPhotoCandidates, shareEngawaP
 const port = Number(process.env.PORT || 8787);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const requestFailures = new RequestFailureStore(join(dataDir, "request-failures.json"));
 const appControl = createAppControlStore(dataDir);
 const nativeAlarms = openNativeAlarms(join(dataDir, "native-alarms.json"));
 const nativeAlarmMcp = createNativeAlarmMcp(nativeAlarms, notifyNativeAlarmDevice);
@@ -137,7 +139,7 @@ const screenPeekFrames = new Map();
 const screenPeekRequests = new Map();
 const screenPeekTriggerAt = new Map();
 // Release marker surfaced by /health to verify Git-triggered Zeabur rollouts.
-const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1-wake-timeline-v1-user-message-timing-v1";
+const buildVersion = "sentinel-chat-v5-emotion-v1-screen-peek-v1-world-book-v1-food-notebook-v1-food-discovery-v1-gallery-chat-v1-api-presets-v2-mail-mcp-custom-anthropic-v1-elevenlabs-tts-v1-voice-delivery-v1-explicit-voice-request-v1-portable-custom-system-v1-call-alert-dedupe-no-call-token-cap-v1-watch-analysis-v1-custom-mail-local-tools-v1-engawa-mcp-v1-emotion-history-v1-promise-alarm-v3-custom-route-option-cards-v1-drawer-v1-drawer-prompt-v1-sleep-v1-usage-logs-v1-chat-remarks-v1-phone-activity-v1-usage-avg-cache-v1-custom-route-thread-v2-context-compaction-ratio-15-turns-20k-tail-distiller-sleep-radio-v1-chat-performance-relay-compat-v1-summary-once-upstream-errors-v2-route-before-request-v1-hidden-context-stream-v1-mobile-jobs-v1-foreground-priority-v1-solo-v1-visual-chat-stream-v1-sticker-caption-name-v2-solo-manual-sleep-inbox-v2-custom-calendar-tools-v2-desktop-context-v2-force-observe-hotkey-v1-live-attention-v1-compaction-recovery-v4-route-cooldown-v1-concise-distiller-v2-context-380k-300k-v1-body-pulse-v1-wake-timeline-v1-user-message-timing-v1-request-awareness-v1";
 const OPTION_MARKER_SOURCE = String.raw`\[选项[：:]([^\[\]\n]{1,200})\]`;
 const contextLimitTokens = Math.max(20_000, Number(process.env.LUMI_CONTEXT_LIMIT || 380_000));
 const defaultCompactAtRatio = Math.max(0.5, Math.min(0.95, Number(process.env.LUMI_COMPACT_AT || (300_000 / 380_000))));
@@ -1979,8 +1981,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|request_failures)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|request_failures)\s*>/gi, "")
     .trim();
 }
 
@@ -2282,6 +2284,7 @@ function historicalModelContent(value, toolCalls = []) {
   const cleaned = typeof content === "string"
     ? content.replace(/^<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
       prefix => prefix.replace(/<context_summary\s+source="system"\s*>[\s\S]*?<\/context_summary>\s*/gi, ""))
+      .replace(/<request_failures source="request-observations" retention="recent-history" data_only="true">[\s\S]*?<\/request_failures>\s*/gi, "")
     : content;
   if (!Array.isArray(toolCalls) || !toolCalls.length || String(cleaned || "").includes('<recorded_tool_results>')) return cleaned;
   // These are server execution records, not an assistant's claim to have used a tool.
@@ -3692,6 +3695,14 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天内容宽度，页面背景保持透明，内容垂直自然展开，避免内部滚动、固定宽高或使用视口高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
   const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}${characterThoughtDirective}`;
+  const requestFailureContext = !callMode && !desktopCompanion
+    ? await requestFailures.context(thread.id, thread.contextResetAt).catch(error => {
+      console.warn(`request failure history unavailable: ${error.message}`);
+      return { ids: [], content: "" };
+    })
+    : { ids: [], content: "" };
+  const requestFailureSuffix = requestFailureContext.content ? "\n\n" + requestFailureContext.content : "";
+  const currentTurnContent = userModelContent + requestFailureSuffix;
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3734,14 +3745,14 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       ]
     : null;
   let cacheRequestMessages = exactCachedPrefix
-    ? [...exactCachedPrefix, { role: "user", content: userModelContent, images }]
+    ? [...exactCachedPrefix, { role: "user", content: currentTurnContent, images }]
     : [
         { role: "system", content: cacheSystem },
         ...history,
         // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
         // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
         // invalidates the cache prefix even when all earlier chat turns are unchanged.
-        { role: "user", content: userModelContent, images }
+        { role: "user", content: currentTurnContent, images }
       ];
   if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
   thread.worldBookSignature = worldBookSignature;
@@ -3849,6 +3860,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     cacheRequestMessages = [...cacheRequestMessages, { role: "assistant", content: raw }, { role: "user", content: `<food_tool_result name="${request.name}">${String(result).slice(0, 12000)}</food_tool_result>现在根据执行结果自然回复用户。不要提及内部工具标签。` }];
     raw = await callModel({ signal, fitReplyHistory: replyHistoryFitted, knownInputTokens: previousChatInputTokens(thread), toolTrace: performedToolCalls, messages: cacheRequestMessages, provider, model, customProvider, onUsage: (usage) => { const { read, created } = cacheUsage(usage); const promptTokens = Number(usage.input_tokens ?? usage.prompt_tokens ?? 0); measuredInputTokens = usage.input_tokens != null || promptTokens < read + created ? promptTokens + read + created : promptTokens; } });
   }
+  raw = raw.replace(/<request_failures\b[^>]*>[\s\S]*?<\/request_failures>/gi, "");
   const traceStart = raw.indexOf("<lumi_tool_calls>");
   const traceEnd = traceStart < 0 ? -1 : raw.indexOf("</lumi_tool_calls>", traceStart);
   const toolCalls = performedToolCalls.slice(0, 32);
@@ -3936,9 +3948,12 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   // user-visible content is intentionally cleaned separately below.
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
   // this snapshot instead of reconstructing messages from stored display history.
-  const cacheKeepaliveMessages = replyHistoryFitted ? null : cacheRequestMessages.map(({ images: _images, ...message }) => message);
+  const cacheKeepaliveMessages = replyHistoryFitted ? null : cacheRequestMessages.map(({ images: _images, ...message }) =>
+    requestFailureSuffix && typeof message.content === "string"
+      ? { ...message, content: message.content.replace(requestFailureSuffix, "") }
+      : message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { wakeSceneActions, commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { wakeSceneActions, requestFailureIDs: requestFailureContext.ids, commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -6436,6 +6451,15 @@ const server = createServer(async (req, res) => {
       }
       let foregroundCompactionAttempted = false;
       const result = (async () => {
+      const failureSecrets = [customProvider?.key, process.env.LUMI_PUSH_API_TOKEN];
+      const clientFailures = (Array.isArray(input.previousRequestFailures) ? input.previousRequestFailures : []).slice(-100)
+        .filter(failure => typeof failure?.message === "string" && typeof failure.error === "string" &&
+          /^[a-zA-Z0-9_-]{1,128}$/.test(failure.requestId || failure.id || ""))
+        .map(failure => ({ threadId: id, source: "client", requestId: failure.requestId || failure.id,
+          message: failure.message, error: failure.error, requestedAt: failure.requestedAt,
+          failedAt: failure.failedAt, timeZone: failure.timeZone }));
+      await requestFailures.recordAll(clientFailures, { secrets: failureSecrets })
+        .catch(error => console.warn(`request failure intake unavailable: ${error.message}`));
       const messageText = String(input.content || "").trim();
       const incomingActivity = ensureActivity(threads[id]);
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" }  : {}), createdAt: new Date().toISOString() };
@@ -6659,6 +6683,7 @@ const server = createServer(async (req, res) => {
       );
       if (proactiveSettings.threadId === id) proactiveSettings.nextDueAt = threads[id].activity.nextWakeAt;
       await persistChatThread(id, threads[id]);
+      await requestFailures.acknowledge(id, generated.requestFailureIDs).catch(error => console.warn(`request failure acknowledgement unavailable: ${error.message}`));
       await instantCommands.acknowledge(id, generated.commandFeedbackIDs || []).catch(error => console.warn(`command feedback acknowledgement failed: ${error.message}`));
       // Fire and forget: the current reply is not delayed by distillation.
       if (!foregroundCompactionAttempted) scheduleBackgroundCompaction(id, selectedModel, customProvider);
@@ -6698,6 +6723,12 @@ const server = createServer(async (req, res) => {
           if (requestId) recentMessageRequests.get(key).expiresAt = Date.now() + 5 * 60_000;
           else recentMessageRequests.delete(key);
         }
+        await requestFailures.recordAll([{
+          threadId: id, source: "server", requestId: requestId || `${fingerprint}:${requestArrivedAt}`,
+          message: String(input.content || ""), error, status: error.statusCode || 502,
+          requestedAt: input.requestedAt || new Date(requestArrivedAt).toISOString(), timeZone: input.timeZone
+        }], { secrets: [customProvider?.key, process.env.LUMI_PUSH_API_TOKEN] })
+          .catch(recordError => console.warn(`request failure log unavailable: ${recordError.message}`));
         // Even a failed foreground turn can trigger recovery of an oversized context.
         if (!foregroundCompactionAttempted) scheduleBackgroundCompaction(id, selectedModel, customProvider);
         if (input.stream === true && res.getHeader("content-type")?.includes("text/event-stream")) {
