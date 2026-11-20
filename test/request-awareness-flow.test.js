@@ -22,8 +22,8 @@ test('failed chat content, error and request time reach the next successful mode
     let content = '{"events":[]}';
     if (main) {
       requests.push(body);
-      if (requests.length === 1) { res.statusCode = 502; return res.end(JSON.stringify({error:{message:'temporary relay failure'}})); }
-      content = '<request_failures>这段内部标签不能显示</request_failures>还惦记着刚才那个玩笑。';
+      if (requests.length === 2) { res.statusCode = 502; return res.end(JSON.stringify({error:{message:'temporary relay failure'}})); }
+      content = '<request_failure>这段内部标签不能显示</request_failure>还惦记着刚才那个玩笑。';
     }
     res.end(JSON.stringify({ choices: [{ message: { content } }], usage: {} }));
   });
@@ -45,32 +45,46 @@ test('failed chat content, error and request time reach the next successful mode
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.ok(ready);
-    const sentAt='2026-11-09T11:20:00Z';
-    const post=async(content,extra={})=>fetch(`${base}/v1/chats/default/messages`, {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content,requestedAt:sentAt,provider:'custom',model:'test-model',customProvider:{apiKey:'test',baseURL:'https://model.test/v1',apiFormat:'openai'},...extra})});
-    let response=await post('第一条发出却报错的消息');
-    assert.equal(response.status,502);
-    response=await post('第二条消息');assert.equal(response.status,200);
-    assert.equal((await response.json()).assistantMessage.content,'还惦记着刚才那个玩笑。');
-    const next=requests[1].messages.filter(m=>m.role==='user').at(-1).content;
-    assert.match(next,/<request_failures/);assert.match(next,/第一条发出却报错的消息/);assert.match(next,/temporary relay failure/);assert.match(next,/2026-11-09T11:20:00/);
-    const saved=JSON.parse(await readFile(join(folder,'request-failures.json'),'utf8'));
-    assert.ok(saved.events.every(e=>e.deliveredAt));
-    response=await post('第三条消息',{previousRequestFailures:[{id:'offline-one',requestId:'offline-one',message:'离线时我发过的话',error:'network disconnected Bearer highly-sensitive-test-token',requestedAt:sentAt,failedAt:sentAt,timeZone:'Asia/Shanghai'}]});assert.equal(response.status,200);
-    const last=requests[2].messages.filter(m=>m.role==='user').at(-1).content;
-    assert.match(last,/离线时我发过的话/);assert.match(last,/network disconnected/);
-    assert.equal((last.match(/<request_failures/g)||[]).length,1);
-    assert.match(last,/第一条发出却报错的消息/);assert.match(last,/temporary relay failure/);
-    assert.match(last,/deliveredAt/);assert.match(last,/retention="recent-history"/);
-    response=await post('第四条消息，继续聊刚才的问题');assert.equal(response.status,200);
-    const fourth=requests[3].messages.filter(m=>m.role==='user').at(-1).content;
-    assert.match(fourth,/第一条发出却报错的消息/);assert.match(fourth,/network disconnected/);
-    assert.equal((fourth.match(/<request_failures/g)||[]).length,1);
-    for (const prior of requests[3].messages.filter(m => m.role === 'user').slice(0, -1)) {
-      assert.doesNotMatch(prior.content, /<request_failures/);
-    }
-    const latestArchive = JSON.parse(await readFile(join(folder, 'request-failures.json'), 'utf8'));
-    assert.equal(latestArchive.events.length, 2);
-    assert.ok(latestArchive.events.every(e => e.deliveredAt));
+    const post = async (content, extra = {}) => fetch(`${base}/v1/chats/default/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ content, provider: 'custom', model: 'test-model',
+        customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' }, ...extra })
+    });
+    assert.equal((await post('报错前正常发到的消息')).status, 200);
+    const sentAt = new Date().toISOString();
+    assert.equal((await post('中间发出却报错的消息', { requestedAt: sentAt })).status, 502);
+    const response = await post('报错后正常发到的消息');
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).assistantMessage.content, '还惦记着刚才那个玩笑。');
+    const actual = requests[2].messages;
+    const before = actual.findIndex(message => message.content.includes('报错前正常发到的消息'));
+    const failure = actual.findIndex(message => message.content.startsWith('<request_failure '));
+    const after = actual.findIndex(message => message.content.includes('报错后正常发到的消息'));
+    assert.ok(before >= 0 && before < failure && failure < after);
+    assert.match(actual[failure].content, /中间发出却报错的消息/);
+    assert.match(actual[failure].content, /temporary relay failure/);
+    assert.ok(actual[failure].content.includes(sentAt));
+    assert.doesNotMatch(actual.at(-1).content, /<request_failures?\b/);
+    assert.equal((await post('手机恢复网络后继续', { previousRequestFailures: [{
+      id: 'offline-one', requestId: 'offline-one', message: '很早以前离线时发的话',
+      error: 'network disconnected Bearer highly-sensitive-test-token',
+      requestedAt: '2026-11-09T11:20:00Z', failedAt: '2026-11-09T11:20:00Z', timeZone: 'Asia/Shanghai'
+    }] })).status, 200);
+    const withOffline = requests[3].messages.filter(message => message.role !== 'system');
+    assert.match(withOffline[0].content, /很早以前离线时发的话/);
+    assert.match(withOffline[0].content, /network disconnected/);
+    assert.doesNotMatch(withOffline[0].content, /highly-sensitive-test-token/);
+    assert.doesNotMatch(withOffline.at(-1).content, /<request_failures?\b/);
+    assert.equal((await post('继续聊天')).status, 200);
+    const subsequent = requests[4].messages.filter(message => message.role !== 'system');
+    assert.ok(subsequent.some(message => message.content.includes('temporary relay failure')));
+    assert.ok(!subsequent.some(message => message.content.includes('network disconnected')));
+    const archive = JSON.parse(await readFile(join(folder, 'request-failures.json'), 'utf8'));
+    assert.equal(archive.events.length, 2);
+    assert.ok(archive.events.every(event => event.deliveredAt));
+    const threads = JSON.parse(await readFile(join(folder, 'threads.json'), 'utf8'));
+    assert.ok(threads.default.messages.every(message => !message.modelContent?.includes('<request_failure')));
+    assert.equal(threads.default.cacheKeepaliveMessages, null);
 
   } finally {
     if (backend.exitCode === null) {

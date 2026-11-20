@@ -10,27 +10,31 @@ test("keep the most recent distinct sends prominent and surface quoted older mes
   try {
     const store = new RequestFailureStore(join(directory, "failures.json"));
     const threadId = "default";
-    const older = Array.from({ length: 45 }, (_, i) => ({
-      threadId, requestId: "old-" + i, source: "server", message: "较早发送的消息 " + i,
-      error: "连接失败", failedAt: new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString()
-    }));
+    const now = Date.UTC(2026, 10, 20, 6);
+    const older = Array.from({ length: 45 }, (_, i) => {
+      const at = new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString();
+      return { threadId, requestId: "old-" + i, source: "server", message: "较早发送的消息 " + i,
+        error: "连接失败", requestedAt: at, failedAt: at };
+    });
     await store.recordAll(older);
     await store.acknowledge(threadId, (await store.read()).map(event => event.id));
     await store.recordAll([
-      { threadId, requestId: "send-a", source: "server", message: "第一次没发成", error: "服务端 502", failedAt: "2026-11-20T05:34:49.556Z" },
-      { threadId, requestId: "send-a", source: "client", message: "第一次没发成", error: "手机提示生成失败", failedAt: "2026-11-20T05:34:49.000Z" },
-      { threadId, requestId: "send-b", source: "server", message: "第二次没发成", error: "线路超时", failedAt: "2026-11-20T05:35:14.724Z" }
+      { threadId, requestId: "send-a", source: "server", message: "第一次没发成", error: "服务端 502",
+        requestedAt: "2026-11-20T05:34:10Z", failedAt: "2026-11-20T05:36:00Z" },
+      { threadId, requestId: "send-a", source: "client", message: "第一次没发成", error: "手机提示生成失败",
+        requestedAt: "2026-11-20T05:34:10Z", failedAt: "2026-11-20T05:36:00Z" },
+      { threadId, requestId: "send-b", source: "server", message: "第二次没发成", error: "线路超时",
+        requestedAt: "2026-11-20T05:35:14Z", failedAt: "2026-11-20T05:35:14Z" }
     ]);
-    const regular = await store.context(threadId, null, { userInput: "接着说" });
-    assert.equal((regular.content.match(/^\{/gm) || []).length, 6);
-    assert.equal((regular.content.match(/第一次没发成/g) || []).length, 1);
-    assert.ok(regular.content.indexOf("第二次没发成") < regular.content.indexOf("第一次没发成"));
-    assert.match(regular.content, /服务端 502.*手机提示生成失败/);
-    assert.equal(regular.ids.length, 3);
-    const question = await store.context(threadId, null, { userInput: "「较早发送的消息 0」是什么报错？" });
-    assert.match(question.content, /有对应记录时，直接回应/);
-    assert.match(question.content.split("\n").find(line => line.startsWith("{")), /较早发送的消息 0/);
-    assert.ok(question.content.includes("第二次没发成"));
+    const regular = await store.timeline(threadId, null, { userInput: "接着说", now });
+    assert.equal(regular.length, 2);
+    assert.match(regular[0].content, /第一次没发成.*服务端 502.*手机提示生成失败/);
+    assert.match(regular[1].content, /第二次没发成/);
+    assert.equal(regular[0].ids.length, 2);
+    const question = await store.timeline(threadId, null, { userInput: "「较早发送的消息 0」是什么报错？", now });
+    assert.match(question[0].content, /较早发送的消息 0/);
+    assert.match(question.at(-1).content, /第二次没发成/);
+    assert.deepEqual(await store.timeline(threadId, "2026-11-20T05:40:00Z", { now }), []);
     const archived = await store.read();
     assert.equal(archived.length, 48);
   } finally {
