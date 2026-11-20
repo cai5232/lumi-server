@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import { configuredZenMuxRoute } from '../src/zenmux-route.js';
 
 const config = {
@@ -41,11 +42,19 @@ globalThis.fetch = async (input, options) => {
   if (['zenmux.ai', 'legacy.test', 'backup.test'].includes(url.hostname)) {
     const body = JSON.parse(options.body);
     await appendFile(${JSON.stringify(capture)}, JSON.stringify({ url: url.href, authorization: options.headers.authorization, body }) + '\\n');
-    if (body.messages.at(-1).content.includes('模拟上游失败')) {
+    const currentContent = body.messages.at(-1).content;
+    if (typeof currentContent === 'string' && currentContent.split('<request_failure ')[0].includes('模拟上游失败')) {
       return Response.json({ error: { message: 'no available channel' } }, { status: 503 });
     }
     if (url.pathname === '/api/anthropic/v1/messages') {
       const usage = { input_tokens: 512, cache_read_input_tokens: 1024, cache_creation_input_tokens: 512 };
+      if (JSON.stringify(body.messages.at(-1)).includes('<autonomous_wake_context>')) {
+        return Response.json({
+          content: [{ type: 'tool_use', id: 'wake-calendar', name: 'lumi_calendar_2_calendar_create',
+            input: { title: 'Should never be created', starts_at: '2026-11-22' } }],
+          stop_reason: 'tool_use', usage: { ...usage, output_tokens: 6 }
+        });
+      }
       const content = { type: 'text', text: '我在这里。' };
       if (!body.stream) return Response.json({ content: [content], stop_reason: 'end_turn', usage: { ...usage, output_tokens: 6 } });
       const frames = [
@@ -64,12 +73,12 @@ globalThis.fetch = async (input, options) => {
   throw new Error('External fetch disabled in test');
 };
 `);
-  const launch = () => spawn(process.execPath, ['--import', preload, 'src/index.js'], {
+  const launch = (pulseMs = '600000') => spawn(process.execPath, ['--import', preload, 'src/index.js'], {
     cwd: new URL('..', import.meta.url),
     env: {
       ...process.env, ...config, LUMI_ZENMUX_ONLY: '', LUMI_MODEL_API_KEY: '',
       PORT: '0', DUETTO_INTERNAL_PORT: '0', LUMI_DATA_DIR: dataDir,
-      LUMI_PROMISE_ALARM_ENABLED: 'false', LUMI_CACHE_KEEPALIVE_ENABLED: 'false', LUMI_BACKGROUND_PULSE_MS: '600000',
+      LUMI_PROMISE_ALARM_ENABLED: 'false', LUMI_CACHE_KEEPALIVE_ENABLED: 'false', LUMI_BACKGROUND_PULSE_MS: pulseMs,
       LUMI_MODEL_API_URL_2: 'https://backup.test/v1', LUMI_MODEL_API_KEY_2: 'backup-test-key'
     },
     stdio: ['ignore', 'pipe', 'ignore']
@@ -163,11 +172,29 @@ globalThis.fetch = async (input, options) => {
       request.model === pinnedModel && request.cachedTokens === 1024 && request.inputTokens === 2048));
 
     await stop(child);
-    child = launch();
+    const threadPath = join(dataDir, 'threads.json');
+    const threads = JSON.parse(await readFile(threadPath, 'utf8'));
+    Object.assign(threads.default.activity, { mode: 'sentinel', nextWakeAt: new Date(Date.now() - 1000).toISOString(), nextWakeSource: 'settings' });
+    await writeFile(threadPath, JSON.stringify(threads));
+    child = launch('100');
     const restartedPort = await waitForPort(child);
     const restarted = await fetch(`http://127.0.0.1:${restartedPort}/v1/settings/zenmux`, { headers: authorization });
     assert.equal(restarted.status, 200);
     assert.deepEqual(await restarted.json(), { enabled: true, configured: true, model: pinnedModel });
+    let wakeRequests;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      wakeRequests = (await readFile(capture, 'utf8')).trim().split('\n').slice(4).map(line => JSON.parse(line));
+      if (wakeRequests.length >= 2) break;
+      await delay(50);
+    }
+    const [wake, continuation] = wakeRequests;
+    assert.ok(wake && continuation, 'the autonomous wake and its tool response must both reach the fixture');
+    assert.deepEqual(wake.body.tools, records[1].body.tools);
+    assert.deepEqual(wake.body.system, records[1].body.system);
+    assert.match(wake.body.messages.at(-1).content, /本轮自主唤醒不能调用共享日历/);
+    assert.deepEqual(continuation.body.messages.at(-1).content, [
+      { type: 'tool_result', tool_use_id: 'wake-calendar', is_error: true, content: 'MCP 工具不可用' }
+    ]);
   } finally {
     await stop(child);
     await rm(dataDir, { recursive: true, force: true });

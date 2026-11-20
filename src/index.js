@@ -2059,7 +2059,7 @@ function historicalModelContent(value, toolCalls = []) {
       .replace(/<available_feature name="(?:food_notebook|app_control|web_search|lubdub)">[\s\S]*?<\/available_feature>\s*/gi, "")
       .replace(/<instant_commands>[\s\S]*?<\/instant_commands>\s*/gi, "")
       .replace(/<keepsakes>你可以自主收藏[\s\S]*?<\/keepsakes>\s*/g, "")
-      .replace(/<request_failures source="request-observations" retention="recent-history" data_only="true">[\s\S]*?<\/request_failures>\s*/gi, "")
+      .replace(/<(request_failures?) source="request-observations"[^>]*>[\s\S]*?<\/\1>\s*/gi, "")
       .replace(/\n<companion_expression mode="(?:steady|undertone|permission|strong|conflict)">[^<]*<\/companion_expression>\s*$/i, ""))
     : content;
   if (!Array.isArray(toolCalls) || !toolCalls.length || String(cleaned || "").includes('<recorded_tool_results>')) return cleaned;
@@ -2345,10 +2345,11 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
       mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
     }
   }
-  if (mcpThreadId && !proactive) {
+  if (mcpThreadId && (!proactive || nativeKimiCache)) {
     for (const [toolIndex, tool] of calendarTools.entries()) {
       const name = `lumi_calendar_${toolIndex}_${tool.name}`.slice(0, 64);
-      mcpToolMap.set(name, { tool, internalCalendar: true, allowWrite: true });
+      // Keep Kimi's schema prefix identical across modes; wake turns have no calendar handlers.
+      if (!proactive) mcpToolMap.set(name, { tool, internalCalendar: true, allowWrite: true });
       mcpTools.push({ type: "function", function: { name, description: `共享日历：${tool.description}`, parameters: tool.inputSchema } });
     }
   }
@@ -3293,13 +3294,8 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     })
     : [];
   const chatHistory = [];
-  let failureIndex = 0;
   for (const message of relevantMessages) {
     if (message.role !== "user" && message.role !== "assistant") continue;
-    const at = Date.parse(message.createdAt);
-    while (failureIndex < failureTimeline.length && failureTimeline[failureIndex].at < at) {
-      chatHistory.push({ role: "user", content: failureTimeline[failureIndex++].content });
-    }
     // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
     // from history and the previous request's Anthropic cache prefix can never match again.
     let content = hasCompactedContext || thread.contextExcludedMessageIDs?.length
@@ -3317,9 +3313,6 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
       : [];
     chatHistory.push(...preceding, { role: message.role, content: withUserMessageTimestamp(message, content), ...(savedImages.length ? { images: savedImages } : {}) });
-  }
-  for (const failure of failureTimeline.slice(failureIndex)) {
-    chatHistory.push({ role: "user", content: failure.content });
   }
   const phoneHistory = [];
   if (callMode && Array.isArray(callHistory)) {
@@ -3410,7 +3403,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     : "";
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const wakeDecisionFormat = `<next_wake_requirement>在这次回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–${MAX_WAKE_MINUTES}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–${MAX_WAKE_MINUTES}）和 "message"，否则两项均填 null。</next_wake_requirement>`;
+  const wakeDecisionFormat = `<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–${MAX_WAKE_MINUTES}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–${MAX_WAKE_MINUTES}）和 "message"，否则两项均填 null。</next_wake_requirement>`;
   const proactiveDirective = wakeSceneTriggers?.length
     ? `<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。</wake_task>${wakeDecisionFormat}</autonomous_wake_context>\n`
     : proactive
@@ -3494,7 +3487,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   // Text-only snapshots cannot substitute for attachments or executed tool results.
   const historyHasEvidence = relevantMessages.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length);
-  const exactCachedPrefix = !failureTimeline.length && !hasCompactedContext && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixNeedsCleanup && Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const exactCachedPrefix = !hasCompactedContext && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixNeedsCleanup && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -3511,15 +3504,20 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
         { role: "assistant", content: thread.cacheKeepaliveAssistantContent }
       ]
     : null;
+  // Failure reports can arrive late or age out. Keep them after the durable turn,
+  // so selecting different reports never rewrites the stored conversation prefix.
+  const requestUserContent = failureTimeline.length
+    ? `${userModelContent}\n\n${failureTimeline.map(failure => failure.content).join("\n")}`
+    : userModelContent;
   let cacheRequestMessages = exactCachedPrefix
-    ? [...exactCachedPrefix, { role: "user", content: userModelContent, images }]
+    ? [...exactCachedPrefix, { role: "user", content: requestUserContent, images }]
     : [
         { role: "system", content: cacheSystem },
         ...history,
         // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
         // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
         // invalidates the cache prefix even when all earlier chat turns are unchanged.
-        { role: "user", content: userModelContent, images }
+        { role: "user", content: requestUserContent, images }
       ];
   if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
   thread.worldBookSignature = worldBookSignature;
