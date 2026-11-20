@@ -34,7 +34,7 @@ export function contextSummaryMessages(summary, chunk) {
 export async function distillContextBatch(callModel, { summary, chunk, model, customProvider, maxOutputTokens }) {
   const messages = contextSummaryMessages(summary, chunk);
   const result = await callModel({
-    messages, provider: 'custom', model, customProvider, maxOutputTokens, temperature: 0.2,
+    messages, provider: 'custom', model, customProvider, maxOutputTokens,
     cacheCurrentUser: false, disableThinkingRetry: true, singleAttempt: true, returnMetadata: true
   });
   if (!isNormalModelCompletion(result?.finishReason)) {

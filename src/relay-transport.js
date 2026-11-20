@@ -62,10 +62,19 @@ function removeField(value, key) {
   delete value[key];
   for (const item of Object.values(value)) removeField(item, key);
 }
+export function modelTemperature(model, thinkingEnabled = false) {
+  const name = String(model || "").toLowerCase().replace(/[._ ]/g, "-");
+  const fixedClaude = /\b(?:claude-)?(?:(?:opus|sonnet|haiku|fable|mythos)-5(?:-|$)|opus-4-[78](?:-|$)|mythos-preview(?:-|$))/.test(name);
+  const fixedKimi = /\bkimi-(?:k3(?:-|$)|k2-[67](?:-|$))/.test(name);
+  return thinkingEnabled || fixedClaude || fixedKimi ? {} : { temperature: 1 };
+}
 export function relayCompatibilityPatch(body, message) {
   const error = String(message).toLowerCase();
   const limit = error.match(/max_tokens\s*:\s*\d+\s*>\s*(\d+)/) || error.match(/max_tokens.{0,60}(?:less than or equal to|at most|maximum(?: is)?|<=)\s*(\d+)/);
   if (limit && Number.isFinite(body.max_tokens) && Number(limit[1]) > 0 && Number(limit[1]) < body.max_tokens) return { limit: Number(limit[1]) };
+  if (/\btemperature\b/.test(error) && /fixed|only accept|only support|must be|non-default|默认值|固定/.test(error) && Object.hasOwn(body, "temperature")) {
+    return { remove: ["temperature"] };
+  }
   if (!/unsupported|not support|not allowed|not permitted|unrecognized|unknown|extra inputs|extra fields|unexpected|不支持|不允许/.test(error)) return null;
   if (/\bstream(?:ing)?\b/.test(error) && body.stream === true) return { remove: ['stream'] };
   if (/cache_control|cache control|\bttl\b/.test(error)) return /\bttl\b/.test(error) ? { removeDeep: 'ttl' } : { removeDeep: 'cache_control' };

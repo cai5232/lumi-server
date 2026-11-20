@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFile} from 'node:fs/promises';
-import {relayEndpoint,requestRelay} from '../src/relay-transport.js';
+import {modelTemperature,relayEndpoint,requestRelay} from '../src/relay-transport.js';
 import {removeMalformedAnthropicThinkingBlocks} from '../src/anthropic-messages.js';
 import {assertChatContextBudget} from '../src/context-budget.js';
 import {responseThinking} from '../src/response-thinking.js';
@@ -10,9 +10,9 @@ const source=await readFile(new URL('../src/index.js',import.meta.url),'utf8');
 const start=source.indexOf('async function callModel('),end=source.indexOf('\nasync function zenMuxSubscriptionUsage',start);
 for(const format of ['openai','anthropic'])test(`real callModel ${format} route keeps chosen endpoint, auth, usage and thinking without connecting unavailable MCP`,async()=>{
  let captured,usage;
- const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
+ const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,console,process:{env:{}},modelTemperature,relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
   mcpClientStore:{read:async()=>({servers:[{enabled:true,tools:[],name:'offline'}]})},modelToolsForServer:()=>[],
-  connectPendingMcpServers:()=>{throw new Error('chat must not wait for MCP discovery')},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
+  connectPendingMcpServers:()=>{throw new Error('chat must not wait for MCP discovery')},calendarTools:[],foodTools:[],lubdubTools:[],appControl:{get:async()=>({apps:[]})},ENGAWA_SERVER_ID:'engawa',
   cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async()=>{},randomUUID:()=> 'test-id',modelRequestLogJSON:JSON.stringify,
   cacheUsage:()=>({read:0,created:0}),cacheStats:{modelCalls:0,cacheReadTokens:0,cacheWriteTokens:0},saveCacheStats:async()=>{},
   requestRelay:options=>requestRelay({...options,fetchImpl:async(url,request)=>{
@@ -21,7 +21,7 @@ for(const format of ['openai','anthropic'])test(`real callModel ${format} route 
   }})};
  vm.createContext(context);vm.runInContext(source.slice(start,end),context);
  const content=await context.callModel({provider:'custom',model:'claude-test',customProvider:{url:format==='anthropic'?'https://custom.test/v1/messages':'https://custom.test/v1/chat/completions',key:'test-key',apiFormat:format,chatPath:format==='anthropic'?'/messages':'/chat/completions'},messages:[{role:'system',content:'设定'},{role:'user',content:'你好'}],mcpThreadId:'default',onUsage:value=>{usage=value}});
- assert.equal(content,'<thinking>实际返回的心声</thinking>\n你好');assert.ok(usage);assert.equal(captured.headers.authorization,'Bearer test-key');assert.equal(captured.headers.accept,'text/event-stream');assert.equal(captured.body.stream,true);
+ assert.equal(content,'<thinking>实际返回的心声</thinking>\n你好');assert.ok(usage);assert.equal(captured.headers.authorization,'Bearer test-key');assert.equal(captured.headers.accept,'text/event-stream');assert.equal(captured.body.stream,true);assert.equal(captured.body.temperature,1);
  assert.equal(captured.url,format==='anthropic'?'https://custom.test/v1/messages':'https://custom.test/v1/chat/completions');
  if(format==='anthropic'){assert.equal(captured.headers['x-api-key'],'test-key');assert.equal(captured.body.messages[0].role,'user');assert.equal(captured.body.system[0].text,'设定')}
  else assert.equal(captured.body.messages[0].role,'system');
@@ -45,8 +45,8 @@ test('public messages exclude persisted context while retaining actual saved thi
 });
 test('real callModel identifies disabled upstream credentials and preserves upstream service status',async()=>{
  for(const [status,message,expected] of [[503,'auth_unavailable: no auth available; service has been disabled',503],[429,'quota exhausted',429],[502,'upstream unavailable',502],[401,'invalid provider key',502]]){
-  const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},relayEndpoint,
-   mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
+  const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},modelTemperature,relayEndpoint,
+   mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],lubdubTools:[],appControl:{get:async()=>({apps:[]})},ENGAWA_SERVER_ID:'engawa',
    cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async()=>{},randomUUID:()=> 'test-id',modelRequestLogJSON:JSON.stringify,
    cacheUsage:()=>({read:0,created:0}),requestRelay:async options=>({response:new Response('{}',{status}),data:{error:{message}},requestBody:options.body})};
   vm.createContext(context);vm.runInContext(source.slice(start,end),context);
@@ -60,8 +60,8 @@ test('real callModel identifies disabled upstream credentials and preserves upst
 
 for (const format of ['openai', 'anthropic']) test(`oversized ${format} chat is blocked before contacting the relay`, async () => {
  let calls = 0;
- const context = { URL, console, process: { env: {} }, relayEndpoint, removeMalformedAnthropicThinkingBlocks,
-  mcpClientStore: { read: async () => ({ servers: [] }) }, calendarTools: [], foodTools: [], ENGAWA_SERVER_ID: 'engawa',
+ const context = { URL, console, process: { env: {} }, modelTemperature, relayEndpoint, removeMalformedAnthropicThinkingBlocks,
+  mcpClientStore: { read: async () => ({ servers: [] }) }, calendarTools: [], foodTools: [], lubdubTools: [], appControl: {get: async()=>({apps:[]})}, ENGAWA_SERVER_ID: 'engawa',
   cacheMessages: messages => messages, assertChatContextBudget, contextLimitTokens: 200000,
   requestRelay: async () => { calls++; throw Error('must not reach upstream'); } };
  vm.createContext(context); vm.runInContext(source.slice(start, end), context);
@@ -77,8 +77,8 @@ for (const format of ['openai', 'anthropic']) test(`oversized ${format} chat is 
 for(const format of ['anthropic','openai'])for(const recover of [true,false])test(`${format} empty reply retries once as JSON and ${recover?'recovers':'stops after two attempts'}`,async()=>{
  const attempts=[],records=[],usage=[];
  const controller=new AbortController();
- const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
-  mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],ENGAWA_SERVER_ID:'engawa',
+ const context={URL,Date,Math,Map,JSON,Number,String,Array,Boolean,Error,console,process:{env:{}},modelTemperature,relayEndpoint,responseThinking,removeMalformedAnthropicThinkingBlocks,assertChatContextBudget,contextLimitTokens:200000,
+  mcpClientStore:{read:async()=>({servers:[]})},calendarTools:[],foodTools:[],lubdubTools:[],appControl:{get:async()=>({apps:[]})},ENGAWA_SERVER_ID:'engawa',
   cacheMessages:messages=>messages,cacheDiagnosticCapture:()=>null,recordModelRequest:async record=>records.push(record),randomUUID:()=>String(records.length),modelRequestLogJSON:JSON.stringify,
   cacheUsage:()=>({read:0,created:0}),cacheStats:{modelCalls:0,cacheReadTokens:0,cacheWriteTokens:0},saveCacheStats:async()=>{},
   requestRelay:options=>requestRelay({...options,fetchImpl:async(url,request)=>{

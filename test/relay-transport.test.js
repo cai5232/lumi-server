@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {relayEndpoint,decodeRelayResponse,requestRelay} from '../src/relay-transport.js';
+import {relayEndpoint,decodeRelayResponse,modelTemperature,requestRelay} from '../src/relay-transport.js';
 test('relay URLs accept roots, version prefixes and complete endpoints without duplication',()=>{
  for(const [base,path,expected] of [
   ['https://relay.test','/chat/completions','https://relay.test/v1/chat/completions'],
@@ -124,4 +124,13 @@ test('single-attempt requests learn relay compatibility without resending', asyn
   assert.equal(calls, 1);
   assert.equal((await requestRelay(options)).response.status, 200);
   assert.equal(calls, 2);
+});
+
+test('global temperature uses 1 and respects fixed Kimi and Claude routes', () => {
+  assert.deepEqual(modelTemperature('kimi-k2.5'), { temperature: 1 });
+  assert.deepEqual(modelTemperature('claude-sonnet-4-6'), { temperature: 1 });
+  for (const name of ['kimi-k2.6', 'moonshotai/kimi-k2.7-code', 'kimi-k3.1-pro', 'claude-opus-5.5', 'anthropic/claude-sonnet-5-5', 'claude-opus-4-7']) {
+    assert.deepEqual(modelTemperature(name), {}, name);
+  }
+  assert.deepEqual(modelTemperature('claude-sonnet-4-6', true), {});
 });

@@ -62,6 +62,7 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
       assert.doesNotMatch(data.assistantMessage.content, /<emotion_update|<lumi_pulse|内部状态|"changes"/);
     }
     assert.equal(requests.length, 2);
+    assert.ok(requests.every(request => request.temperature === 1));
     const priorUser = requests[1].messages.filter(m => m.role === 'user').at(0).content;
     assert.ok(priorUser.startsWith(`<user_sent_at source="client">${deviceSentAt}</user_sent_at>`));
     const nextInput = requests[1].messages.filter(m => m.role === 'user').at(-1).content;
@@ -129,6 +130,7 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     assert.equal(contact?.content, '我醒了，来看看你。');
     assert.equal(contact.wakeStep.succeeded, true);
     assert.ok(Date.parse(contact.wakeStep.occurredAt) >= Date.parse(run.startedAt));
+    assert.equal(requests.at(-1).temperature, 1);
     const wakeUsers = requests.at(-1).messages.filter(m => m.role === 'user');
     const wakePrompt = wakeUsers.at(-1).content;
     for (const [index, message] of sentMessages.entries()) {
