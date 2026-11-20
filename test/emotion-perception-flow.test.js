@@ -122,6 +122,8 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
     assert.match(wakePrompt, /<autonomous_wake_context>/);
     assert.ok(wakePrompt.endsWith('</character_voice>'));
+    assert.match(wakePrompt, /约 800 个中文字符/);
+    assert.match(nextInput, /约 800 个中文字符/);
     assert.doesNotMatch(wakePrompt, /<companion_expression\b/);
     assert.match(wakePrompt, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
     const timing = wakePrompt.match(/<user_message_timing\b[^>]*>/)?.[0];
