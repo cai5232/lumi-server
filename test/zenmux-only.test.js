@@ -55,7 +55,10 @@ globalThis.fetch = async (input, options) => {
           stop_reason: 'tool_use', usage: { ...usage, output_tokens: 6 }
         });
       }
-      const content = { type: 'text', text: '我在这里。' };
+      const wakeContinuation = Array.isArray(currentContent) && currentContent.some(block => block.tool_use_id === 'wake-calendar');
+      const content = { type: 'text', text: wakeContinuation
+        ? '我在这里。\\n\\n我去檐廊逛了一圈，看到首诗。<sentinel_decision>{"action":"message","nextWakeMinutes":30}</sentinel_decision>'
+        : '我在这里。' };
       if (!body.stream) return Response.json({ content: [content], stop_reason: 'end_turn', usage: { ...usage, output_tokens: 6 } });
       const frames = [
         { type: 'message_start', message: { usage } },
@@ -192,9 +195,19 @@ globalThis.fetch = async (input, options) => {
     assert.deepEqual(wake.body.tools, records[1].body.tools);
     assert.deepEqual(wake.body.system, records[1].body.system);
     assert.match(wake.body.messages.at(-1).content, /本轮自主唤醒不能调用共享日历/);
+    assert.doesNotMatch(wake.body.messages.at(-1).content, /<request_failure/);
+    assert.ok(wake.body.messages.slice(0, -1).some(message => String(message.content).includes('模拟上游失败')));
     assert.deepEqual(continuation.body.messages.at(-1).content, [
       { type: 'tool_result', tool_use_id: 'wake-calendar', is_error: true, content: 'MCP 工具不可用' }
     ]);
+    let savedWake;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      savedWake = JSON.parse(await readFile(threadPath, 'utf8')).default.messages.findLast(message => message.contentType === 'sentinel');
+      if (savedWake) break;
+      await delay(50);
+    }
+    assert.equal(savedWake?.content, '我在这里。');
+    assert.equal(savedWake.modelContent, savedWake.content);
   } finally {
     await stop(child);
     await rm(dataDir, { recursive: true, force: true });

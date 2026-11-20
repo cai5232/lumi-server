@@ -34,6 +34,14 @@ test("keep the most recent distinct sends prominent and surface quoted older mes
     const question = await store.timeline(threadId, null, { userInput: "「较早发送的消息 0」是什么报错？", now });
     assert.match(question[0].content, /较早发送的消息 0/);
     assert.match(question.at(-1).content, /第二次没发成/);
+    await store.acknowledge(threadId, question.flatMap(entry => entry.ids));
+    const restarted = new RequestFailureStore(store.path);
+    const afterExpiry = await restarted.timeline(threadId, null, { now: now + 48 * 60 * 60_000 });
+    assert.deepEqual(afterExpiry, question.map(entry => ({ ...entry, ids: [] })));
+    const compacted = await restarted.timeline(threadId, null, {
+      now: now + 48 * 60 * 60_000, historyStart: regular[1].at, compacted: true
+    });
+    assert.deepEqual(compacted, [{ ...regular[1], ids: [] }]);
     assert.deepEqual(await store.timeline(threadId, "2026-11-20T05:40:00Z", { now }), []);
     const archived = await store.read();
     assert.equal(archived.length, 48);

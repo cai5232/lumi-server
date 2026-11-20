@@ -78,12 +78,26 @@ export class RequestFailureStore {
     });
   }
 
-  async timeline(threadId, resetAt, { userInput = "", historyStart, now = Date.now() } = {}) {
-    await this.queue;
+  async timeline(threadId, resetAt, options = {}) {
+    let entries;
+    await this.change(events => {
+      entries = this.timelineEntries(events, threadId, resetAt, options);
+      let changed = false;
+      for (const { pinnedOn, at, content } of entries) {
+        if (!pinnedOn || pinnedOn.historyEntry) continue;
+        pinnedOn.historyEntry = { at, content };
+        changed = true;
+      }
+      return changed;
+    });
+    return entries.map(({ at, content, ids }) => ({ at, content, ids }));
+  }
+
+  timelineEntries(events, threadId, resetAt, { userInput = "", historyStart, compacted = false, now = Date.now() } = {}) {
     const cutoff = Date.parse(resetAt);
     const sendAt = event => Date.parse(event.requestedAt || event.failedAt);
     const groups = new Map();
-    for (const event of await this.read()) {
+    for (const event of events) {
       if (event.threadId !== threadId || (Number.isFinite(cutoff) && sendAt(event) <= cutoff)) continue;
       const key = event.requestId || event.id;
       if (!groups.has(key)) groups.set(key, []);
@@ -92,12 +106,20 @@ export class RequestFailureStore {
     const input = String(userInput).normalize("NFKC").toLowerCase().replace(/\s+/g, "");
     const askingAboutFailures = /报错|出错|请求失败|发送失败|没发出去|没收到|发不出去|超时|错误|error|failed|timeout|\b(?:4[0-9]{2}|5[0-9]{2})\b/i.test(userInput);
     const candidates = [];
+    const pinned = [];
     const earliest = Math.max(historyStart || 0, now - 24 * 60 * 60_000);
     for (const reports of groups.values()) {
+      const existing = reports.find(event => event.historyEntry)?.historyEntry;
+      if (existing) {
+        if (!compacted || !(existing.at < historyStart)) {
+          pinned.push({ ...existing, ids: reports.filter(event => !event.deliveredAt).map(event => event.id) });
+        }
+        continue;
+      }
       const original = reports.find(event => event.source === "server" && event.message?.trim()) ||
         reports.find(event => event.message?.trim()) || reports[0];
       const at = sendAt(original);
-      if (!Number.isFinite(at)) continue;
+      if (!Number.isFinite(at) || (compacted && at < historyStart)) continue;
       const needle = String(original.message || "").normalize("NFKC").toLowerCase().replace(/\s+/g, "");
       const quoted = askingAboutFailures && needle.length >= 4 && input.includes(needle);
       const undelivered = reports.some(event => !event.deliveredAt);
@@ -125,12 +147,13 @@ export class RequestFailureStore {
       size += content.length;
       entries.push({
         at,
+        pinnedOn: original,
         ids: reports.filter(event => !event.deliveredAt).map(event => event.id),
         content: `<request_failure source="request-observations" data_only="true">${content}</request_failure>`
       });
       if (entries.length >= (askingAboutFailures ? 8 : 4)) break;
     }
-    return entries.sort((a, b) => a.at - b.at);
+    return [...pinned, ...entries].sort((a, b) => a.at - b.at);
   }
 
   acknowledge(threadId, ids) {

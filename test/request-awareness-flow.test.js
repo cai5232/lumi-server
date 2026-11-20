@@ -59,27 +59,25 @@ test('failed chat content, error and request time reach the next successful mode
     const actual = requests[2].messages;
     const before = actual.findIndex(message => message.content.includes('报错前正常发到的消息'));
     assert.ok(before >= 0 && before < actual.length - 1);
-    assert.ok(actual.slice(0, -1).filter(message => message.role !== 'system')
-      .every(message => !message.content.includes('<request_failure ')));
-    const suffix = actual.at(-1).content;
-    assert.match(suffix, /报错后正常发到的消息[\s\S]*<request_failure /);
-    assert.match(suffix, /中间发出却报错的消息/);
-    assert.match(suffix, /temporary relay failure/);
-    assert.ok(suffix.includes(sentAt));
+    assert.match(actual.at(-1).content, /报错后正常发到的消息/);
+    assert.doesNotMatch(actual.at(-1).content, /<request_failure /);
+    const failed = actual.findIndex(message => message.role === 'user' && message.content.includes('<request_failure '));
+    assert.ok(failed > before && failed < actual.length - 1);
+    assert.match(actual[failed].content, /中间发出却报错的消息.*temporary relay failure/);
+    assert.ok(actual[failed].content.includes(sentAt));
     assert.equal((await post('手机恢复网络后继续', { previousRequestFailures: [{
       id: 'offline-one', requestId: 'offline-one', message: '很早以前离线时发的话',
       error: 'network disconnected Bearer highly-sensitive-test-token',
       requestedAt: '2026-11-09T11:20:00Z', failedAt: '2026-11-09T11:20:00Z', timeZone: 'Asia/Shanghai'
     }] })).status, 200);
     const withOffline = requests[3].messages.filter(message => message.role !== 'system');
-    assert.match(withOffline.at(-1).content, /很早以前离线时发的话/);
-    assert.match(withOffline.at(-1).content, /network disconnected/);
-    assert.doesNotMatch(withOffline.at(-1).content, /highly-sensitive-test-token/);
-    assert.ok(withOffline.slice(0, -1).every(message => !message.content.includes('<request_failure')));
+    assert.match(withOffline[0].content, /很早以前离线时发的话.*network disconnected/);
+    assert.doesNotMatch(withOffline[0].content, /highly-sensitive-test-token/);
+    assert.doesNotMatch(withOffline.at(-1).content, /<request_failure /);
     assert.equal((await post('继续聊天')).status, 200);
     const subsequent = requests[4].messages.filter(message => message.role !== 'system');
     assert.ok(subsequent.some(message => message.content.includes('temporary relay failure')));
-    assert.ok(!subsequent.some(message => message.content.includes('network disconnected')));
+    assert.equal(subsequent.filter(message => message.content.includes('network disconnected')).length, 1);
     assert.deepEqual(subsequent.slice(0, withOffline.length - 1), withOffline.slice(0, -1));
     const archive = JSON.parse(await readFile(join(folder, 'request-failures.json'), 'utf8'));
     assert.equal(archive.events.length, 2);

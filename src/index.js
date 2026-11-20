@@ -1,6 +1,7 @@
 import { companionThoughtPrompt, readCompanionThought, stripLegacyThoughtPrompt } from "./companion-thought.js";
 import { RequestFailureStore } from "./request-awareness.js";
-import { userMessageTimeLabel, userMessageTimingContext, validatedUserSentAt, withUserMessageTimestamp } from "./user-message-timing.js";
+import { wakeFindingFilter, wakeFindingsPrompt } from "./wake-findings.js";
+import { manualMessageTime, userMessageTimeLabel, userMessageTimingContext, validatedUserSentAt, withUserMessageTimestamp } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
 import { createNativeAlarmMcp, nativeAlarmMcpTools, NATIVE_ALARM_MCP_ID, NATIVE_ALARM_MCP_PATH } from "./native-alarm-mcp.js";
@@ -3287,15 +3288,22 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const failureTimeline = !callMode && !desktopCompanion
     ? await requestFailures.timeline(thread.id, thread.contextResetAt, {
       userInput: proactive ? "" : worldBookInput,
-      historyStart: Date.parse(relevantMessages[0]?.createdAt)
+      historyStart: Date.parse(relevantMessages[0]?.createdAt),
+      compacted: hasCompactedContext
     }).catch(error => {
       console.warn(`request failure history unavailable: ${error.message}`);
       return [];
     })
     : [];
   const chatHistory = [];
+  let failureIndex = 0;
   for (const message of relevantMessages) {
     if (message.role !== "user" && message.role !== "assistant") continue;
+    const userSentAt = manualMessageTime(message);
+    const sentAt = Number.isFinite(userSentAt) ? userSentAt : Date.parse(message.createdAt);
+    while (failureIndex < failureTimeline.length && failureTimeline[failureIndex].at < sentAt) {
+      chatHistory.push({ role: "user", content: failureTimeline[failureIndex++].content });
+    }
     // Reuse the exact text sent on the original turn. Otherwise its timestamp/memories vanish
     // from history and the previous request's Anthropic cache prefix can never match again.
     let content = hasCompactedContext || thread.contextExcludedMessageIDs?.length
@@ -3313,6 +3321,9 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
       : [];
     chatHistory.push(...preceding, { role: message.role, content: withUserMessageTimestamp(message, content), ...(savedImages.length ? { images: savedImages } : {}) });
+  }
+  for (const failure of failureTimeline.slice(failureIndex)) {
+    chatHistory.push({ role: "user", content: failure.content });
   }
   const phoneHistory = [];
   if (callMode && Array.isArray(callHistory)) {
@@ -3403,7 +3414,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     : "";
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const wakeDecisionFormat = `<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–${MAX_WAKE_MINUTES}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–${MAX_WAKE_MINUTES}）和 "message"，否则两项均填 null。</next_wake_requirement>`;
+  const wakeDecisionFormat = `${wakeFindingsPrompt}<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–${MAX_WAKE_MINUTES}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–${MAX_WAKE_MINUTES}）和 "message"，否则两项均填 null。</next_wake_requirement>`;
   const proactiveDirective = wakeSceneTriggers?.length
     ? `<autonomous_wake_context><active_actions>message|none</active_actions><wake_task>这是为对话情境安排的唤醒。先看情境报告里的触发原因和字条。需要联系时按这个原因自然接续，暂时没有实质内容则返回 action:none。</wake_task>${wakeDecisionFormat}</autonomous_wake_context>\n`
     : proactive
@@ -3487,7 +3498,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
   // Text-only snapshots cannot substitute for attachments or executed tool results.
   const historyHasEvidence = relevantMessages.some(message => message.imageAttachmentCount || message.modelImageIDs?.length || message.toolCalls?.length);
-  const exactCachedPrefix = !hasCompactedContext && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixNeedsCleanup && Array.isArray(thread?.cacheKeepaliveMessages) &&
+  const exactCachedPrefix = !failureTimeline.length && !hasCompactedContext && !sleepInbox(thread).length && !historyHasEvidence && !cachedPrefixNeedsCleanup && Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.worldBookSignature === worldBookSignature &&
     !activation.entries.some(e => !e.position.endsWith("SYSTEM_PROMPT")) &&
     typeof thread?.cacheKeepaliveAssistantContent === "string" &&
@@ -3504,20 +3515,15 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
         { role: "assistant", content: thread.cacheKeepaliveAssistantContent }
       ]
     : null;
-  // Failure reports can arrive late or age out. Keep them after the durable turn,
-  // so selecting different reports never rewrites the stored conversation prefix.
-  const requestUserContent = failureTimeline.length
-    ? `${userModelContent}\n\n${failureTimeline.map(failure => failure.content).join("\n")}`
-    : userModelContent;
   let cacheRequestMessages = exactCachedPrefix
-    ? [...exactCachedPrefix, { role: "user", content: requestUserContent, images }]
+    ? [...exactCachedPrefix, { role: "user", content: userModelContent, images }]
     : [
         { role: "system", content: cacheSystem },
         ...history,
         // Keep request-specific context (timestamp, retrieved memories, rolling summary) in the
         // uncached suffix. Putting it in `system` changes Anthropic's system prefix every turn and
         // invalidates the cache prefix even when all earlier chat turns are unchanged.
-        { role: "user", content: requestUserContent, images }
+        { role: "user", content: userModelContent, images }
       ];
   if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
   thread.worldBookSignature = worldBookSignature;
@@ -3651,6 +3657,18 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const thinking = thought.text || ((callMode || desktopCompanion) ? extractThinkingText(raw) : null);
   let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<user_remark>[\s\S]*?<\/user_remark>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<promise_alarm_decision>[\s\S]*?<\/promise_alarm_decision>/gi, "").replace(/<calendar_events>[\s\S]*?<\/calendar_events>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
   content = stripOptionMarkers(content);
+  const filterWakeFinding = proactive ? wakeFindingFilter(relevantMessages, toolCalls) : null;
+  const wakeContent = filterWakeFinding ? filterWakeFinding(content) : content;
+  let wakeFindingRemoved = wakeContent !== content;
+  content = wakeContent;
+  if (filterWakeFinding && sentinelDecision && typeof sentinelDecision === "object") {
+    for (const field of ["callOpening", "actionReason"]) {
+      if (typeof sentinelDecision[field] !== "string") continue;
+      const filtered = filterWakeFinding(sentinelDecision[field]);
+      wakeFindingRemoved ||= filtered !== sentinelDecision[field];
+      sentinelDecision[field] = filtered;
+    }
+  }
   if (!callMode && !desktopCompanion) content = await runKeepsakeMarks(content, keepsakes, thread.id, [...availableChatHistory(thread), { id: randomUUID(), role: "assistant", content, createdAt: new Date().toISOString() }]);
   // A provider occasionally returns only the private diary payload. Never let
   // stripping that payload turn a completed chat turn into an invisible reply.
@@ -3671,7 +3689,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   // this snapshot instead of reconstructing messages from stored display history.
   const cacheKeepaliveMessages = replyHistoryFitted || failureTimeline.length
     ? null : cacheRequestMessages.map(({ images: _images, ...message }) => message);
-  const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
+  const safeModelContent = wakeFindingRemoved ? content : raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
   return { requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
