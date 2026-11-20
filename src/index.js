@@ -3468,7 +3468,10 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
   // Apply feature and mode adjustments before attaching the editable text.
-  if (!callMode && !desktopCompanion) system += "\n\n" + thoughtFormat;
+  if (!callMode && !desktopCompanion) {
+    system += "\n\n" + thoughtFormat;
+    system += "\n\n【发送失败】当前用户消息里的 <request_failures> 是服务端附带的实际失败记录。有对应记录时直接回答用户关于那条消息和报错的问题，包括聊天里漏掉的消息。根据记录区分手机看到的提示与上游实际返回的错误。";
+  }
   system = persona + CHAT_PROMPT_SEPARATOR + system;
   const summaryText = thread.contextSummary;
   const hasCompactedContext = Boolean(thread.compactedAt);
@@ -3685,7 +3688,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     : "";
   const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`;
   const requestFailureContext = !callMode && !desktopCompanion
-    ? await requestFailures.context(thread.id, thread.contextResetAt).catch(error => {
+    ? await requestFailures.context(thread.id, thread.contextResetAt, { userInput: proactive ? "" : worldBookInput }).catch(error => {
       console.warn(`request failure history unavailable: ${error.message}`);
       return { ids: [], content: "" };
     })
