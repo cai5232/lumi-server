@@ -2227,6 +2227,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
   const nativeKimiCache = Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k3:moonshotai");
+  const stableKimiTools = nativeKimiCache || Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k2.8-preview:moonshotai");
   const nativeAnthropic = nativeKimiCache || customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
@@ -2346,7 +2347,7 @@ async function callModel({ messages, maxOutputTokens, useMaximumModelOutput = fa
       mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
     }
   }
-  if (mcpThreadId && (!proactive || nativeKimiCache)) {
+  if (mcpThreadId && (!proactive || stableKimiTools)) {
     for (const [toolIndex, tool] of calendarTools.entries()) {
       const name = `lumi_calendar_${toolIndex}_${tool.name}`.slice(0, 64);
       // Keep Kimi's schema prefix identical across modes; wake turns have no calendar handlers.

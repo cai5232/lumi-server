@@ -93,7 +93,7 @@ export class RequestFailureStore {
     return entries.map(({ at, content, ids }) => ({ at, content, ids }));
   }
 
-  timelineEntries(events, threadId, resetAt, { userInput = "", historyStart, compacted = false, now = Date.now() } = {}) {
+  timelineEntries(events, threadId, resetAt, { userInput = "", historyStart, compacted = false } = {}) {
     const cutoff = Date.parse(resetAt);
     const sendAt = event => Date.parse(event.requestedAt || event.failedAt);
     const groups = new Map();
@@ -107,7 +107,6 @@ export class RequestFailureStore {
     const askingAboutFailures = /报错|出错|请求失败|发送失败|没发出去|没收到|发不出去|超时|错误|error|failed|timeout|\b(?:4[0-9]{2}|5[0-9]{2})\b/i.test(userInput);
     const candidates = [];
     const pinned = [];
-    const earliest = Math.max(historyStart || 0, now - 24 * 60 * 60_000);
     for (const reports of groups.values()) {
       const existing = reports.find(event => event.historyEntry)?.historyEntry;
       if (existing) {
@@ -123,7 +122,9 @@ export class RequestFailureStore {
       const needle = String(original.message || "").normalize("NFKC").toLowerCase().replace(/\s+/g, "");
       const quoted = askingAboutFailures && needle.length >= 4 && input.includes(needle);
       const undelivered = reports.some(event => !event.deliveredAt);
-      if (askingAboutFailures || undelivered || at >= earliest) candidates.push({ reports, original, at, quoted, undelivered });
+      // Existing deployments may have delivered reports without saving their
+      // history entries. Don't backfill those reports on unrelated turns.
+      if (askingAboutFailures || undelivered) candidates.push({ reports, original, at, quoted, undelivered });
     }
     candidates.sort((a, b) => Number(b.quoted) - Number(a.quoted) ||
       Number(b.undelivered) - Number(a.undelivered) || b.at - a.at);

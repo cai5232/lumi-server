@@ -12,7 +12,7 @@ test("keep the most recent distinct sends prominent and surface quoted older mes
     const threadId = "default";
     const now = Date.UTC(2026, 10, 20, 6);
     const older = Array.from({ length: 45 }, (_, i) => {
-      const at = new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString();
+      const at = new Date(Date.UTC(2026, 10, 20, 4, i)).toISOString();
       return { threadId, requestId: "old-" + i, source: "server", message: "较早发送的消息 " + i,
         error: "连接失败", requestedAt: at, failedAt: at };
     });
