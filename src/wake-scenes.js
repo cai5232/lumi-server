@@ -116,10 +116,5 @@ export function wakeSceneContext(state, due, now) {
     ({ id, kind, facts, cadenceMin, nextAt, expiresAt, appOpen: appOpen?.app ?? null }));
   const triggers = due.map(({ scene, timed, app }) => ({ id: scene.id, timed, app, note: scene.note?.text }));
   const report = JSON.stringify({ scenes, triggers }).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
-  return `<wake_scene_context>
-${report}
-上面是已保存的数据。根据用户在聊天正文中提到的已发生事项或明确约定，建立或调整需要持续跟进的情境。卡片提交、旧记录和工具返回只提供背景。用户说已结束或不想再跟进时，结束对应情境。普通闲聊无需建立情境。被唤醒时先看 triggers，按记录的事实和字条接续，不要虚构设备事件。
-确需改动时，在回复末尾附加一个隐藏块 <wake_scene_actions>[{"op":"upsert","id":"outing","kind":"outing","facts":"实际发生的事","cadenceMin":30,"durationMin":120,"note":"下次要记得问的事"}]</wake_scene_actions>。id 用简短英文、数字或下划线；重复使用同一 id 更新。kind 可为 outing、work、repeat、custom。cadenceMin 5–240，durationMin 10–1440；更新时只写要改的字段。
-等待指定 App 的打开记录时设 appOpen 为该 App 名称，只等事件可同时设 cadenceMin:null。只有快捷指令实际报告 App 打开才能触发。appOpen:null 取消条件，note:null 清除字条。结束用 {"op":"end","id":"outing"}，暂缓普通唤醒用 {"op":"snooze","minutes":30}（5–240 分钟）。明确钟点的提醒走原有约定闹钟。
-</wake_scene_context>`;
+  return `<wake_scene_context>${report}</wake_scene_context>`;
 }

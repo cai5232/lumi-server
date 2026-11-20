@@ -49,6 +49,10 @@ test('live keepsake routes require auth; pending notes reach the next model turn
     const chat = await request('/messages', 'POST', { content: '晚上好', provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } });
     assert.equal(chat.status, 200, await chat.clone().text());
     assert.ok(seen.some(payload => JSON.stringify(payload.messages).includes('你还记得吗')));
+    const requestWithNotes = seen.find(payload => JSON.stringify(payload.messages).includes('你还记得吗'));
+    assert.ok(requestWithNotes.messages.find(message => message.role === 'system').content.includes('自主收藏值得留下的真实对话'));
+    assert.ok(!requestWithNotes.messages.at(-1).content.includes('自主收藏值得留下的真实对话'));
+
     const [saved] = (await (await request('/keepsakes')).json()).items;
     assert.equal(saved.notes.length, 2); assert.equal(saved.notes[1].w, 'ta');
     assert.equal(saved.notes[1].re, 1); assert.equal(saved.pre.ta, '我们一起回家'); assert.equal(saved.askMe, false);

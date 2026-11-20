@@ -39,8 +39,9 @@ async function stopBackend(child) {
   await stopped;
 }
 
-test("farewell starts sleep and chosen nightmare contact is delivered without exposing ordinary dreams", async () => {
+test("farewell starts sleep without generating dreams or model requests", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "lumi-sleep-flow-test-"));
+  let providerCalls = 0;
   const provider = createServer(async (req, res) => {
     let raw = "";
     for await (const chunk of req) raw += chunk;
@@ -54,6 +55,7 @@ test("farewell starts sleep and chosen nightmare contact is delivered without ex
       res.end("[]");
       return;
     }
+    providerCalls++;
     const body = JSON.parse(raw);
     const system = body.messages.find((message) => message.role === "system")?.content || "";
     let content = "OK";
@@ -93,23 +95,22 @@ test("farewell starts sleep and chosen nightmare contact is delivered without ex
       body: JSON.stringify({ content: "晚安", systemPrompt: "使用中文回复", provider: "custom", model: "test-model", customProvider: { apiKey: "test", baseURL: "https://model.test/v1", apiFormat: "openai" } })
     });
     assert.equal(response.status, 200);
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + 5000;
     let state;
     while (Date.now() < deadline) {
       try {
-        const threads = JSON.parse(await readFile(join(dataDir, "threads.json"), "utf8"));
-        state = threads.default;
-        if (state.sleep.nightmare?.decision === "send_message") break;
-      } catch { /* wait for first persistence */ }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+        state = JSON.parse(await readFile(join(dataDir, "threads.json"), "utf8")).default;
+        if (state.activity.mode === "sleeping") break;
+      } catch { /* wait for persistence */ }
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
-    assert.equal(state?.sleep.nightmare?.decision, "send_message", `the AI-selected nightmare action should be persisted; state=${JSON.stringify(state?.activity)}; sleep=${JSON.stringify(state?.sleep)}`);
-    assert.equal(state.activity.mode, "sleeping", "nightmare contact does not terminate the sleep cycle");
-    assert.equal(state.activity.sleepStage, "sleeping_after_nightmare");
-    assert.deepEqual(state.messages.filter((message) => message.contentType === "dream"), [], "ordinary dreams stay out of chat");
-    assert.deepEqual([...new Set(state.sleep.dreams.map((dream) => dream.cycle))], [0, 1], "dreams remain available to the private sleep state");
-    const nightmare = state.messages.find((message) => message.contentType === "nightmare");
-    assert.equal(nightmare?.content, "我刚才做了个梦，想跟你说句话。", "an explicitly chosen nightmare contact must be delivered");
+    assert.equal(state?.activity.mode, "sleeping");
+    await new Promise(resolve => setTimeout(resolve, 600));
+    state = JSON.parse(await readFile(join(dataDir, "threads.json"), "utf8")).default;
+    assert.equal(state.activity.sleepStage, "sleeping");
+    assert.deepEqual(state.sleep.dreams, []);
+    assert.ok(!state.messages.some(message => ["nightmare", "dream"].includes(message.contentType)));
+    assert.equal(providerCalls, 1, "only the farewell makes a model request");
   } finally {
     await stopBackend(child);
     await new Promise((resolve) => provider.close(resolve));

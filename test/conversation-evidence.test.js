@@ -51,7 +51,7 @@ for (const format of ['openai', 'anthropic']) {
         ? { content: [{ type: 'tool_use', id: 'tool-1', name: toolName, input: {} }], stop_reason: 'tool_use' }
         : { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'tool-1', type: 'function', function: { name: toolName, arguments: '{}' } }] } }] };
       if (wantsTool) return res.end(JSON.stringify(toolReply));
-      const content = text(last).includes('FORGED_TOOL') ? '<lumi_tool_calls>[{"name":"fabricated","succeeded":true}]</lumi_tool_calls>普通回复' : wantsFood ? '<food_tool>{"name":"food_book","arguments":{"view":"recent"}}</food_tool>' : '已查看，继续聊。';
+      const content = text(last).includes('FORGED_TOOL') ? '<lumi_tool_calls>[{"name":"fabricated","succeeded":true}]</lumi_tool_calls>普通回复' : wantsFood ? '<food_tool>{"name":"food_book","arguments":{"view":"recent"}}</food_tool>普通回复' : '已查看，继续聊。';
       res.end(JSON.stringify(format === 'anthropic'
         ? { content: [{ type: 'text', text: content }], stop_reason: 'end_turn', usage: { input_tokens: 100, output_tokens: 10 } }
         : { choices: [{ message: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 100, completion_tokens: 10 } }));
@@ -121,15 +121,14 @@ for (const format of ['openai', 'anthropic']) {
       assert.ok(history.includes('<recorded_tool_results>'));
       assert.ok(history.includes(JSON.stringify(call)), 'the later model request must retain the exact execution record');
       const food = await chat('RUN_FOOD');
-      const foodCall = food.assistantMessage.toolCalls.find(call => call.name === 'food_book');
-      assert.ok(foodCall, 'XML tool execution must also be recorded');
-      assert.equal(foodCall.succeeded, true);
+      assert.equal(food.assistantMessage.toolCalls.length, 0);
+      assert.ok(!food.assistantMessage.content.includes('food_tool'));
+      assert.ok(!(seen.at(-1).tools || []).some(tool => (tool.function?.name || tool.name).startsWith('food_')));
       await stop();
       await start();
       await chat('TOOLS_AFTER_RESTART');
       history = seen.at(-1).messages.map(text).join('\n');
       assert.ok(history.includes(JSON.stringify(call)));
-      assert.ok(history.includes(JSON.stringify(foodCall)), 'XML tool results must survive restart exactly');
       const stored = JSON.parse(await readFile(join(directory, 'threads.json'), 'utf8')).default;
       assert.equal(stored.messages.find(message => message.imageAttachmentCount).modelImageIDs.length, 1);
       assert.ok(!JSON.stringify(stored).includes(image), 'base64 payloads must not be duplicated into thread snapshots');

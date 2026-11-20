@@ -147,7 +147,14 @@ globalThis.fetch = async (input, options) => {
       assert.equal(records[index].url, 'https://zenmux.ai/api/anthropic/v1/messages');
       assert.deepEqual(records[index].body.cache_control, { type: 'ephemeral', ttl: '1h' });
       assert.ok(records[index].body.tools.length);
+      const system = JSON.stringify(records[index].body.system);
+      const tail = JSON.stringify(records[index].body.messages.at(-1));
+      for (const label of ['收藏泡泡', '原生闹钟', '应用限制']) assert.ok(system.includes(label));
+      for (const removed of ['自主收藏值得留下的真实对话', 'native_alarm_tools', 'food_notebook', 'dream_recall', 'wake_scene_actions']) {
+        assert.ok(!tail.includes(removed), removed);
+      }
     }
+    assert.deepEqual(records[0].body.system, records[1].body.system);
     assert.equal(records[2].url, 'https://zenmux.ai/api/v1/chat/completions');
     const providers = await (await fetch(base + '/v1/providers')).json();
     assert.deepEqual(providers.providers, [{ id: 'zenmux', models: [pinnedModel], configuredModel: pinnedModel }]);
