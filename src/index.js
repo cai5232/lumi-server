@@ -1,3 +1,5 @@
+import { readCompanionThought } from "./companion-thought.js";
+import { calibrateExpression, companionExpression, directEmotion, mergePerception, perceptionMessages, silenceContext, thoughtFormat, thoughtTurn, toolEmotion } from "./companion-emotion.js";
 import { RequestFailureStore } from "./request-awareness.js";
 import { userMessageTimingContext } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
@@ -805,6 +807,61 @@ function safeJSON(text, fallback = {}) {
 
 let murmurFlushInFlight = null;
 let nativeMurmurSnapshot;
+let nativeEmotionCalibration;
+const emotionPerceptions = new Map();
+const emotionHistoryQuery = new URLSearchParams({ n: "30" });
+
+async function refreshNativeEmotionCalibration() {
+  if (nativeEmotionCalibration?.expiresAt > Date.now()) return;
+  const [baselines, events] = await Promise.all([
+    nativeMurmur.read("baselines"),
+    nativeMurmur.read("history", new URLSearchParams({ n: "200" }))
+  ]);
+  nativeEmotionCalibration = { baselines, thresholds: calibrateExpression(events, baselines), expiresAt: Date.now() + 30 * 60_000 };
+}
+
+async function observeCompanionMessage(thread, message, { model, customProvider }) {
+  if (!message || !process.env.MURMUR_SERVICE_URL || ["call_status", "widget_submission"].includes(message.contentType)) return null;
+  const turnID = message.requestId || message.id;
+  const event_id = "input:" + createHash("sha256").update(JSON.stringify([thread.id, turnID])).digest("hex");
+  if (emotionPerceptions.has(event_id)) return emotionPerceptions.get(event_id);
+  const operation = (async () => {
+    if (!await nativeMurmur.detect()) return null;
+    const isText = !message.contentType || message.contentType === "text";
+    const direct = directEmotion(isText ? message.content : "");
+    if (sharedEmotionState.pendingNativeMurmurUpdates?.length) {
+      await flushMurmurUpdates().catch(() => {});
+    }
+    let raw;
+    if (isText && message.content?.trim()) {
+      try {
+        const result = await callModel({
+          messages: perceptionMessages(availableChatHistory(thread), message, Object.keys(direct.dimensions)),
+          model: process.env.LUMI_EMOTION_CLASSIFIER_MODEL?.trim() || model, customProvider,
+          temperature: 0, maxOutputTokens: 256, cacheCurrentUser: false, stream: false,
+          singleAttempt: true, disableThinkingRetry: true, returnMetadata: true,
+          signal: AbortSignal.timeout(1400)
+        });
+        raw = result.content;
+      } catch (error) {
+        console.info("[companion-emotion] perception fallback", error.name);
+      }
+    }
+    const result = mergePerception(direct, raw);
+    await nativeMurmur.update({ event_id, source: "input", dimensions: result.dimensions, trigger: result.trigger });
+    console.info("[companion-emotion] input applied", JSON.stringify({ direct: Object.keys(direct.dimensions), supplemental: result.supplemented }));
+    return Object.keys(result.dimensions);
+  })().catch(error => {
+    console.warn("[companion-emotion] input not acknowledged", error.name);
+    return null;
+  });
+  emotionPerceptions.set(event_id, operation);
+  operation.then(value => {
+    if (value === null) emotionPerceptions.delete(event_id);
+    else if (emotionPerceptions.size > 256) emotionPerceptions.delete(emotionPerceptions.keys().next().value);
+  });
+  return operation;
+}
 const nativeMurmur = createNativeMurmurClient({
   baseURL: process.env.MURMUR_SERVICE_URL,
   token: process.env.MURMUR_INTERNAL_TOKEN
@@ -839,14 +896,19 @@ async function flushMurmurUpdates() {
   finally { murmurFlushInFlight = null; }
 }
 
-async function refreshMurmurState(threadID, { online = false } = {}) {
+async function refreshMurmurState(threadID, { online = false, includeHistory = false } = {}) {
   if (!process.env.MURMUR_SERVICE_URL) return;
   try {
     if (await nativeMurmur.detect()) {
       void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
       if (online) await nativeMurmur.update({ source: "hook", dimensions: {} });
-      nativeMurmurSnapshot = await nativeMurmur.read("state");
-      return;
+      const [state, recent_events] = await Promise.all([
+        nativeMurmur.read("state"),
+        includeHistory ? nativeMurmur.read("history", emotionHistoryQuery).catch(() => null) : null,
+        includeHistory ? refreshNativeEmotionCalibration().catch(() => {}) : null
+      ]);
+      nativeMurmurSnapshot = { ...state, recent_events: recent_events || nativeMurmurSnapshot?.recent_events || [] };
+      return nativeMurmurSnapshot;
     }
     await flushMurmurUpdates();
     const result = await requestMurmurEmotion(threadID, "update", { initial_drives: { ...sharedEmotionState.drives }, online });
@@ -855,19 +917,27 @@ async function refreshMurmurState(threadID, { online = false } = {}) {
   } catch (error) { console.warn(`Murmur state sync deferred: ${error.message}`); }
 }
 
-async function applyEmotionUpdateFromOutput(raw, threadID = "default") {
+async function applyEmotionUpdateFromOutput(raw, threadID = "default", { toolCalls = [], perceived = [] } = {}) {
   const emotionUpdateRaw = String(raw || "").match(/<emotion_update\b[^>]*>([\s\S]*?)<\/emotion_update>/i)?.[1];
-  if (!emotionUpdateRaw) return null;
+  const parsed = emotionUpdateRaw ? safeJSON(emotionUpdateRaw, null) : null;
+  const tools = toolEmotion(toolCalls);
+  if (!parsed && !tools) return null;
   try {
-    const parsed = JSON.parse(emotionUpdateRaw);
     if (nativeMurmur.available || await nativeMurmur.detect()) {
-      const payload = nativeUpdate(parsed);
-      if (!payload) return null;
-      (sharedEmotionState.pendingNativeMurmurUpdates ||= []).push({ payload });
+      const reply = parsed && nativeUpdate(parsed);
+      // Input was already applied before inference. It must not be counted again
+      // in the model's output update.
+      for (const key of perceived) if (reply) delete reply.dimensions[key];
+      if (reply && reply.dimensions.upset > 0) delete reply.dimensions.upset;
+      const payloads = [reply, tools && nativeUpdate(tools)]
+        .filter(payload => payload && (payload.moved || Object.keys(payload.dimensions).length));
+      if (!payloads.length) return null;
+      (sharedEmotionState.pendingNativeMurmurUpdates ||= []).push(...payloads.map(payload => ({ payload })));
       await saveEmotionState();
       void flushMurmurUpdates().catch(error => console.warn(`Murmur emotion update queued for retry: ${error.message}`));
-      return parsed;
+      return parsed || tools;
     }
+    if (!parsed) return null;
     const initialDrives = { ...sharedEmotionState.drives };
     if (!applyEmotionDelta(sharedEmotionState, parsed)) return null;
     if (process.env.MURMUR_SERVICE_URL) {
@@ -1635,9 +1705,15 @@ function clearContextCache(thread) {
   thread.lastMeasuredInputTokens = 0;
 }
 
+function emotionStateAfterReset(thread, snapshot) {
+  if (!snapshot || !thread.contextResetAt) return snapshot;
+  const resetAt = Date.parse(thread.contextResetAt) / 1000;
+  return { ...snapshot, recent_events: (snapshot.recent_events || []).filter(event => event.ts >= resetAt) };
+}
+
 function chatEmotionContext(thread) {
   if (nativeMurmurSnapshot) {
-    return nativeEmotionContext(thread.contextResetAt ? { ...nativeMurmurSnapshot, recent_events: [] } : nativeMurmurSnapshot);
+    return nativeEmotionContext(emotionStateAfterReset(thread, nativeMurmurSnapshot));
   }
   // The shared narrative has no conversation-level provenance. Keep the
   // current drives without letting old text enter a reset conversation.
@@ -1653,14 +1729,26 @@ function contextSummarySnapshot(thread) {
   return { summary, revision };
 }
 
-async function persistChatThread(id, snapshot) {
+async function persistChatThread(id, snapshot, { receiptId = null } = {}) {
   const previous = chatPersistenceQueues.get(id) || Promise.resolve();
   const operation = previous.catch(() => {}).then(async () => {
     const all = await readThreads();
     const stored = all[id] || { id, title: "新聊天", messages: [] };
     if (stored.contextResetAt && snapshot.contextResetAt !== stored.contextResetAt) return stored;
+    if (receiptId) {
+      const item = stored.messages.find(message => message.id === receiptId && message.role === "assistant");
+      if (item && !item.readAt) {
+        item.readAt = new Date().toISOString();
+        await saveThreads(all);
+      }
+      return stored;
+    }
     const messagesByID = new Map((Array.isArray(stored.messages) ? stored.messages : []).map((item) => [item.id, item]));
-    for (const item of (Array.isArray(snapshot.messages) ? snapshot.messages : [])) messagesByID.set(item.id, item);
+    for (const item of (Array.isArray(snapshot.messages) ? snapshot.messages : [])) {
+      const recordedRead = messagesByID.get(item.id)?.readAt;
+      const readAt = recordedRead && (!item.readAt || recordedRead < item.readAt) ? recordedRead : item.readAt;
+      messagesByID.set(item.id, readAt ? { ...item, readAt } : item);
+    }
     const messages = Array.from(messagesByID.values()).sort((a, b) => new Date(a.createdAt).valueOf() - new Date(b.createdAt).valueOf());
     const diaries = mergeDiaryEntries(stored.diaries || [], snapshot.diaries || []);
     all[id] = { ...stored, ...snapshot, messages, diaries };
@@ -1948,18 +2036,6 @@ function pushText(message) {
 
 // Pushes must never expose model-private reasoning, including provider variants
 // that use <think>, <analysis>, or <reasoning> instead of <thinking>.
-function readCompanionThought(value) {
-  let text = null;
-  const content = String(value || "").replace(
-    /```[\s\S]*?(?:```|$)|<(thinking|think|analysis|reasoning)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)|<companion_thought\b[^>]*>([\s\S]*?)(<\/companion_thought\s*>|$)/gi,
-    (block, providerTag, thought, closed) => {
-      if (providerTag || block.startsWith("```")) return block;
-      if (closed && !text) text = thought.replace(/<[^>]*>/g, "").trim() || null;
-      return "";
-    }
-  ).trim();
-  return { text, content };
-}
 
 function stripPrivateReasoning(value) {
   return String(value || "")
@@ -3445,7 +3521,6 @@ async function callProviderRoute(input, thread) {
 }
 
 async function generateReply({ input, incomingUserMessage, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
-  if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
   if (!customProvider && savedModelRoute?.provider === "custom") {
     customProvider = savedModelRoute.customProvider;
@@ -3453,6 +3528,24 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   }
   if (!customProvider) throw new Error("frontend_custom_model_route_required");
   provider = "custom";
+  const characterThoughtEnabled = !callMode && !desktopCompanion;
+  const perceived = characterThoughtEnabled && !proactive
+    ? await observeCompanionMessage(thread, incomingUserMessage, { model, customProvider }) : null;
+  if (characterThoughtEnabled && proactive && process.env.MURMUR_SERVICE_URL) {
+    const silence = silenceContext(availableChatHistory(thread), null, Date.now());
+    if (silence.kind === "seen_without_reply" && silence.anchor) {
+      try {
+        if (await nativeMurmur.detect()) {
+          const event_id = "unanswered:" + createHash("sha256").update(JSON.stringify([thread.id, silence.anchor])).digest("hex");
+          await nativeMurmur.update({ event_id, source: "unanswered", dimensions: { longing: 0.05 }, trigger: "聊天里显示过自己的回复，之后暂未收到新消息" });
+        }
+      } catch (error) { console.warn("[companion-emotion] unanswered event unavailable", error.name); }
+    }
+  }
+  const turnEmotionState = desktopCompanion ? null : await refreshMurmurState(thread?.id || "default", {
+    online: !proactive && (callMode || Boolean(incomingUserMessage && perceived === null)),
+    includeHistory: characterThoughtEnabled
+  });
   // Compaction is scheduled after the chat turn is persisted; never block
   // the foreground HTTP request with multiple upstream distillation calls.
   const compactionApplied = false;
@@ -3478,6 +3571,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   if (!callMode && !proactive && !system.includes("【聊天选项卡】")) system += "\n\n【聊天选项卡】只在确实等待言言做选择时，在可见回复最末尾加 [选项:选项一|选项二|选项三]。提供2到4个可直接发送的短选项，每项不超过12字；并非每个问题都给，一天两三次以内。标记由客户端隐藏，言言点选后作为普通消息发出。不要在其他位置重复标记。";
   if (!callMode && !proactive && !system.includes("【抽屉】")) system += `\n\n【抽屉：如何实际添加内容】抽屉是你可以主动使用的私密收藏夹。用户明确说“放进抽屉”“帮我留着”“把这句收起来”等要求时，本轮必须添加一项；根据内容选择便签或像素画，并在正常回复之外输出对应的完整隐藏标记。便签格式：[[DRAWER:text]]这里写要保存的原文或便签[[/DRAWER]]。例如：[[DRAWER:text]]今天我们聊到这件事时，我觉得很开心。[[/DRAWER]]。像素画格式：[[DRAWER:pixel]]{"w":3,"h":3,"palette":["transparent","#e85d75"],"grid":[0,1,0,1,1,1,0,1,0]}[[/DRAWER]]；JSON 必须有效，w/h 为 1–64，palette 第 0 项必须是透明色，grid 必须有 w*h 个合法颜色索引。标记直接作为回复的一部分输出，不要放进代码围栏；服务端会自动保存并从可见聊天正文和朗读内容中移除。用户没明确要求时，只在确实值得以后回看的时刻偶尔添加，不要频繁添加。不要在正文里解释标记，也不要在没有实际输出标记时声称已放入抽屉。`;
   // Apply feature and mode adjustments before attaching the editable text.
+  if (characterThoughtEnabled) system += "\n\n" + thoughtFormat;
   system = persona + CHAT_PROMPT_SEPARATOR + system;
   const summaryText = thread.contextSummary;
   const hasCompactedContext = Boolean(thread.compactedAt);
@@ -3639,9 +3733,14 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? `\n<sentinel_action_rule>每次自主唤醒都必须实际联系言言或完成一次已启用的自主行动。只有 fatigue（疲惫）达到 0.85，或 anger（生气）达到 0.90 时，才允许选择 none；否则从当前提供的 message 或 screen 中选择。不要因为犹豫、没话题或怕打扰而选择 none。当前疲惫=${Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2)}，生气=${Number(sharedEmotionState.drives?.anger || 0).toFixed(2)}。</sentinel_action_rule>`
     : "";
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
-  const characterThoughtDirective = !callMode && !desktopCompanion
-    ? '\n<character_voice>在可发给对方的话之前，用 <companion_thought>…</companion_thought> 写一两句角色自己的第一人称心声。写此刻从对方的话里留意到的具体细节，以及它在你心里引起的感受、念头或记忆。让当前情绪改变语气和留意的细节，正文再自然接话。心声只写角色叙事，正文独立完整。用既有 emotion_update 格式只记录本轮确实引起的情绪变化。</character_voice>'
-    : "";
+  const expression = characterThoughtEnabled ? companionExpression({
+    state: emotionStateAfterReset(thread, turnEmotionState),
+    ...nativeEmotionCalibration, history: availableChatHistory(thread), incoming: incomingUserMessage,
+    previous: !thread.contextResetAt || thread.companionExpression?.at >= Date.parse(thread.contextResetAt)
+      ? thread.companionExpression : null
+  }) : null;
+  const characterThoughtDirective = characterThoughtEnabled ? "\n" + thoughtTurn : "";
+  const expressionSuffix = expression?.text ? "\n" + expression.text : "";
   const wakeSceneDirective = wakeSceneTriggers && thread.id === proactiveSettings.threadId &&
     (!proactive || proactiveSettings.enabled)
     ? wakeSceneContext(thread.wakeScenes, wakeSceneTriggers, Date.now())
@@ -3694,7 +3793,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
     ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天内容宽度，页面背景保持透明，内容垂直自然展开，避免内部滚动、固定宽高或使用视口高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
-  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}${characterThoughtDirective}`;
+  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`;
   const requestFailureContext = !callMode && !desktopCompanion
     ? await requestFailures.context(thread.id, thread.contextResetAt).catch(error => {
       console.warn(`request failure history unavailable: ${error.message}`);
@@ -3755,6 +3854,12 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
         { role: "user", content: currentTurnContent, images }
       ];
   if (!exactCachedPrefix) cacheRequestMessages = injectBooks(cacheRequestMessages, activation.entries.filter(e => !e.position.endsWith("SYSTEM_PROMPT")));
+  const finalTurnSuffix = characterThoughtDirective + expressionSuffix;
+  if (finalTurnSuffix) {
+    const lastUserIndex = cacheRequestMessages.findLastIndex(message => message.role === "user");
+    const lastUser = cacheRequestMessages[lastUserIndex];
+    cacheRequestMessages[lastUserIndex] = { ...lastUser, content: lastUser.content + finalTurnSuffix };
+  }
   thread.worldBookSignature = worldBookSignature;
   // Compare the actual cache boundary in this request with the preceding
   // keepalive. Only hashes and booleans are stored; prompts stay private.
@@ -3872,9 +3977,12 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const thought = readCompanionThought(raw);
   const wakeSceneOutput = extractWakeSceneActions(thought.content);
   raw = wakeSceneOutput.content;
-  if (characterThoughtDirective) raw = stripPrivateReasoning(raw);
+  if (characterThoughtEnabled) {
+    raw = stripPrivateReasoning(raw).replace(/<(character_voice|companion_expression)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/gi, "");
+    thread.companionExpression = expression.next;
+  }
   const wakeSceneActions = wakeSceneDirective ? wakeSceneOutput.actions : [];
-  const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id);
+  const emotionUpdate = await applyEmotionUpdateFromOutput(raw, thread.id, { toolCalls, perceived: perceived || [] });
   if (emotionUpdate) await saveEmotionState();
   let cleanedRaw = (callMode
     ? raw.replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "").replace(/<thinking\b[^>]*>/gi, "").replace(/<\/thinking>/gi, "")
@@ -3953,7 +4061,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       ? { ...message, content: message.content.replace(requestFailureSuffix, "") }
       : message);
   const safeModelContent = raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  return { wakeSceneActions, requestFailureIDs: requestFailureContext.ids, commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { wakeSceneActions, requestFailureIDs: requestFailureContext.ids, commandFeedbackIDs: commandFeedback.map(item => item.id), foodToolUsed, content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, dreamRecallConsumed: Boolean(dreamRecall), galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent: userModelContent + finalTurnSuffix, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -5221,7 +5329,7 @@ const server = createServer(async (req, res) => {
       return send(res, 405, { error: "method_not_allowed" });
     }
     const callRoute = /^\/v1\/chats\/[^/]+\/calls(?:\/[^/]+(?:\/(?:answer|messages|end))?)?$/.test(url.pathname);
-    if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/settings/solo", "/v1/solo/metrics", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
+    if ((["/v1/settings/proactive", "/v1/settings/context-compression", "/v1/settings/solo", "/v1/solo/metrics", "/v1/push/register", "/v1/push/voip/register", "/v1/push/presence", "/v1/push/message-read"].includes(url.pathname) || callRoute) && !pushRequestAuthorized(req)) {
       return send(res, 401, { error: "unauthorized" });
     }
 
@@ -5465,6 +5573,20 @@ const server = createServer(async (req, res) => {
       voipTokens = [item, ...voipTokens.filter((entry) => entry.token !== token)];
       await saveVoIPTokens();
       return send(res, 200, { registered: true });
+    }
+    if (url.pathname === "/v1/push/message-read" && req.method === "POST") {
+      const { threadId, messageId } = await body(req);
+      if (typeof threadId !== "string" || typeof messageId !== "string" || !/^[\da-f-]{36}$/i.test(messageId)) {
+        return send(res, 400, { error: "invalid_message_read" });
+      }
+      const thread = (await readThreads())[threadId];
+      const message = thread && availableChatHistory(thread).findLast(item =>
+        item.role === "assistant" && (!item.contentType || item.contentType === "text") && item.content?.trim());
+      if (!message || message.id.toLowerCase() !== messageId.toLowerCase()) return send(res, 404, { error: "message_not_found" });
+      if (!message.readAt) await persistChatThread(threadId, {
+        contextResetAt: thread.contextResetAt
+      }, { receiptId: message.id });
+      return send(res, 200, { recorded: true });
     }
     if (url.pathname === "/v1/push/presence" && req.method === "POST") {
       const input = await body(req);
@@ -6519,6 +6641,7 @@ const server = createServer(async (req, res) => {
         const expired = incomingActivity.sleepUntil && Date.parse(incomingActivity.sleepUntil) <= Date.now();
         const decision = expired ? "natural" : sleepMessageDecision({ sleeping: true, count: incomingActivity.sleepMessageCount, roll: Math.random(), probability: sleepReplyProbability });
         if (decision === "defer") {
+          await observeCompanionMessage(threads[id], storedUserMessage, { model: selectedModel, customProvider });
           incomingActivity.lastUserActivityAt = storedUserMessage.createdAt;
           await persistChatThread(id, threads[id]);
           return deferredSleepResponse(storedUserMessage, incomingActivity, updatedOptionMessage);
