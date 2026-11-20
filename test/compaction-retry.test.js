@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rename, unlink, rm } from 'node:fs
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
+import { userMessageTimeLabel } from '../src/user-message-timing.js';
 import { contextSummaryMessages, distillContextBatch } from '../src/context-summary.js';
 
 import { requestInputTokens } from '../src/context-budget.js';
@@ -20,7 +21,7 @@ async function harness(t, callModel) {
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const context = { URL, dataDir, join, createHash, randomUUID, mkdir, readFile, writeFile, rename, unlink,
     process: { env: {} }, contextLimitTokens: 380000, console, callModel, historicalModelContent: value => value,
-    contextSummaryMessages, requestInputTokens, distillContextBatch,
+    contextSummaryMessages, requestInputTokens, distillContextBatch, userMessageTimeLabel,
     estimateTokens: value => requestInputTokens({ system: value }) - 1 };
   vm.createContext(context);
   vm.runInContext(source.slice(start, end) + source.slice(historyStart, historyEnd), context);

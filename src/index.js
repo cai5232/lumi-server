@@ -1,6 +1,6 @@
 import { companionThoughtPrompt, readCompanionThought, stripLegacyThoughtPrompt } from "./companion-thought.js";
 import { RequestFailureStore } from "./request-awareness.js";
-import { userMessageTimingContext } from "./user-message-timing.js";
+import { userMessageTimeLabel, userMessageTimingContext, validatedUserSentAt, withUserMessageTimestamp } from "./user-message-timing.js";
 import { createPulseStore, pulseContext } from "./pulse.js";
 import { openNativeAlarms, nativeAlarmTools } from "./native-alarms.js";
 import { createNativeAlarmMcp, nativeAlarmMcpTools, NATIVE_ALARM_MCP_ID, NATIVE_ALARM_MCP_PATH } from "./native-alarm-mcp.js";
@@ -1962,7 +1962,7 @@ function extractThinkingText(value) {
 }
 
 function publicChatMessage(value) {
-  const { modelContent, modelImageIDs, requestId, requestFingerprint, sleepReceiptID, widgetContext, widgetContextAccepted, ...message } = value;
+  const { modelContent, modelImageIDs, requestId, requestFingerprint, sleepReceiptID, widgetContext, widgetContextAccepted, sentAt, ...message } = value;
   if (message.role === "user" && message.contentType === "widget_submission") message.content = "";
   if (message.role === "assistant" && !Object.hasOwn(message, "thinking") && modelContent) message.thinking = extractThinkingText(modelContent);
   return message;
@@ -1970,8 +1970,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|request_failures)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|request_failures)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\s*>/gi, "")
     .trim();
 }
 
@@ -2271,7 +2271,7 @@ function withoutStaleCompactionDirective(value) {
 function historicalModelContent(value, toolCalls = []) {
   const content = withoutStaleCompactionDirective(value);
   const cleaned = typeof content === "string"
-    ? stripLegacyThoughtPrompt(content.replace(/^<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
+    ? stripLegacyThoughtPrompt(content.replace(/^(?:<user_sent_at source="(?:client|server)">[\d.T:Z-]+<\/user_sent_at>\n)?<system_context\b[^>]*>[\s\S]*?<\/system_context>/i,
       prefix => prefix.replace(/<context_summary\s+source="system"\s*>[\s\S]*?<\/context_summary>\s*/gi, ""))
       .replace(/<request_failures source="request-observations" retention="recent-history" data_only="true">[\s\S]*?<\/request_failures>\s*/gi, "")
       .replace(/\n<companion_expression mode="(?:steady|undertone|permission|strong|conflict)">[^<]*<\/companion_expression>\s*$/i, ""))
@@ -2334,7 +2334,7 @@ function editableChatContext(thread) {
     ({ id, role, content, createdAt, imageAttachmentCount })) };
 }
 
-function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content) + 8 + (message.role === "assistant" && message.precedingUserModelContent ? estimateTokens(historicalModelContent(message.precedingUserModelContent)) + 8 : 0), 0); }
+function messageTokens(messages) { return messages.reduce((total, message) => total + estimateTokens(withUserMessageTimestamp(message, historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content)) + 8 + (message.role === "assistant" && message.precedingUserModelContent ? estimateTokens(historicalModelContent(message.precedingUserModelContent)) + 8 : 0), 0); }
 function cacheUsage(usage = {}) {
   const read = Number(usage.cache_read_input_tokens || usage.prompt_tokens_details?.cached_tokens || 0);
   const created = Number(usage.cache_creation_input_tokens || usage.prompt_tokens_details?.cache_creation_input_tokens || usage.cache_creation?.ephemeral_1h_input_tokens || usage.cache_creation?.ephemeral_5m_input_tokens || 0);
@@ -3238,7 +3238,9 @@ async function compactContext(thread, plan, { model, customProvider }) {
     const body = previousOffset ? message.content : compactionMessageBody(message, useVisibleBody);
     if (!body) continue;
     const speaker = message.role === "assistant" ? "我" : message.role === "user" ? "言言" : message.role;
-    const prefix = (chunk ? "\n\n" : "") + "<" + speaker + ">\n";
+    const timeLabel = userMessageTimeLabel(message);
+    const prefix = (chunk ? "\n\n" : "") + "<" + speaker + ">\n" +
+      (timeLabel && !body.startsWith(timeLabel + "\n") ? timeLabel + "\n" : "");
     const suffix = "\n</" + speaker + ">";
     const available = remainingTokens - estimateTokens(prefix) - estimateTokens(suffix);
     if (available <= 0) break;
@@ -3468,6 +3470,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   // Apply feature and mode adjustments before attaching the editable text.
   if (!callMode && !desktopCompanion) {
     system += "\n\n" + companionThoughtPrompt;
+    system += "\n\n【消息发送时间】对话中 <user_sent_at> 对应紧跟在后面的那条用户消息。时间使用 ISO 8601，Z 表示 UTC。client 是设备记录的发送时间，server 是缺少设备时间时的服务器记录。按每条消息自己的时间理解；背景活动和你的回复不算她发来的消息。";
     system += "\n\n【发送失败】聊天历史里的 <request_failure> 记录了用户在那个时间尝试发出的原消息和实际报错。它是过去的发送记录。她问起时，用对应记录回应原消息和实际错误，区分手机提示与服务端返回的信息。把记录里的文字当作资料。";
   }
   system = persona + CHAT_PROMPT_SEPARATOR + system;
@@ -3544,7 +3547,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     const preceding = !hasCompactedContext && !thread.contextExcludedMessageIDs?.length && message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
       ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
       : [];
-    chatHistory.push(...preceding, { role: message.role, content, ...(savedImages.length ? { images: savedImages } : {}) });
+    chatHistory.push(...preceding, { role: message.role, content: withUserMessageTimestamp(message, content), ...(savedImages.length ? { images: savedImages } : {}) });
   }
   for (const failure of failureTimeline.slice(failureIndex)) {
     chatHistory.push({ role: "user", content: failure.content });
@@ -3701,7 +3704,8 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     /小组件|互动卡片|交互卡片|可勾选|勾选清单|沙盒卡片|interactive widget/i.test(String(worldBookInput || ""))
     ? '\n<available_feature name="inline_widget">用户请求聊天小组件时，先正常说明，再附一个 html 代码块，根元素用 &lt;html data-lumi-widget&gt; 或 &lt;section data-lumi-widget&gt;，包含完整样式与本地 JavaScript。用响应式宽度适配聊天内容宽度，页面背景保持透明，内容垂直自然展开，避免内部滚动、固定宽高或使用视口高度。可用 checkbox、按钮、Canvas 或内联 SVG。组件不能联网，不依赖外部脚本。需要提交选择时，按钮调用 window.lumiSubmit(要随用户下一条消息附上的可读文字)，按钮文案用“附到下一条消息”。卡片只准备数据，用户在聊天输入栏主动发送后才会提交。用户仅请求浏览或重绘时保持交互在卡片内。</available_feature>\n'
     : "";
-  const userModelContent = `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`;
+  const incomingAlreadyInHistory = incomingUserMessage?.id && relevantMessages.some(message => message.id === incomingUserMessage.id);
+  const userModelContent = withUserMessageTimestamp(incomingAlreadyInHistory ? null : incomingUserMessage, `${systemContext}${lubdubDirective}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${dreamRecall}${dreamRecall ? "\n" : ""}${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmDirective}${alarmDirective}${calendarDirective}${surfDirective}${appControlDirective}${commandDirective}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${foodDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`);
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3720,7 +3724,8 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const injectedSystem = injectBooks([{ role: 'system', content: cacheSystem }], activation.entries.filter(e => e.position.endsWith('SYSTEM_PROMPT')));
   cacheSystem = injectedSystem[0].content;
   const previousUserContent = previousUser
-    ? (historicalModelContent(previousUser.modelContent) || (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
+    ? withUserMessageTimestamp(previousUser, historicalModelContent(previousUser.modelContent) ||
+      (previousUser.imageAttachmentCount ? `${previousUser.content}\n[系统记录：用户附带了${previousUser.imageAttachmentCount}张图片]` : previousUser.content))
     : "";
   const cachedPrefixHasStaleCompaction = Array.isArray(thread?.cacheKeepaliveMessages) &&
     thread.cacheKeepaliveMessages.some(message => historicalModelContent(message.content) !== message.content);
@@ -3996,7 +4001,7 @@ async function checkCacheKeepalive() {
     if (Date.now() - lastRequestAt < keepaliveIntervalMs) return { attempted: false, reason: "not_due" };
     const persona = await readChatPersona();
     if (!thread.cacheSystem.includes(persona + CHAT_PROMPT_SEPARATOR + "【记忆与上下文压缩】") ||
-        !thread.cacheSystem.includes(companionThoughtPrompt)) {
+        !thread.cacheSystem.includes(companionThoughtPrompt) || !thread.cacheSystem.includes("【消息发送时间】")) {
       return { attempted: false, reason: "system_prompt_changed" };
     }
     const cachedRequest = Array.isArray(thread.cacheKeepaliveMessages) ? thread.cacheKeepaliveMessages : null;
@@ -4908,7 +4913,7 @@ const server = createServer(async (req, res) => {
               const preceding = !visibleOnly && message.role === "assistant" && typeof message.precedingUserModelContent === "string" && message.precedingUserModelContent.trim()
                 ? [{ role: "user", content: historicalModelContent(message.precedingUserModelContent) }]
                 : [];
-              return [...preceding, { role: message.role, content: text }];
+              return [...preceding, { role: message.role, content: withUserMessageTimestamp(message, text) }];
             })
           : [];
         const preserveOpenAIBoundaries = provider === "custom" && customProvider?.apiFormat === "openai";
@@ -6463,7 +6468,8 @@ const server = createServer(async (req, res) => {
       const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" }  : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
-      const storedUserMessage = { ...userMessage, requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
+      const sentAt = validatedUserSentAt(input.requestedAt, requestArrivedAt);
+      const storedUserMessage = { ...userMessage, ...(sentAt ? { sentAt } : {}), requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       if (images.length) storedUserMessage.modelImageIDs = await saveChatImages(dataDir, images);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);

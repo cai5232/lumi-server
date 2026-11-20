@@ -52,7 +52,7 @@ globalThis.fetch=async(url,options={})=>{
         const path=join(directory,'threads.json');
         const threads=JSON.parse(await readFile(path,'utf8'));
         const cached=threads.default.cacheKeepaliveMessages;
-        const user=cached.find(m=>m.role==='user'&&m.content.startsWith('<system_context'));
+        const user=cached.find(m=>m.role==='user'&&m.content.includes('<system_context'));
         user.content=user.content.replace('</system_context>',`<context_summary source="system">${summary}</context_summary></system_context>`);
         await writeFile(path,JSON.stringify(threads));
       }

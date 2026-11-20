@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { userMessageTimingContext } from "../src/user-message-timing.js";
+import { userMessageTimingContext, validatedUserSentAt, withUserMessageTimestamp } from "../src/user-message-timing.js";
 
 const now = Date.parse("2026-11-18T18:45:00.000Z");
 const at = secondsAgo => new Date(now - secondsAgo * 1000).toISOString();
@@ -34,4 +34,18 @@ test("a first chat or an empty thread never invents a previous send time", () =>
   const timing = userMessageTimingContext([], { incoming: message("first", 0), now });
   assert.match(timing, /elapsed_seconds="0"/);
   assert.doesNotMatch(timing, /previous_gap_seconds/);
+});
+
+test("each historical user message uses its own validated device or server timestamp", () => {
+  const sentAt = validatedUserSentAt("2026-11-19T02:40:00+08:00", now);
+  assert.equal(sentAt, at(300));
+  assert.equal(validatedUserSentAt(at(-1), now), undefined);
+  assert.equal(validatedUserSentAt("not-a-time", now), undefined);
+  assert.equal(validatedUserSentAt("2026-11-18", now), undefined);
+  const tagged = withUserMessageTimestamp(message("device", 5, { sentAt }), "这条在五分钟前发");
+  assert.equal(tagged, `<user_sent_at source="client">${at(300)}</user_sent_at>\n这条在五分钟前发`);
+  assert.equal(withUserMessageTimestamp(message("device", 5, { sentAt }), tagged), tagged);
+  assert.equal(withUserMessageTimestamp(message("legacy", 80), tagged), `<user_sent_at source="server">${at(80)}</user_sent_at>\n这条在五分钟前发`);
+  assert.equal(withUserMessageTimestamp(message("widget", 3, { contentType: "widget_submission" }), "内部状态"), "内部状态");
+  assert.match(userMessageTimingContext([message("device", 5, { sentAt })], { now }), /elapsed_seconds="300"/);
 });

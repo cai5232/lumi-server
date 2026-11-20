@@ -1,3 +1,5 @@
+import { stripLegacyThoughtPrompt } from "../src/companion-thought.js";
+import { userMessageTimeLabel, withUserMessageTimestamp } from "../src/user-message-timing.js";
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
@@ -10,7 +12,7 @@ import {extractCompleteContextSummary, isNormalModelCompletion, distillContextBa
 import { requestInputTokens } from "../src/context-budget.js";
 
 const source = await readFile(new URL('../src/index.js', import.meta.url), 'utf8');
-const context = {};
+const context = { stripLegacyThoughtPrompt, userMessageTimeLabel, withUserMessageTimestamp };
 vm.createContext(context);
 vm.runInContext(source.slice(source.indexOf('function withoutStaleCompactionDirective('), source.indexOf('\nfunction contextMessages(')), context);
 
@@ -39,14 +41,14 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   const dataDir = await mkdtemp(join(tmpdir(), 'lumi-history-'));
   t.after(() => rm(dataDir, {recursive:true, force:true}));
   const summary = 'old-summary'.repeat(5000);
-  const messages = [{id:'a',role:'user',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
+  const messages = [{id:'a',role:'user',createdAt:'2026-11-19T12:00:03.000Z',content:'原文',modelContent:`<system_context><context_summary source="system">${summary}</context_summary></system_context>原文`}];
   const calls = [];
   Object.assign(context, {dataDir, join, createHash, randomUUID, readFile, mkdir, writeFile, rename, unlink, process:{env:{}}, contextLimitTokens:380000, console, messageTokens:undefined, estimateTokens:value => String(value || '').length,
     callModel:async request => {calls.push(request);return {content:'<context_summary>新摘要</context_summary>', finishReason:'stop'};},
     extractCompleteContextSummary, isNormalModelCompletion, distillContextBatch, contextSummaryMessages, requestInputTokens, contextMessages: thread => thread.messages});
   vm.runInContext(source.slice(source.indexOf('function messageTokens('), source.indexOf('\nfunction cacheUsage(')), context);
   vm.runInContext(source.slice(source.indexOf('function compactionMessageBody('), source.indexOf('\nconst backgroundCompactionJobs')), context);
-  assert.ok(context.messageTokens(messages) < 100);
+  assert.ok(context.messageTokens(messages) < 200);
   const hidden = {role:'assistant',content:'回复',precedingUserModelContent:messages[0].modelContent};
   assert.ok(context.messageTokens([hidden]) > context.messageTokens([{role:'assistant',content:'回复'}]));
   assert.ok(context.messageTokens([hidden]) < 150, 'hidden history is counted after summary deduplication');
@@ -61,6 +63,7 @@ test('token estimates and compaction batches use the same cleaned history', asyn
   assert.ok(calls[0].messages[1].content.includes('原文'));
   assert.ok(calls[0].messages[1].content.includes(JSON.stringify(executed)), 'compaction must receive the actual tool result');
   for (const label of ['<言言>','</言言>','<我>','</我>']) assert.ok(calls[0].messages[1].content.includes(label));
+  assert.match(calls[0].messages[1].content, /<言言>\n<user_sent_at source="server">[^<]+<\/user_sent_at>/);
   assert.ok(!calls[0].messages[1].content.includes('<assistant>'));
   assert.ok(!calls[0].messages[1].content.includes('<user>'));
   assert.equal(thread.contextSummary, '新摘要');

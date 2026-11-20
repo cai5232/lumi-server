@@ -49,8 +49,10 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
       await new Promise(resolve => setTimeout(resolve, 50));
     }
     assert.ok(ready);
+    const deviceSentAt = new Date(Date.now() - 120 * 60_000).toISOString();
     for (const content of ['拿刚才的小失误开个玩笑', '抱抱，还想着刚才的事吗']) {
-      const result = await fetch(`${base}/v1/chats/default/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } }) });
+      const requestedAt = content.startsWith('拿') ? deviceSentAt : undefined;
+      const result = await fetch(`${base}/v1/chats/default/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, requestedAt, provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } }) });
       assert.equal(result.status, 200);
       const data = await result.json();
       assert.equal(typeof data.assistantMessage?.content, 'string');
@@ -60,10 +62,14 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
       assert.doesNotMatch(data.assistantMessage.content, /<emotion_update|<lumi_pulse|内部状态|"changes"/);
     }
     assert.equal(requests.length, 2);
+    const priorUser = requests[1].messages.filter(m => m.role === 'user').at(0).content;
+    assert.ok(priorUser.startsWith(`<user_sent_at source="client">${deviceSentAt}</user_sent_at>`));
     const nextInput = requests[1].messages.filter(m => m.role === 'user').at(-1).content;
     assert.match(nextInput, /触发：她拿刚才的小失误打趣/);
     assert.match(nextInput, /被逗乐了/);
     assert.match(nextInput, /促狭\+0.02/);
+    assert.match(nextInput, /^<user_sent_at source="server">[^<]+<\/user_sent_at>/);
+    assert.notEqual(priorUser.split('\n')[0], nextInput.split('\n')[0]);
     const system = requests[1].messages.find(m => m.role === 'system').content;
     assert.match(system, /先结合完整对话理解言言此刻的意思与感受/);
     assert.match(system, /不要求每轮变化/);
@@ -123,7 +129,16 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     assert.equal(contact?.content, '我醒了，来看看你。');
     assert.equal(contact.wakeStep.succeeded, true);
     assert.ok(Date.parse(contact.wakeStep.occurredAt) >= Date.parse(run.startedAt));
-    const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
+    const wakeUsers = requests.at(-1).messages.filter(m => m.role === 'user');
+    const wakePrompt = wakeUsers.at(-1).content;
+    for (const [index, message] of sentMessages.entries()) {
+      const label = message.sentAt
+        ? `<user_sent_at source="client">${message.sentAt}</user_sent_at>`
+        : `<user_sent_at source="server">${message.createdAt}</user_sent_at>`;
+      assert.ok(wakeUsers[index].content.startsWith(label));
+      assert.equal((wakeUsers[index].content.match(/<user_sent_at /g) || []).length, 1);
+    }
+    assert.doesNotMatch(wakePrompt, /<user_sent_at /);
     assert.match(wakePrompt, /<autonomous_wake_context>/);
     assert.match(wakePrompt, /<sentinel_decision>.*nextWakeMinutes/);
     const wakeSystem = requests.at(-1).messages.find(m => m.role === 'system').content;

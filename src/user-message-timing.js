@@ -1,8 +1,29 @@
 const nonMessageTypes = new Set(["call_status", "widget_submission"]);
 
-function manualMessageTime(message) {
+export function validatedUserSentAt(value, receivedAt) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return undefined;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at <= receivedAt ? new Date(at).toISOString() : undefined;
+}
+
+export function manualMessageTime(message) {
   if (message?.role !== "user" || nonMessageTypes.has(message.contentType)) return NaN;
-  return Date.parse(message.createdAt);
+  const sent = Date.parse(message.sentAt);
+  return Number.isFinite(sent) ? sent : Date.parse(message.createdAt);
+}
+
+export function userMessageTimeLabel(message) {
+  const at = manualMessageTime(message);
+  if (!Number.isFinite(at)) return "";
+  const source = Number.isFinite(Date.parse(message.sentAt)) ? "client" : "server";
+  return `<user_sent_at source="${source}">${new Date(at).toISOString()}</user_sent_at>`;
+}
+
+export function withUserMessageTimestamp(message, content) {
+  const label = userMessageTimeLabel(message);
+  if (!label || typeof content !== "string" || content.startsWith(label + "\n")) return content;
+  const unlabelled = content.replace(/^<user_sent_at source="(?:client|server)">[\d.T:Z-]+<\/user_sent_at>\n/, "");
+  return label + "\n" + unlabelled;
 }
 
 function elapsedText(seconds) {
