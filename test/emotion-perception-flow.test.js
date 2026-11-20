@@ -122,8 +122,12 @@ test('contextual feeling, Pulse, and the autonomous wake record follow a real mo
     const wakePrompt = requests.at(-1).messages.findLast(m => m.role === 'user').content;
     assert.match(wakePrompt, /<autonomous_wake_context>/);
     assert.ok(wakePrompt.endsWith('</character_voice>'));
-    assert.match(wakePrompt, /约 800 个中文字符/);
-    assert.match(nextInput, /约 800 个中文字符/);
+    for (const prompt of [nextInput, wakePrompt]) {
+      assert.ok(prompt.includes('我这一条回复的第一个字，是 `[` 。没有例外。'));
+      assert.match(prompt, /至少 800 字符/);
+      assert.match(prompt, /写成连贯的长段意识流。不分点、不编号、不小标题/);
+      assert.match(prompt, /想到的东西最后必须以某种形式出现在正文里/);
+    }
     assert.doesNotMatch(wakePrompt, /<companion_expression\b/);
     assert.match(wakePrompt, /<lumi_pulse>当前模拟身体状态：心率 \d+ bpm/);
     const timing = wakePrompt.match(/<user_message_timing\b[^>]*>/)?.[0];
