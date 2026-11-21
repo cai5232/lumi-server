@@ -239,3 +239,60 @@ During calls, iOS may send a short `voiceContext` cue based on the speaker's own
 数据原子写入 `LUMI_DATA_DIR/keepsakes.json`，备份时包含此文件。部署服务端后再更新 iOS 客户端；无需另起 Python 服务或新增环境变量。AI 可以自主保存真实对话、回复发送给它的留言及补写前情；失败会留在可见回复中。私密留言不进入模型背景。实现参考 keepsake（MIT，© 2026 Elle & Matt）。
 
 验证：`node --test test/keepsakes.test.js test/keepsakes-api.test.js`，覆盖重启持久化、会话隔离、真实消息校验、并发留言、发送开关，以及一次真实 HTTP 聊天请求中 AI 收到留言并保存回复的完整路径。
+
+## Optional Kimi Code / Claude Agent SDK runtime
+
+The default remains the existing API route. The new runtime is disabled until configured and must be tested with the account's actual Kimi Code key. Pin: `@anthropic-ai/claude-agent-sdk` **0.3.330**. This is the genuine Claude Code runtime via its public SDK, not a rewritten agent loop or an OAuth subscription bridge.
+
+```text
+LUMI_HARNESS_ENABLED=true
+LUMI_KIMI_CODE_API_KEY=<Coolify secret>
+LUMI_KIMI_CODE_BASE_URL=https://api.kimi.com/coding/
+LUMI_KIMI_CODE_MODEL=kimi-for-coding
+LUMI_KIMI_CODE_CONTEXT_TOKENS=262144
+# Optional: default new and unconfigured chats to the Harness:
+# LUMI_CHAT_RUNTIME=kimi-harness
+# Optional: permit explicit frontend custom API presets alongside the managed API default:
+# LUMI_ALLOW_CUSTOM_API_ROUTES=true
+```
+
+`262144` is a conservative configured window, not a measured claim about the account. Confirm the model ID and account's window before increasing it. The effective input budget reserves 12K tokens; Lumi clamps its effective compaction trigger to the smaller of the frontend's configured value and 80% of this budget. The frontend's original setting is retained for API routes. No 380K assumption is applied to the SDK model.
+
+Persist **all of `LUMI_DATA_DIR`**, including `harness/config`, `harness/sessions`, and `harness/workspaces`. Keep **one application replica**: the existing JSON archive is not a distributed transactional database. Per-thread SDK requests have process and filesystem locks; the existing foreground/background priority and archive write queues remain in place. Auxiliary call/wake/desktop/distillation sessions are isolated and reconstructed from the correct thread, never appended to the primary chat transcript.
+
+Authenticated route selection (existing `LUMI_PUSH_API_TOKEN` Bearer header):
+
+- `GET /v1/chats/:id/runtime`: selection, model/window, effective compression policy, and last SDK/cache diagnostic; never returns the model key.
+- `PUT /v1/chats/:id/runtime`, body `{"runtime":"kimi-harness"}` or `{"runtime":"api"}`. Busy chats reject changes. A disabled or unconfigured selected Harness **fails closed**, without an API fallback.
+
+The SwiftUI message/call APIs, persisted message format, hidden business markers and cleaned text SSE events remain compatible. The SDK consumes real streamed model events internally and preserves supplied thinking; the existing frontend still receives cleaned text chunks and the final response after business processing. Raw SDK deltas are deliberately not forwarded as visible prose because they can contain private memory, tool and control markup. New clients can use the SDK adapter's normalized internal event callback for a separately reviewed live rendering pipeline.
+
+### Personality and instruction files
+
+`CLAUDE.md` references `prompts/identity.md`, `relationship.md`, and `personality.md` in their original order. The original prompt's whitespace and separator are retained. `src/prompt-files.js` assembles exact bytes and substitutes numbered slots in scene templates; `prompts/manifest.json` records the original hashes. `node --test test/prompt-files.test.js` verifies all migrated text. Frontend-edited persona remains in `chat-persona.json`; each runtime workspace imports its effective persona snapshot, and the same persona retains system-message priority. Rule files do not contain the conversation archive or retrieved long-term memories. Compaction, autonomy and voice templates load through their existing scene branches; Harness text-only turns omit the dedicated voice block.
+
+### Memory and tools
+
+Existing Nocturne automatic retrieval runs before generation as before. `memory_search` and `memory_write` reuse its REST bridge. If `LUMI_MEMORY_PASSWORD` already provides access to Nocturne's existing bucket API, `memory_get` and `memory_update` are also registered; no unsupported detail endpoint or alternative memory store is invented. Read/search never call write. Exact explicit writes are deduplicated within one turn, including a matching legacy `<memory>` marker. Nocturne's bridge accepts up to 3500 characters per write. Independently retrieved content is not automatically re-saved.
+
+Business MCP tools use the existing registry, execution code, authorization checks, tool trace and calendar change notifications. Claude Code's filesystem, shell, browser, skills, subagents and independent automatic memory are not exposed. SDK child credentials are constructed from an allowlist and use only the official Kimi Code endpoint. The application key, mail credentials and other provider credentials are not inherited.
+
+### Compaction and continuity
+
+Lumi remains the authority for emotional summaries and its exact 10–15-turn/~20K-token tail. The public SDK's compaction hooks do not promise exact retention of those original turns. Therefore production uses **application-managed automatic compaction and SDK session reconstruction**. Native automatic/idle compaction is disabled and guarded by `PreCompact`; unexpected `PostCompact`/compact-boundary events invalidate the turn and session. This is an explicit preservation choice, not a claim that native Claude Code compression implements Lumi's policy.
+
+The original distiller rules, summary completion checks, cursor, retries/cooldown, and archive retention remain intact. A successful summary, persona/tool/model change, API interlude, context edit or incomplete SDK run causes a fresh session built from Lumi's active original history. Normal matching turns restore the persisted session and send only the new message. Rebuild uses the public user-content input contract with clearly labeled historical role blocks, not modified private transcript files. If a transcript disappears before any model output or tool execution, the failed resume is invalidated and reconstructed once on the same Kimi route. Other failures return an error; the next request can reconstruct from Lumi's history. Session checkpoints are finalized only against the expected visible archive, so an unsuccessful archive write cannot silently reuse divergent history.
+
+### Cache and compatibility verification
+
+Kimi Code subscription caching is **not** assumed to match the existing ZenMux one-hour configuration. The SDK uses the provider/CLI default; diagnostics label TTL as `provider_default_unverified`. Usage records separate runtime, new/resume/rebuild mode, actual per-call input/cache tokens and aggregate usage. The SDK's Claude dollar estimates are not reported as Kimi billing. No subscription cache keepalive or unrelated provider retry is introduced.
+
+Run the synthetic-data-only live probe with the key in the environment:
+
+```bash
+node scripts/probe-kimi-harness.mjs
+```
+
+It verifies actual authentication, streamed text, project instructions, MCP tool use and disk session restoration. Set `LUMI_PROBE_IMAGE_DATA_URL` to a synthetic PNG/JPEG fixture to test vision. Set `LUMI_PROBE_NATIVE_COMPACTION=true` to separately test the native `/compact` command and PreCompact/PostCompact observations, then a post-compact recall turn. This experiment never enables native compaction in production. Its JSON report explicitly distinguishes observed behavior from unverified cache duration/billing. Never use private chat history for the probe. Local SDK contract tests use a synthetic HTTP service and are not evidence of real-provider compatibility.
+
+References: [Kimi's Claude Code guide](https://www.kimi.com/code/docs/third-party-tools/claude-code.html), [Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview), [system prompt and project instructions](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts), [compaction hooks](https://code.claude.com/docs/en/hooks), [sdk-api-switch architecture notes](https://github.com/ikeepafish/sdk-api-switch), [application-owned continuity reference](https://github.com/vellwarren/the-conversation-is-yours). The latter two are conceptual references; their OAuth credential setup, private transcript reconstruction and one-hour subscription-cache assumptions are not adopted.

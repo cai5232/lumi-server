@@ -1,3 +1,4 @@
+import { promptText, promptTemplate } from "../src/prompt-files.js";
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -14,7 +15,7 @@ for (const explicit of [true, false]) {
     const provider = { baseURL: 'https://example.invalid/v1', apiKey: 'test-only' };
     const route = { provider: 'custom', model: 'chosen-model', customProvider: provider };
     const context = {
-      serverZenMuxRoute: null,
+      promptText, promptTemplate, serverZenMuxRoute: null, process: {env:{}}, harnessRoutes: {route: async()=>null}, availableChatHistory: thread=>thread.messages, companionMessageTiming: ()=>"",
       normalizeCustomProvider: value => value,
       resolveMurmurRoute: async (id) => { assert.equal(id, 'default'); return route; },
       readThreads: async () => ({ default: { messages: [], lastChatProvider: 'custom' } }),
