@@ -25,7 +25,7 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     if (!body.stream) { res.setHeader('content-type','application/json'); res.end(JSON.stringify({ id: 'msg_contract', type:'message', role:'assistant', model: body.model, content:blocks, stop_reason:stop, usage })); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const emit = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
-    emit('message_start', { message: { id: `msg_${bodies.length}`, type:'message', role:'assistant', model:body.model, content:[], stop_reason:null, usage:{...usage,output_tokens:0} } });
+    emit('message_start', { message: { id: `msg_${bodies.length}`, type:'message', role:'assistant', model:body.model, content:[], stop_reason:null, usage:{...usage,cache_read_input_tokens:0,output_tokens:0} } });
     for (const [index, b] of blocks.entries()) {
       emit('content_block_start', { index, content_block: b.type === 'text' ? {type:'text',text:''} : {...b,input:{}} });
       emit('content_block_delta', { index, delta: b.type === 'text' ? {type:'text_delta',text:b.text} : {type:'input_json_delta',partial_json:JSON.stringify(b.input)} });
@@ -90,10 +90,13 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     const warm = await runtime.warm('thread');
     assert.equal(warm.attempted,true,JSON.stringify(warm));
     assert.equal(warm.hit,true);
+    assert.equal(warm.readTokens,64,'Use the final streamed cache usage');
     assert.equal(businessExecutions,executionsBeforeWarm,'Warming cannot execute business tools');
     assert.equal(await readFile(join(projectRoot,sessionFile),'utf8'),transcript,'Warm must not mutate primary transcript');
     assert.deepEqual(bodies[bodyCount].tools,bodies[bodyCount-1].tools,'Warm keeps the same tool prefix');
     assert.match(JSON.stringify(bodies[bodyCount]), /"ttl":"1h"/);
+    assert.match(JSON.stringify(bodies[bodyCount].messages), /RUNTIME_0/);
+    assert.match(JSON.stringify(bodies[bodyCount].messages), /RUNTIME_1/);
     await rm(join(config.root,'config','projects'),{recursive:true,force:true});
     const recovered=await runtime.run({...request,historyHash:'after-second',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_0'},{role:'assistant',content:'CONTRACT_OK'},{role:'user',content:'RECOVERED_TURN'}]});
     assert.equal(recovered.diagnostic.mode,'rebuild');

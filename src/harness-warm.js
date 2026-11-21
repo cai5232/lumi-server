@@ -40,7 +40,8 @@ export async function warmHarnessSession(config, state, { signal, loadSDK }) {
         forkId = m.session_id;
       }
       if (m.type === 'stream_event' && m.event?.type === 'message_start') usage = m.event.message.usage;
-      if (m.type === 'assistant' && m.message?.usage && (Number(m.message.usage.input_tokens || 0) + Number(m.message.usage.cache_read_input_tokens || 0))) usage = m.message.usage;
+      if (m.type === 'stream_event' && m.event?.type === 'message_delta' && m.event.usage) usage = { ...usage, ...m.event.usage };
+      if (m.type === 'assistant' && m.message?.usage && !usage) usage = m.message.usage;
       if (m.type === 'result' && !usage) usage = m.usage;
     }
     if (abort.signal.aborted) {
