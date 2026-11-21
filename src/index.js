@@ -1,3 +1,5 @@
+import { createAcpAuth } from './acp/auth.js';
+import { createAcpRuntime } from './acp/runtime.js';
 import { createNocturneTools } from "./nocturne-tools.js";
 import { harnessContextPolicy } from "./harness-context.js";
 import { harnessConfig } from "./harness-config.js";
@@ -66,6 +68,8 @@ const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const kimiHarnessConfig = harnessConfig();
 const kimiHarness = createHarnessRuntime(kimiHarnessConfig);
+const kimiAcp = createAcpRuntime(kimiHarnessConfig);
+const kimiAcpAuth = createAcpAuth(kimiAcp);
 const harnessRoutes = createHarnessRoutes(join(dataDir, "chat-runtimes.json"), kimiHarnessConfig);
 const harnessPending = new Map();
 const zenMuxKeyPath = join(dataDir, "zenmux-key.json");
@@ -2222,7 +2226,7 @@ async function searchAndSaveSurf(topic, threadID, context, { provider, model, cu
 const loadFriendCircleTools = createFriendCircleTools(process.env.LUMI_FRIEND_CIRCLE_HOST_DIR);
 
 async function callModel({ messages, harnessContext = null, maxOutputTokens, useMaximumModelOutput = false, cacheCurrentUser = true, onUsage, provider = "custom", model: requestedModel = "", mailThreadId = "", autonomous = false, customProvider = null, mcpThreadId = "", mcpRound = 0, disableThinkingRetry = false, emptyResponseRetried = false, proactive = false, toolTrace = [], circleAccess = null, nativeAlarmTurn = null, signal, returnMetadata = false, stream = true, knownInputTokens = null, singleAttempt = false, fitReplyHistory = false, onHistoryFitted }) {
-  if (serverZenMuxRoute && customProvider?.runtime !== "kimi-harness" && !(process.env.LUMI_ALLOW_CUSTOM_API_ROUTES === "true" && customProvider)) ({ provider, model: requestedModel, customProvider } = serverZenMuxRoute);
+  if (serverZenMuxRoute && !["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) && !(process.env.LUMI_ALLOW_CUSTOM_API_ROUTES === "true" && customProvider)) ({ provider, model: requestedModel, customProvider } = serverZenMuxRoute);
   if (provider !== "custom" || !customProvider) throw new Error("frontend_custom_model_route_required");
   let selected = customProvider;
   selected = { ...selected, model: requestedModel || selected.model };
@@ -2236,7 +2240,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     if (serverZenMuxRoute) throw Object.assign(new Error("请在 Lumi 设置中填写 ZenMux API Key"), { statusCode: 503 });
     throw new Error("模型服务尚未配置：请在 Zeabur 设置 LUMI_MODEL_API_URL、LUMI_MODEL_API_KEY、LUMI_MODEL_NAME");
   }
-  const isHarness = customProvider?.runtime === "kimi-harness";
+  const isHarness = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime);
   const isClaude = /anthropic|claude/i.test(model);
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
@@ -2423,7 +2427,8 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
       }
     };
     const startedAt = Date.now();
-    const result = await kimiHarness.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
+    const runtime = customProvider.runtime === "kimi-acp" ? kimiAcp : kimiHarness;
+    const result = await runtime.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
       persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash,
       tools: [...anthropicLocalTools, ...memoryTools], executeTool,
       maxOutputTokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
@@ -2437,7 +2442,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     cacheStats.cacheReadTokens += cache.read;
     cacheStats.cacheWriteTokens += cache.created;
     await saveCacheStats().catch(() => {});
-    await recordModelRequest({ id: randomUUID(), createdAt: new Date(startedAt).toISOString(), provider: "kimi-harness", model,
+    await recordModelRequest({ id: randomUUID(), createdAt: new Date(startedAt).toISOString(), provider: customProvider.runtime, model,
       status: 200, durationMs: Date.now() - startedAt, inputTokens: Number(usage.input_tokens || 0) + cache.read + cache.created,
       outputTokens: Number(usage.output_tokens || 0), cachedTokens: cache.read,
       harness: result.diagnostic, requestJSON: modelRequestLogJSON({ messages, tools: [...anthropicLocalTools, ...memoryTools] }),
@@ -2996,7 +3001,7 @@ function previousChatInputTokens(thread) {
 function compactionPlan(thread, projectedInputTokens = 0) {
   const messages = activeChatMessages(thread);
   const upstreamInputTokens = Math.max(previousChatInputTokens(thread), Number(projectedInputTokens || 0));
-  const trigger = thread.chatRuntime === "kimi-harness" ? harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot).triggerTokens : compressionSettings.snapshot.triggerTokensEstimate;
+  const trigger = ["kimi-harness", "kimi-acp"].includes(thread.chatRuntime) ? harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot).triggerTokens : compressionSettings.snapshot.triggerTokensEstimate;
   if (upstreamInputTokens < trigger) return null;
   const tail = preservedChatTail(messages, turns => activeHistoryTokens(thread, turns));
   const older = messages.slice(0, messages.length - tail.length);
@@ -3079,7 +3084,7 @@ async function compactContext(thread, plan, { model, customProvider }) {
   const nativeAnthropic = customProvider?.apiFormat === "anthropic";
   const directAnthropic = nativeAnthropic && customProvider.url &&
     new URL(customProvider.url).hostname === "api.anthropic.com";
-  const modelContextTokens = customProvider?.runtime === "kimi-harness" ? kimiHarnessConfig.contextTokens - 12000 : directAnthropic && sonnet55 ? 1_000_000 : contextLimitTokens;
+  const modelContextTokens = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) ? kimiHarnessConfig.contextTokens - 12000 : directAnthropic && sonnet55 ? 1_000_000 : contextLimitTokens;
   // Anthropic Messages requires max_tokens. OpenAI-compatible routes can use their own default.
   const promptTokens = requestInputTokens({ messages: contextSummaryMessages(summary, "") });
   const maxOutputTokens = nativeAnthropic
@@ -3301,7 +3306,7 @@ async function callProviderRoute(input, thread) {
 async function generateReply({ input, incomingUserMessage, worldBookInput = input, images = [], emojiCatalog = {}, allowSpeech = false, speechProvider = "", speechModel = "", systemPrompt, thread, proactive = false, sentinelActions = null, callMode = false, callHistory = [], provider = "", model = "", customProvider = null, signal = null, desktopCompanion = false, forceDesktopDanmaku = false, wakeSceneTriggers = null, nativeAlarmMessageID = null }) {
   if (!desktopCompanion) await refreshMurmurState(thread?.id || "default", { online: !proactive });
   const savedModelRoute = thread ? await resolveMurmurRoute(thread.id, thread) : null;
-  if (savedModelRoute?.customProvider?.runtime === "kimi-harness") {
+  if (["kimi-harness", "kimi-acp"].includes(savedModelRoute?.customProvider?.runtime)) {
     ({ model, customProvider } = savedModelRoute);
   } else if (serverZenMuxRoute && !(process.env.LUMI_ALLOW_CUSTOM_API_ROUTES === "true" && customProvider)) {
     ({ model, customProvider } = serverZenMuxRoute);
@@ -3319,7 +3324,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   // nudge-specific instruction is placed in the changing user suffix below.
   const persona = await readChatPersona();
   let system = CHAT_FEATURE_PROMPT;
-  if (customProvider?.runtime === "kimi-harness" && !callMode && !allowSpeech) system = system.replace(promptText("voice"), "");
+  if (["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) && !callMode && !allowSpeech) system = system.replace(promptText("voice"), "");
   const mailSettings = await mcpClientStore.read();
   system += promptText("rules-01");
   const mailToolsAvailable = !callMode && Boolean(thread?.id) &&
@@ -3660,7 +3665,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     });
   }
   let replyHistoryFitted = false;
-  const harnessTurn = customProvider?.runtime === "kimi-harness" ? {
+  const harnessTurn = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) ? {
     scope: callMode ? "call" : desktopCompanion ? "desktop" : proactive ? "wake" : "chat",
     persona, historyHash: historyFingerprint(modelChatMessages(thread)), receipt: null
   } : null;
@@ -3807,7 +3812,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     const expected = [...modelChatMessages(thread),
       ...(incomingUserMessage && !thread.messages.some(m => m.id === incomingUserMessage.id) ? [incomingUserMessage] : []),
       { role: "assistant", content, toolCalls }];
-    await kimiHarness.finalize(harnessTurn.receipt, historyFingerprint(expected));
+    await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected));
   }
   return { requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
@@ -6164,6 +6169,12 @@ const server = createServer(async (req, res) => {
     if (/^\/v1\/chats\/[^/]+\/widget-submissions$/.test(url.pathname)) {
       return send(res, 410, { error: "widget_submission_moves_with_next_message" });
     }
+    if (url.pathname === "/v1/settings/kimi-acp/auth") {
+      if (!pushRequestAuthorized(req)) return send(res,401,{error:"unauthorized"});
+      if (req.method === "POST") return send(res,200,await kimiAcpAuth.begin());
+      if (req.method === "GET") return send(res,200,await kimiAcpAuth.status());
+      return send(res,405,{error:"method_not_allowed"});
+    }
     const runtimeMatch = url.pathname.match(/^\/v1\/chats\/([^/]+)\/runtime$/);
     if (runtimeMatch) {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -6171,10 +6182,11 @@ const server = createServer(async (req, res) => {
       if (req.method === "PUT") {
         if (activeChatThreads.has(id) || harnessPending.has(id)) return send(res, 409, { error: "chat_busy" });
         const input = await body(req);
-        if (!["api", "kimi-harness"].includes(input.runtime)) return send(res, 400, { error: "invalid_chat_runtime" });
+        if (!["api", "kimi-harness", "kimi-acp"].includes(input.runtime)) return send(res, 400, { error: "invalid_chat_runtime" });
+        if (input.runtime === "kimi-acp" && (await kimiAcpAuth.status()).state !== "authorized") return send(res,409,{error:"请先完成 Kimi 账号登录"});
         await harnessRoutes.save(id, input.runtime);
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
-      return send(res, 200, { runtime: await harnessRoutes.selection(id), harness: { enabled: kimiHarnessConfig.enabled,
+      return send(res, 200, { runtime: await harnessRoutes.selection(id), acp: {enabled: process.env.LUMI_ACP_ENABLED === "true", authentication: "native-oauth"}, harness: { enabled: kimiHarnessConfig.enabled,
         configured: Boolean(kimiHarnessConfig.key), model: kimiHarnessConfig.model, contextTokens: kimiHarnessConfig.contextTokens,
         compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: kimiHarness.diagnostic(id) } });
     }
@@ -6356,7 +6368,7 @@ const server = createServer(async (req, res) => {
         catch (error) { return send(res, 400, { error: "custom_provider_invalid", detail: error.message }); }
         if (!customProvider || !selectedModel) return send(res, 400, { error: "custom_provider_or_model_required" });
       }
-      threads[id].chatRuntime = chosenHarnessRoute ? "kimi-harness" : "api";
+      threads[id].chatRuntime = chosenHarnessRoute?.customProvider.runtime || "api";
       const selectedInputBudget = chosenHarnessRoute ? harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot).inputBudget : contextLimitTokens;
       let foregroundCompactionAttempted = false;
       const result = (async () => {
