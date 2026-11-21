@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHarnessRuntime, reconstructInput } from '../src/harness-runtime.js';
@@ -37,11 +37,14 @@ test('persists disk session; resumes on exact application checkpoint; rebuilds o
   try {
     let runtime = createHarnessRuntime(config,{loadSDK});
     const first = await runtime.run(turn());
+    const personaPath=join(calls[0].options.cwd,'prompts','effective-persona.md');
+    const originalMtime=(await stat(personaPath)).mtimeMs;
     await runtime.finalize(first.receipt, 'archive-checkpoint');
     runtime = createHarnessRuntime(config,{loadSDK}); // backend restart
     const second = await runtime.run(turn({historyHash:'archive-checkpoint'}));
     assert.equal(calls[1].options.resume, 'session-1');
     assert.equal(second.diagnostic.mode,'resume');
+    assert.equal((await stat(personaPath)).mtimeMs,originalMtime,'unchanged rules must not trigger file-change context on resume');
     assert.equal(calls[1].capturedInput[0].message.content.length,1,'resume sends only the new turn');
     await runtime.finalize(second.receipt,'archive-checkpoint');
     const edited = await runtime.run(turn({historyHash:'edited-history'}));

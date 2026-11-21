@@ -1,9 +1,15 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { harnessEnvironment } from './harness-config.js';
 import { createHarnessState, fingerprint } from './harness-state.js';
 import { requestInputTokens } from './context-budget.js';
+
+async function writeRuleSnapshot(path, text) {
+  try { if (await readFile(path, 'utf8') === text) return; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await writeFile(path, text, { mode: 0o600 });
+}
 
 export function messageBlocks(message) {
   const blocks = typeof message.content === 'string'
@@ -96,8 +102,8 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         await mkdir(env.CLAUDE_CONFIG_DIR, { recursive: true });
         // This is a rule snapshot only, never a second memory database. The
         // effective editable persona also remains at system priority.
-        await writeFile(join(cwd, 'CLAUDE.md'), '@prompts/effective-persona.md\n', { mode: 0o600 });
-        await writeFile(join(cwd, 'prompts/effective-persona.md'), persona || system, { mode: 0o600 });
+        await writeRuleSnapshot(join(cwd, 'CLAUDE.md'), '@prompts/effective-persona.md\n');
+        await writeRuleSnapshot(join(cwd, 'prompts/effective-persona.md'), persona || system);
         const input = resume ? messageBlocks(messages.at(-1)) : reconstructInput(messages);
         const inputEstimate = requestInputTokens({ system, messages: [{ role: 'user', content: input }], tools });
         if (inputEstimate > config.contextTokens - Math.max(12000, maxOutputTokens + 4000)) {
