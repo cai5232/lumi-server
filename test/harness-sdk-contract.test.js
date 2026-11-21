@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
@@ -65,12 +65,13 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     assert.match(JSON.stringify(bodies.at(-1).messages), /TURN_0/);
     assert.match(JSON.stringify(bodies.at(-1).messages), /TURN_1/);
     assert.ok(bodies.every(b=>b.tools.every(t=>t.name.includes('probe_echo') || t.name === 'DeferredToolPlaceholder')),  'No built-in programming tools');
-    const config = {root:join(root,'runtime'),enabled:true,key:'synthetic-key',baseURL:`http://127.0.0.1:${upstream.address().port}`,model:'kimi-for-coding',contextTokens:262144,maxTurns:4};
+    const config = {root:join(root,'runtime'),enabled:true,key:'synthetic-key',baseURL:`http://127.0.0.1:${upstream.address().port}`,model:'kimi-for-coding',contextTokens:262144,maxTurns:4,keepaliveIntervalMs:1};
     const makeRuntime = () => createHarnessRuntime(config);
     let runtime = makeRuntime();
+    let businessExecutions = 0;
     const request = {threadId:'thread',persona:'PERSONA_EXACT',historyHash:'empty',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_0'}],
       tools:[{name:'probe_echo',description:'Echo',input_schema:{type:'object',properties:{value:{type:'string'}},required:['value'],additionalProperties:false}}],
-      executeTool: async(_name,args)=>({echo:args.value})};
+      executeTool: async(_name,args)=>{businessExecutions++;return {echo:args.value};}};
     const generated = await runtime.run(request);
     assert.equal(generated.content,'CONTRACT_OK');
     await runtime.finalize(generated.receipt,'after-first');
@@ -80,6 +81,19 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     assert.equal(resumed.diagnostic.sessionId,generated.diagnostic.sessionId);
     assert.ok(resumed.lastUsage.cache_read_input_tokens>0);
     await runtime.finalize(resumed.receipt,'after-second');
+    const projectRoot = join(config.root,'config','projects');
+    const sessionFile = (await readdir(projectRoot,{recursive:true})).find(p=>p.endsWith(resumed.diagnostic.sessionId+'.jsonl'));
+    assert.ok(sessionFile);
+    const transcript = await readFile(join(projectRoot,sessionFile),'utf8');
+    const bodyCount = bodies.length;
+    const executionsBeforeWarm = businessExecutions;
+    const warm = await runtime.warm('thread');
+    assert.equal(warm.attempted,true,JSON.stringify(warm));
+    assert.equal(warm.hit,true);
+    assert.equal(businessExecutions,executionsBeforeWarm,'Warming cannot execute business tools');
+    assert.equal(await readFile(join(projectRoot,sessionFile),'utf8'),transcript,'Warm must not mutate primary transcript');
+    assert.deepEqual(bodies[bodyCount].tools,bodies[bodyCount-1].tools,'Warm keeps the same tool prefix');
+    assert.match(JSON.stringify(bodies[bodyCount]), /"ttl":"1h"/);
     await rm(join(config.root,'config','projects'),{recursive:true,force:true});
     const recovered=await runtime.run({...request,historyHash:'after-second',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_0'},{role:'assistant',content:'CONTRACT_OK'},{role:'user',content:'RECOVERED_TURN'}]});
     assert.equal(recovered.diagnostic.mode,'rebuild');

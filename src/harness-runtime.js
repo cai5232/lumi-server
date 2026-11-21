@@ -1,3 +1,4 @@
+import { warmHarnessSession } from './harness-warm.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -47,6 +48,27 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
   const diagnostics = new Map();
   return {
     diagnostic(threadId) { return diagnostics.get(threadId) || null; },
+    async warm(threadId, { signal } = {}) {
+      const key = `${threadId}:chat`;
+      if (busy.has(key)) return { attempted: false, reason: 'chat_busy' };
+      busy.add(key);
+      let release;
+      try {
+        release = await store.lock(key);
+        const state = await store.read(key);
+        if (state?.status !== 'ready' || state.diagnostic?.model !== config.model || !state.warmSetup || state.warmDisabled) return { attempted: false, reason: 'no_eligible_session' };
+        const last = Math.max(Date.parse(state.diagnostic?.at || '') || 0, state.warmLastAt || 0);
+        if (Date.now() - last < (config.keepaliveIntervalMs || 240000)) return { attempted: false, reason: 'not_due' };
+        try {
+          const result = await warmHarnessSession(config, state, { signal, loadSDK });
+          if (result.attempted) await store.write(key, { ...state, warmLastAt: Date.now(), warmDisabled: !result.hit, warmDiagnostic: result });
+          return result;
+        } catch (error) {
+          await store.write(key, { ...state, warmDisabled: true });
+          throw error;
+        }
+      } finally { busy.delete(key); if (release) await release(); }
+    },
     async finalize(receipt, expectedHistoryHash) {
       if (!receipt) return;
       const release = await store.lock(receipt.key);
@@ -190,9 +212,9 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         onUsage(lastUsage);
         const diagnostic = { runtime: 'kimi-harness', mode, model: config.model, sessionId, at: new Date().toISOString(),
           usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta,
-          contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', costUSD: null };
+          contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', requestedCacheTTL: config.cacheTTL || '1h', costUSD: null };
         diagnostics.set(threadId, diagnostic);
-        if (!ephemeral) await store.write(key, { ...currentState, status: 'generated', sessionId, diagnostic });
+        if (!ephemeral) await store.write(key, { ...currentState, status: 'generated', sessionId, diagnostic, warmSetup: { system, tools, cwd } });
         onEvent({ type: 'done', ...diagnostic });
         return { content: text.trim(), thinking, usage: result.usage || lastUsage, lastUsage, diagnostic,
           receipt: ephemeral ? null : { key, runId }, finishReason: result.stop_reason || 'end_turn' };

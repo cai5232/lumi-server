@@ -3813,7 +3813,6 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
 }
 
 async function checkCacheKeepalive() {
-  if (keepaliveState.lastThreadId && await harnessRoutes.selection(keepaliveState.lastThreadId) === "kimi-harness") return { attempted: false, reason: "harness_interaction_only" };
   if (!keepaliveEnabled || !promptCacheEnabled || keepaliveInFlight || backgroundPulseInFlight || chatRequestsInFlight) {
     return { attempted: false, reason: "disabled_or_busy" };
   }
@@ -3829,6 +3828,24 @@ async function checkCacheKeepalive() {
     const thread = threads[id];
     const modelRoute = thread ? await resolveMurmurRoute(id, thread) : null;
     if (modelRoute?.provider !== "custom" || !modelRoute.customProvider) return { attempted: false, reason: "custom_model_route_unavailable" };
+    if (modelRoute.customProvider.runtime === "kimi-harness") {
+      const lastUser = [...activeChatMessages(thread)].reverse().find(m => m.role === "user");
+      const lastRealAt = Date.parse(lastUser?.createdAt || "");
+      if (!Number.isFinite(lastRealAt) || Date.now() - lastRealAt > kimiHarnessConfig.keepaliveMaxIdleMs) return { attempted: false, reason: "too_idle" };
+      const result = await kimiHarness.warm(id, { signal: controller.signal });
+      if (result.attempted) {
+        keepaliveState.attempts++;
+        keepaliveState.lastAt = new Date().toISOString();
+        keepaliveState.lastThreadId = id;
+        keepaliveState.lastReadTokens = result.readTokens;
+        keepaliveState.lastWriteTokens = result.writeTokens;
+        keepaliveState.readTokens += result.readTokens;
+        keepaliveState.writeTokens += result.writeTokens;
+        if (result.hit) keepaliveState.successes++;
+        keepaliveState.lastError = result.hit ? "" : "订阅保温未命中缓存，已停止此 Session 的保温";
+      }
+      return result;
+    }
     const cacheProvider = "custom";
     const configuredCache = null;
     const cacheModel = modelRoute.model || thread?.cacheModel || "";
@@ -6159,7 +6176,7 @@ const server = createServer(async (req, res) => {
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
       return send(res, 200, { runtime: await harnessRoutes.selection(id), harness: { enabled: kimiHarnessConfig.enabled,
         configured: Boolean(kimiHarnessConfig.key), model: kimiHarnessConfig.model, contextTokens: kimiHarnessConfig.contextTokens,
-        compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", last: kimiHarness.diagnostic(id) } });
+        compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: kimiHarness.diagnostic(id) } });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
@@ -6201,7 +6218,10 @@ const server = createServer(async (req, res) => {
       // A slow autonomous wake must not keep a user message queued for minutes.
       // Its existing finally block releases the conversation before we read it.
       sentinelGenerationControllers.get(id)?.abort();
-      if (id === "default" && keepaliveInFlight) await keepaliveDone;
+      if (id === "default" && keepaliveInFlight) {
+        if (await harnessRoutes.selection(id) === "kimi-harness") keepaliveController?.abort();
+        await keepaliveDone;
+      }
       while (activeChatThreads.has(id) || foregroundCalls.has(id)) await new Promise((resolve) => setTimeout(resolve, 50));
       activeChatThreads.add(id);
       const waiting = pendingForegroundChats.get(id) - 1;

@@ -16,6 +16,9 @@ export function harnessConfig(env = process.env) {
     enabled: env.LUMI_HARNESS_ENABLED === 'true',
     key: String(env.LUMI_KIMI_CODE_API_KEY || '').trim(), baseURL, model, contextTokens,
     root: resolve(env.LUMI_DATA_DIR || 'data', 'harness'),
+    cacheTTL: env.LUMI_HARNESS_CACHE_TTL === '5m' ? '5m' : '1h',
+    keepaliveIntervalMs: 240000,
+    keepaliveMaxIdleMs: 3600000,
     maxTurns: 8,
     timeoutMs: 600000,
   };
@@ -46,6 +49,8 @@ export function harnessEnvironment(config, source = process.env) {
     CLAUDE_AGENT_SDK_CLIENT_APP: 'lumi-server',
     CLAUDE_CODE_MAX_RETRIES: '1',
     ENABLE_TOOL_SEARCH: 'false',
+    CLAUDE_CODE_PROMPT_CACHE_TTL: config.cacheTTL || '1h',
+    CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: config.cacheTTL || '1h',
     API_TIMEOUT_MS: '120000',
   });
   return env;
