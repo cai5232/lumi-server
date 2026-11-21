@@ -113,3 +113,20 @@ test('per-thread route is persistent and disabled/absent Kimi fails closed',asyn
     await routes.save('one','api');assert.equal(await routes.route('one'),null);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+test('budget guard includes project instructions before issuing a model request',async()=>{
+  const {root,config}=await fixture(),calls=[];
+  try {
+    const runtime=createHarnessRuntime({...config,contextTokens:20000},{loadSDK:async()=>fakeSDK(calls)});
+    const persona='原'.repeat(5000);
+    await assert.rejects(runtime.run(turn({persona,messages:[{role:'system',content:persona},{role:'user',content:'继续'}]})),/上下文预算/);
+    assert.equal(calls.length,0,'do not issue an underbudgeted request that omits CLI-injected rules');
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
+ test('K3 deployment defaults use the requested 200K window',()=>{
+ const config=harnessConfig({});
+ assert.equal(config.model,'k3');assert.equal(config.contextTokens,200000);
+ const policy=harnessContextPolicy(config,{triggerTokensEstimate:300000});
+ assert.equal(policy.inputBudget,188000);assert.equal(policy.triggerTokens,150400);
+ });

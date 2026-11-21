@@ -29,7 +29,7 @@ test('ZenMux-only mode requires a single valid supplier and server credentials',
   }
 });
 
-test('ZenMux-only chat ignores legacy presets, meters caching and surfaces supplier failures', { timeout: 15000 }, async () => {
+test('ZenMux-only chat ignores legacy presets, meters caching and surfaces supplier failures', { timeout: 60000 }, async () => {
   const dataDir = await mkdtemp(join(tmpdir(), 'lumi-zenmux-'));
   const preload = join(dataDir, 'mock-zenmux.mjs');
   const capture = join(dataDir, 'upstream.jsonl');

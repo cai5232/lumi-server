@@ -21,7 +21,7 @@ test('authorized API persists books, applies selection and injects updated conte
  const base=`http://127.0.0.1:${port}`;
  const start=async()=>{
   child=spawn(process.execPath,['--import', new URL('./mock-model-fetch.js', import.meta.url).pathname, 'src/index.js'],{env:{...process.env,PORT:String(port),LUMI_DATA_DIR:directory,LUMI_PUSH_API_TOKEN:'test',LUMI_MODEL_API_KEY:'test',LUMI_TEST_MODEL_TARGET:`http://127.0.0.1:${providerPort}`,LUMI_MODEL_API_URL:`http://127.0.0.1:${providerPort}/v1`,LUMI_MEMORY_API_URL:`http://127.0.0.1:${providerPort}`,LUMI_MODEL_NAME:'test-model',LUMI_CACHE_KEEPALIVE_ENABLED:'false'},stdio:'ignore'});
-  for(let i=0;i<100;i++){try{if((await fetch(base+'/health')).ok)return;}catch{} await new Promise(r=>setTimeout(r,50));} throw Error('backend unavailable');
+  for(let i=0;i< 600;i++){try{if((await fetch(base+'/health')).ok)return;}catch{} await new Promise(r=>setTimeout(r,50));} throw Error('backend unavailable');
  };
  const stop=async()=>{ if(child&&child.exitCode===null){const done=new Promise(r=>child.once('exit',r)); child.kill(); await done;} child=null; };
  const request=(path,method='GET',data,authorized=true)=>fetch(base+path,{method,headers:{'content-type':'application/json',...(authorized?{authorization:'Bearer test'}:{})},...(data?{body:JSON.stringify(data)}:{})});

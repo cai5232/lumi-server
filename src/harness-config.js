@@ -7,8 +7,8 @@ export function harnessConfig(env = process.env) {
       url.pathname.replace(/\/$/, '') !== '/coding' || url.search || url.hash || url.username || url.password) {
     throw new Error('Kimi Code Harness requires the official /coding/ endpoint');
   }
-  const model = String(env.LUMI_KIMI_CODE_MODEL || 'kimi-for-coding');
-  const contextTokens = Number(env.LUMI_KIMI_CODE_CONTEXT_TOKENS || 262144);
+  const model = String(env.LUMI_KIMI_CODE_MODEL || 'k3');
+  const contextTokens = Number(env.LUMI_KIMI_CODE_CONTEXT_TOKENS || 200000);
   if (!Number.isSafeInteger(contextTokens) || contextTokens < 20000 || contextTokens > 1048576) {
     throw new Error('LUMI_KIMI_CODE_CONTEXT_TOKENS must be the verified model window (20000–1048576)');
   }

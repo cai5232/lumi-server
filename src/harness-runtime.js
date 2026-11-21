@@ -72,7 +72,6 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
       if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens >= config.contextTokens) {
         throw new Error('Kimi Harness 输出预算超出已配置的模型窗口');
       }
-      env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(maxOutputTokens);
       const key = `${threadId}:${scope}`;
       if (busy.has(key)) throw Object.assign(new Error('此聊天的 Harness Session 正忙'), { statusCode: 409 });
       busy.add(key);
@@ -105,10 +104,22 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         await writeRuleSnapshot(join(cwd, 'CLAUDE.md'), '@prompts/effective-persona.md\n');
         await writeRuleSnapshot(join(cwd, 'prompts/effective-persona.md'), persona || system);
         const input = resume ? messageBlocks(messages.at(-1)) : reconstructInput(messages);
-        const inputEstimate = requestInputTokens({ system, messages: [{ role: 'user', content: input }], tools });
-        if (inputEstimate > config.contextTokens - Math.max(12000, maxOutputTokens + 4000)) {
+        // Project instructions are also injected by the CLI. Count that copy,
+        // and use measured transcript usage when resuming a long session.
+        const constructedEstimate = requestInputTokens({ system, messages: [{ role: 'user', content: input }], tools }) +
+          requestInputTokens({ system: persona || system }) + 1024;
+        const measured = previous?.diagnostic?.lastUsage || {};
+        const resumeEstimate = resume ? Number(measured.input_tokens || 0) + Number(measured.cache_read_input_tokens || 0) +
+          Number(measured.cache_creation_input_tokens || 0) + Number(measured.output_tokens || 0) +
+          requestInputTokens({ messages: [{ role: 'user', content: input }] }) : 0;
+        const inputEstimate = Math.max(constructedEstimate, resumeEstimate);
+        if (inputEstimate > config.contextTokens - 12000) {
           throw Object.assign(new Error('当前摘要与最近原文超出 Kimi 上下文预算；记录保留，需完成压缩后重试'), { code: 'context_compaction_required', statusCode: 503 });
         }
+        // Long calls may request the model maximum. Reserve it only when the
+        // current history fits; never let a 128K ceiling consume a 200K window.
+        const effectiveMaxOutputTokens = Math.min(maxOutputTokens, config.contextTokens - inputEstimate - 4000);
+        env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(effectiveMaxOutputTokens);
         const { z } = await import('zod');
         const server = sdk.createSdkMcpServer({ name: 'lumi', version: '1.0.0', tools: tools.map(t => {
           const schema = z.fromJSONSchema(t.input_schema || { type: 'object', properties: {} });
@@ -179,7 +190,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         onUsage(lastUsage);
         const diagnostic = { runtime: 'kimi-harness', mode, model: config.model, sessionId, at: new Date().toISOString(),
           usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta,
-          contextTokens: config.contextTokens, cacheTTL: 'provider_default_unverified', costUSD: null };
+          contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', costUSD: null };
         diagnostics.set(threadId, diagnostic);
         if (!ephemeral) await store.write(key, { ...currentState, status: 'generated', sessionId, diagnostic });
         onEvent({ type: 'done', ...diagnostic });

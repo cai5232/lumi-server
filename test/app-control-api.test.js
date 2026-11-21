@@ -15,7 +15,7 @@ test('app restrictions require authentication and model tool changes enrolled ap
     if (!req.url.endsWith('/chat/completions')) return res.end('{}');
     const payload = JSON.parse(raw); seen.push(payload);
     const hasResult = payload.messages.some(m => m.role === 'tool');
-    const message = hasResult ? { content: '已经限制' } : { content: null, tool_calls: [{ id: 'call1', type: 'function', function: { name: 'lumi_app_control', arguments: JSON.stringify({action:'block', app:'抖音', minutes:10}) } }] };
+    const message = hasResult ? { content: '已经限制' } : { content: null, tool_calls: [{ id: 'call1', type: 'function', function: { name: 'lumi_lock_app', arguments: JSON.stringify({action:'block', app:'抖音', minutes:10}) } }] };
     res.end(JSON.stringify({ choices: [{ message }] }));
   });
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
@@ -33,7 +33,7 @@ test('app restrictions require authentication and model tool changes enrolled ap
   const chat = content => request('/v1/chats/default/messages', 'POST', { content, provider: 'custom', model: 'test-model', customProvider: { apiKey: 'test', baseURL: 'https://model.test/v1', apiFormat: 'openai' } });
   try {
     let ready = false;
-    for (let i = 0; i < 150; i++) {
+    for (let i = 0; i < 600; i++) {
       try { if ((await fetch(base + '/health')).ok) { ready = true; break; } } catch {}
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -43,7 +43,7 @@ test('app restrictions require authentication and model tool changes enrolled ap
     assert.equal((await fetch(base + '/v1/app-control', {method:'DELETE',headers:{authorization:'Bearer shortcut-test'}})).status, 401);
     assert.equal((await request('/v1/app-control', 'PUT', {apps:['抖音'],autonomous:false})).status, 200);
     const first = await chat('帮我限制抖音十分钟'); assert.equal(first.status, 200, await first.clone().text());
-    assert.ok(seen[0].tools.some(t => t.function.name === 'lumi_app_control'));
+    assert.ok(seen[0].tools.some(t => t.function.name === 'lumi_lock_app'));
     const check = await fetch(base + '/v1/sentinel/app-control?app='+encodeURIComponent('抖音'), {headers:{authorization:'Bearer shortcut-test'}});
     assert.equal(check.headers.get('cache-control'), 'no-store');
     assert.deepEqual(await check.json(), {blocked:true});

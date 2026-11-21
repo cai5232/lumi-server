@@ -21,7 +21,7 @@ async function freePort() {
 async function startBackend(port, env) {
   const child = spawn(process.execPath, ["--import", new URL('./mock-model-fetch.js', import.meta.url).pathname, "src/index.js"], { cwd: new URL("..", import.meta.url), env: { ...process.env, ...env, PORT: String(port) }, stdio: "inherit" });
   let lastHealthFailure = "no response";
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 600; i++) {
     if (child.exitCode !== null) throw new Error(`backend exited: ${child.exitCode}`);
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);

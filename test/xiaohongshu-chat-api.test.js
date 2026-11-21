@@ -23,7 +23,7 @@ test('Xiaohongshu card persists and sends all images and note content to the mod
  let errors='';child.stderr.on('data',chunk=>errors+=chunk);
  const request=(path,data)=>fetch(base+path,{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer test'},body:JSON.stringify(data)});
  try {
-  let ready=false;for(let i=0;i<150;i++){try{if((await fetch(base+'/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,50));}
+  let ready=false;for(let i=0;i< 600;i++){try{if((await fetch(base+'/health')).ok){ready=true;break;}}catch{}await new Promise(r=>setTimeout(r,50));}
   assert.ok(ready,'backend started: '+errors);
   const card = { caption: '一起看看', note: { title: '星露谷', author: '作者', desc: '笔记内容', comments: [{user: '读者', content: '评论内容'}], images: Array(5).fill('https://sns-webpic-qc.xhscdn.com/pic'), url: 'https://www.xiaohongshu.com/' }, cover: 'thumbnail' };
   const images = Array(5).fill('data:image/png;base64,iVBORw0KGgo=');

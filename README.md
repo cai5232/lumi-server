@@ -248,15 +248,15 @@ The default remains the existing API route. The new runtime is disabled until co
 LUMI_HARNESS_ENABLED=true
 LUMI_KIMI_CODE_API_KEY=<Coolify secret>
 LUMI_KIMI_CODE_BASE_URL=https://api.kimi.com/coding/
-LUMI_KIMI_CODE_MODEL=kimi-for-coding
-LUMI_KIMI_CODE_CONTEXT_TOKENS=262144
+LUMI_KIMI_CODE_MODEL=k3
+LUMI_KIMI_CODE_CONTEXT_TOKENS=200000
 # Optional: default new and unconfigured chats to the Harness:
 # LUMI_CHAT_RUNTIME=kimi-harness
 # Optional: permit explicit frontend custom API presets alongside the managed API default:
 # LUMI_ALLOW_CUSTOM_API_ROUTES=true
 ```
 
-`262144` is a conservative configured window, not a measured claim about the account. Confirm the model ID and account's window before increasing it. The effective input budget reserves 12K tokens; Lumi clamps its effective compaction trigger to the smaller of the frontend's configured value and 80% of this budget. The frontend's original setting is retained for API routes. No 380K assumption is applied to the SDK model.
+`200000` is the user-selected application window for `k3`. The authenticated Kimi Code model catalogue reports a larger model capacity; Lumi deliberately caps its working context at 200K. The effective input budget reserves 12K tokens; Lumi clamps its effective compaction trigger to the smaller of the frontend's configured value and 80% of this budget. The frontend's original setting is retained for API routes. No 380K assumption is applied to the SDK model.
 
 Persist **all of `LUMI_DATA_DIR`**, including `harness/config`, `harness/sessions`, and `harness/workspaces`. Keep **one application replica**: the existing JSON archive is not a distributed transactional database. Per-thread SDK requests have process and filesystem locks; the existing foreground/background priority and archive write queues remain in place. Auxiliary call/wake/desktop/distillation sessions are isolated and reconstructed from the correct thread, never appended to the primary chat transcript.
 
