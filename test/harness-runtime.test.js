@@ -144,3 +144,27 @@ test('SDK model choice persists per thread while runtime switching preserves it'
   assert.equal((await routes.route('a')).model,'kimi-for-coding');
  }finally{await rm(root,{recursive:true,force:true});}
 });
+
+test('wake sessions resume after restart independently of chat checkpoints, with an explicit diagnostic reason', async () => {
+  const {root,config}=await fixture(),calls=[];
+  const loadSDK=async()=>fakeSDK(calls);
+  try {
+    let runtime=createHarnessRuntime(config,{loadSDK});
+    const chat=await runtime.run(turn());
+    await runtime.finalize(chat.receipt,'chat-archive');
+    const wake=await runtime.run(turn({scope:'wake',historyHash:'chat-archive',ephemeral:false}));
+    assert.equal(wake.diagnostic.mode,'new');
+    assert.equal(wake.diagnostic.scope,'wake');
+    await runtime.finalize(wake.receipt,'persisted-wake-archive');
+    runtime=createHarnessRuntime(config,{loadSDK});
+    const next=await runtime.run(turn({scope:'wake',historyHash:'persisted-wake-archive',ephemeral:false}));
+    assert.equal(next.diagnostic.mode,'resume');
+    assert.equal(next.diagnostic.sessionReason,'checkpoint_match');
+    assert.equal(calls[2].options.resume,wake.diagnostic.sessionId);
+    assert.notEqual(calls[2].options.resume,chat.diagnostic.sessionId);
+    await runtime.finalize(next.receipt,'persisted-wake-archive');
+    const changed=await runtime.run(turn({scope:'wake',historyHash:'edited-or-compacted-archive'}));
+    assert.equal(changed.diagnostic.mode,'rebuild');
+    assert.equal(changed.diagnostic.sessionReason,'archive_changed');
+  } finally { await rm(root,{recursive:true,force:true}); }
+});

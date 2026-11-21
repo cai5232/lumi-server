@@ -678,6 +678,7 @@ async function generateSentinelWake(thread, sceneTriggers) {
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
     callOpening: typeof decision.callOpening === "string" ? decision.callOpening.trim() : "",
     nextWakeMinutes,
+    harnessReceipt: generated.harnessReceipt,
     followUp: followUpDecision,
     hasSceneReply: Boolean(generated.content?.trim() || generated.htmlContent),
     emotionUpdate: generated.emotionUpdate,
@@ -1015,6 +1016,7 @@ async function runBackgroundPulse() {
     sentinelGenerationControllers.set(threadId, new AbortController());
     let threadChanged = false;
     let thread;
+    let wakeHarnessReceipt;
     try {
     thread = (await readThreads())[threadId] || cachedThread;
     if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
@@ -1115,6 +1117,7 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.attempts += 1;
         const wakeStartedAt = new Date();
         const wake = await generateSentinelWake(thread, sceneTriggers);
+        wakeHarnessReceipt = wake.harnessReceipt;
         if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
         if (wake.action === "none" || (sceneTriggers.length && !wake.hasSceneReply)) {
           const restEvent = recordActivityEvent(thread, "rest", "休息一下", sceneTriggers.length
@@ -1261,7 +1264,10 @@ async function runBackgroundPulse() {
     }
     } finally {
       try {
-        if (threadChanged && thread) { await persistChatThread(threadId, thread); changed = true; }
+        if (threadChanged && thread) {
+          await persistChatThread(threadId, thread); changed = true;
+          if (wakeHarnessReceipt) await kimiHarness.finalize(wakeHarnessReceipt, historyFingerprint(modelChatMessages(thread)));
+        }
       } finally {
         sentinelGenerationControllers.delete(threadId);
         activeChatThreads.delete(threadId);
@@ -2431,7 +2437,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
       persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash,
       tools: [...anthropicLocalTools, ...memoryTools], executeTool,
       maxOutputTokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
-      ephemeral: !pending || pending.scope !== "chat" || singleAttempt,
+      ephemeral: !pending || !(pending.scope === "chat" || (customProvider.runtime === "kimi-harness" && pending.scope === "wake")) || singleAttempt,
       signal: signal || (proactive ? sentinelGenerationControllers.get(threadId)?.signal : undefined), onUsage });
     if (pending) { pending.receipt = result.receipt; pending.modelThinking = result.thinking; }
     const usage = result.usage;
@@ -3807,13 +3813,13 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const cacheKeepaliveMessages = replyHistoryFitted || failureTimeline.length
     ? null : cacheRequestMessages.map(({ images: _images, ...message }) => message);
   const safeModelContent = wakeFindingRemoved ? content : raw.replace(/\[\[DRAWER:\w+\]\][\s\S]*?\[\[\/DRAWER\]\]/g, "").replace(/<context_summary\b[^>]*>[\s\S]*?<\/context_summary>/gi, "").replace(/<food_tool\b[^>]*>[\s\S]*?(?:<\/food_tool>|$)/gi, "").replace(/<food_tool_result\b[^>]*>[\s\S]*?(?:<\/food_tool_result>|$)/gi, "").trim();
-  if (harnessTurn?.receipt) {
+  if (harnessTurn?.receipt && !(proactive && customProvider?.runtime === "kimi-harness")) {
     const expected = [...modelChatMessages(thread),
       ...(incomingUserMessage && !thread.messages.some(m => m.id === incomingUserMessage.id) ? [incomingUserMessage] : []),
       { role: "assistant", content, toolCalls }];
     await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected));
   }
-  return { requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { harnessReceipt: proactive && customProvider?.runtime === "kimi-harness" ? harnessTurn?.receipt : null, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
