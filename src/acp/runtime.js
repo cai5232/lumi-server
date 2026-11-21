@@ -10,7 +10,7 @@ const cli=fileURLToPath(new URL('../../node_modules/@moonshot-ai/kimi-code/dist/
 export function createAcpRuntime(config, {clientFactory = options => new AcpClient(options)} = {}){
  const root=resolve(config.root,'../kimi-acp');const state=createHarnessState(join(root,'sessions'));
  const diagnostics=new Map();
- const env={PATH:process.env.PATH,HOME:root,KIMI_CODE_HOME:join(root,'home'),LANG:process.env.LANG||'en_US.UTF-8'};
+ const env={PATH:process.env.PATH,HOME:root,KIMI_CODE_HOME:join(root,'home'),LANG:process.env.LANG||'en_US.UTF-8',LUMI_NATIVE_CACHE_TTL:'1h',NODE_OPTIONS:`--import=${new URL('./cache-ttl-fetch.js',import.meta.url).href}`};
  return {
   home:env.KIMI_CODE_HOME,cli,env,
   diagnostic:id=>diagnostics.get(id)||null,
@@ -45,7 +45,7 @@ export function createAcpRuntime(config, {clientFactory = options => new AcpClie
     if(Math.max(projected,resume?Number(old.contextUsed||0)+projected:0)>config.contextTokens-12000)throw new Error('当前原文与摘要需要先完成应用层压缩');
     const abort=()=>{client.request('session/cancel',{sessionId:session}).catch(()=>{});client.close();};signal?.addEventListener('abort',abort,{once:true});
     try{if(signal?.aborted)throw new Error('Cancelled');const result=await client.request('session/prompt',{sessionId:session,prompt:blocks},600000);if(result.stopReason!=='end_turn'||!text.trim())throw new Error('ACP response incomplete');}finally{signal?.removeEventListener('abort',abort);}
-    const diagnostic={runtime:'kimi-acp',mode:resume?'resume':'new',sessionId:session,model:config.model,at:new Date().toISOString(),calls:1,usage,cacheTTL:'native_provider_managed'};diagnostics.set(threadId,diagnostic);onUsage({input_tokens:Number(usage.contextUsed||0)});
+    const diagnostic={runtime:'kimi-acp',mode:resume?'resume':'new',sessionId:session,model:config.model,at:new Date().toISOString(),calls:1,usage,cacheTTL:'provider_unverified',requestedCacheTTL:'1h'};diagnostics.set(threadId,diagnostic);onUsage({input_tokens:Number(usage.contextUsed||0)});
     if(!ephemeral)await state.write(key,{status:'generated',runId,sessionId:session,definition,contextUsed:usage.contextUsed||0});
     return {content:text.trim(),thinking,usage,lastUsage:usage,diagnostic,receipt:ephemeral?null:{runtime:'kimi-acp',key,runId},finishReason:'end_turn'};
    }catch(e){if(!ephemeral)await state.write(key,{status:'invalid',runId});throw Object.assign(new Error('Kimi ACP: '+e.message),{statusCode:503});}
