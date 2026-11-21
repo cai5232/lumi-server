@@ -130,3 +130,17 @@ test('budget guard includes project instructions before issuing a model request'
  const policy=harnessContextPolicy(config,{triggerTokensEstimate:300000});
  assert.equal(policy.inputBudget,188000);assert.equal(policy.triggerTokens,150400);
  });
+
+test('SDK model choice persists per thread while runtime switching preserves it',async()=>{
+ const {root,config}=await fixture();
+ try{
+  const path=join(root,'routes.json');const routes=createHarnessRoutes(path,config,{});
+  await routes.save('a','kimi-harness','kimi-for-coding');
+  assert.equal((await routes.route('a')).model,'kimi-for-coding');
+  assert.equal(await routes.model('b'),config.model);
+  await routes.save('a','api');await routes.save('a','kimi-harness');
+  assert.equal((await createHarnessRoutes(path,config,{}).route('a')).model,'kimi-for-coding');
+  await assert.rejects(routes.save('a','kimi-harness','unavailable'),/invalid_sdk_model/);
+  assert.equal((await routes.route('a')).model,'kimi-for-coding');
+ }finally{await rm(root,{recursive:true,force:true});}
+});

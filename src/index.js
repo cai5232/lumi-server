@@ -68,6 +68,11 @@ const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
 const kimiHarnessConfig = harnessConfig();
 const kimiHarness = createHarnessRuntime(kimiHarnessConfig);
+const sdkRuntimes = new Map([[kimiHarnessConfig.model, kimiHarness]]);
+function sdkRuntime(model) {
+  if (!sdkRuntimes.has(model)) sdkRuntimes.set(model, createHarnessRuntime({...kimiHarnessConfig, model}));
+  return sdkRuntimes.get(model);
+}
 const kimiAcp = createAcpRuntime(kimiHarnessConfig);
 const kimiAcpAuth = createAcpAuth(kimiAcp);
 const harnessRoutes = createHarnessRoutes(join(dataDir, "chat-runtimes.json"), kimiHarnessConfig);
@@ -2427,7 +2432,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
       }
     };
     const startedAt = Date.now();
-    const runtime = customProvider.runtime === "kimi-acp" ? kimiAcp : kimiHarness;
+    const runtime = customProvider.runtime === "kimi-acp" ? kimiAcp : sdkRuntime(model);
     const result = await runtime.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
       persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash,
       tools: [...anthropicLocalTools, ...memoryTools], executeTool,
@@ -6184,11 +6189,11 @@ const server = createServer(async (req, res) => {
         const input = await body(req);
         if (!["api", "kimi-harness", "kimi-acp"].includes(input.runtime)) return send(res, 400, { error: "invalid_chat_runtime" });
         if (input.runtime === "kimi-acp" && (await kimiAcpAuth.status()).state !== "authorized") return send(res,409,{error:"请先完成 Kimi 账号登录"});
-        await harnessRoutes.save(id, input.runtime);
+        await harnessRoutes.save(id, input.runtime, input.sdkModel);
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
       return send(res, 200, { runtime: await harnessRoutes.selection(id), acp: {enabled: process.env.LUMI_ACP_ENABLED === "true", authentication: "native-oauth"}, harness: { enabled: kimiHarnessConfig.enabled,
-        configured: Boolean(kimiHarnessConfig.key), model: kimiHarnessConfig.model, contextTokens: kimiHarnessConfig.contextTokens,
-        compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: kimiHarness.diagnostic(id) } });
+        configured: Boolean(kimiHarnessConfig.key), model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
+        compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: sdkRuntime(await harnessRoutes.model(id)).diagnostic(id) } });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
     if (!match) return send(res, 404, { error: "not_found" });
