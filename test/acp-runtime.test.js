@@ -7,7 +7,7 @@ import {createAcpRuntime} from '../src/acp/runtime.js';
 test('ACP restores checkpoint, preserves system rules and rebuilds after edits',async()=>{
  const root=await mkdtemp(join(tmpdir(),'lumi-acp-'));const calls=[];let count=0;
  const factory=opts=>({start(){return this;},close(){},initialize:async()=>({}),async request(method,params){calls.push({method,params});if(method==='session/new')return {sessionId:'s'+(++count)};if(method==='session/prompt'){opts.onUpdate('session/update',{update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'ACP_OK'}}});return {stopReason:'end_turn'};}return {};}});
- const config={root:join(root,'harness'),model:'k3'};const runtime=createAcpRuntime(config,{clientFactory:factory});
+ const config={root:join(root,'harness'),model:'k3',contextTokens:200000};const runtime=createAcpRuntime(config,{clientFactory:factory});
  const args={threadId:'test',persona:'人格原文',historyHash:'first',messages:[{role:'system',content:'人格原文'},{role:'user',content:'hello'}],executeTool:async()=>{throw new Error('Unexpected tool');}};
  try{
  const first=await runtime.run(args);assert.equal(first.content,'ACP_OK');await runtime.finalize(first.receipt,'next');

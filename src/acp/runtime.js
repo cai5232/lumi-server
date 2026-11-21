@@ -1,3 +1,4 @@
+import {requestInputTokens} from '../context-budget.js';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -33,17 +34,19 @@ export function createAcpRuntime(config, {clientFactory = options => new AcpClie
      if(method!=='session/update')return;const u=p.update||{};
      if(u.sessionUpdate==='agent_message_chunk'&&u.content?.type==='text')text+=u.content.text;
      if(u.sessionUpdate==='agent_thought_chunk'&&u.content?.type==='text')thinking+=u.content.text;
-     if(u.sessionUpdate==='usage_update')usage=u;
+     if(u.sessionUpdate==='usage_update')usage={...u,contextUsed:u.used,cacheMetricsAvailable:false};
     }}).start();
     await client.initialize();let session;
     if(resume){await client.request('session/load',{sessionId:old.sessionId,cwd,mcpServers:[bridge.config]});session=old.sessionId;text='';thinking='';}
     else session=(await client.request('session/new',{cwd,mcpServers:[bridge.config]})).sessionId;
     await client.request('session/set_model',{sessionId:session,modelId:'lumi-k3'});
     const blocks=(resume?messageBlocks(messages.at(-1)):reconstructInput(messages)).map(b=>b.type==='image'?{type:'image',mimeType:b.source.media_type,data:b.source.data}:b);
+    const projected=requestInputTokens({system,messages:[{role:'user',content:blocks}],tools});
+    if(Math.max(projected,resume?Number(old.contextUsed||0)+projected:0)>config.contextTokens-12000)throw new Error('当前原文与摘要需要先完成应用层压缩');
     const abort=()=>{client.request('session/cancel',{sessionId:session}).catch(()=>{});client.close();};signal?.addEventListener('abort',abort,{once:true});
     try{if(signal?.aborted)throw new Error('Cancelled');const result=await client.request('session/prompt',{sessionId:session,prompt:blocks},600000);if(result.stopReason!=='end_turn'||!text.trim())throw new Error('ACP response incomplete');}finally{signal?.removeEventListener('abort',abort);}
-    const diagnostic={runtime:'kimi-acp',mode:resume?'resume':'new',sessionId:session,model:config.model,at:new Date().toISOString(),calls:1,usage,cacheTTL:'native_provider_managed'};diagnostics.set(threadId,diagnostic);onUsage(usage);
-    if(!ephemeral)await state.write(key,{status:'generated',runId,sessionId:session,definition});
+    const diagnostic={runtime:'kimi-acp',mode:resume?'resume':'new',sessionId:session,model:config.model,at:new Date().toISOString(),calls:1,usage,cacheTTL:'native_provider_managed'};diagnostics.set(threadId,diagnostic);onUsage({input_tokens:Number(usage.contextUsed||0)});
+    if(!ephemeral)await state.write(key,{status:'generated',runId,sessionId:session,definition,contextUsed:usage.contextUsed||0});
     return {content:text.trim(),thinking,usage,lastUsage:usage,diagnostic,receipt:ephemeral?null:{runtime:'kimi-acp',key,runId},finishReason:'end_turn'};
    }catch(e){if(!ephemeral)await state.write(key,{status:'invalid',runId});throw Object.assign(new Error('Kimi ACP: '+e.message),{statusCode:503});}
    finally{client?.close();bridge?.close();await release();}
