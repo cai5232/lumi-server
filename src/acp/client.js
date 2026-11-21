@@ -4,8 +4,8 @@ import { createInterface } from 'node:readline';
 // ACP is an independent subprocess. Only the documented JSON-RPC surface is
 // used; filesystem and terminal requests are denied unless explicitly handled.
 export class AcpClient {
-  constructor({ command = 'kimi', args = ['acp'], env, onUpdate = () => {} } = {}) {
-    this.command = command; this.args = args; this.env = env; this.onUpdate = onUpdate;
+  constructor({ command = 'kimi', args = ['acp'], env, onUpdate = () => {}, onRequest } = {}) {
+    this.command = command; this.args = args; this.env = env; this.onUpdate = onUpdate; this.onRequest = onRequest;
     this.nextId = 1; this.pending = new Map();
   }
   start() {
@@ -17,7 +17,9 @@ export class AcpClient {
     createInterface({ input: this.child.stdout }).on('line', line => {
       let msg; try { msg = JSON.parse(line); } catch { return this.fail(new Error('Invalid ACP response')); }
       if (msg.method && msg.id !== undefined) {
-        this.send({ jsonrpc:'2.0', id:msg.id, error:{ code:-32601, message:'Client capability unavailable' } });
+        Promise.resolve(this.onRequest?.(msg.method,msg.params)).then(result => {
+          this.send(result === undefined ? {jsonrpc:'2.0',id:msg.id,error:{code:-32601,message:'Client capability unavailable'}} : {jsonrpc:'2.0',id:msg.id,result});
+        }).catch(()=>{ if(this.child?.stdin.writable)this.send({jsonrpc:'2.0',id:msg.id,error:{code:-32603,message:'Client request failed'}}); });
       } else if (msg.method) this.onUpdate(msg.method, msg.params);
       else if (msg.id !== undefined) {
         const pending = this.pending.get(msg.id); if (!pending) return;

@@ -23,7 +23,13 @@ export function createAcpRuntime(config){
     const cwd=join(root,'workspaces',fingerprint(key));await mkdir(join(cwd,'.git'),{recursive:true});await mkdir(join(cwd,'.kimi-code','agents'),{recursive:true});await mkdir(env.KIMI_CODE_HOME,{recursive:true});
     const agent=join(cwd,'.kimi-code','agents','agent.md');await writeFile(agent,'---\nname: agent\noverride: true\ndescription: Lumi companion\ntools:\n  - mcp__lumi__*\nsubagents: []\n---\n'+system,{mode:0o600});
     bridge=await openBusinessMcp(tools,executeTool);let text='',thinking='',usage={};
-    client=new AcpClient({command:process.execPath,args:[cli,'acp'],env,onUpdate:(method,p)=>{
+    client=new AcpClient({command:process.execPath,args:[cli,'acp'],env,onRequest:async(method,p)=>{
+     if(method !== 'session/request_permission')return;
+     const title=p.toolCall?.title;
+     const allowed=tools.some(t=>title===t.name||title===`mcp__lumi__${t.name}`);
+     const option=allowed&&p.options?.find(o=>o.kind==='allow_once');
+     return {outcome:option?{outcome:'selected',optionId:option.optionId}:{outcome:'cancelled'}};
+    },onUpdate:(method,p)=>{
      if(method!=='session/update')return;const u=p.update||{};
      if(u.sessionUpdate==='agent_message_chunk'&&u.content?.type==='text')text+=u.content.text;
      if(u.sessionUpdate==='agent_thought_chunk'&&u.content?.type==='text')thinking+=u.content.text;
