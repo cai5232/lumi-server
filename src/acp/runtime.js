@@ -6,7 +6,7 @@ import {openBusinessMcp} from './mcp-bridge.js';
 import {createHarnessState,fingerprint} from '../harness-state.js';
 import {reconstructInput,messageBlocks} from '../harness-runtime.js';
 const cli=fileURLToPath(new URL('../../node_modules/@moonshot-ai/kimi-code/dist/main.mjs',import.meta.url));
-export function createAcpRuntime(config){
+export function createAcpRuntime(config, {clientFactory = options => new AcpClient(options)} = {}){
  const root=resolve(config.root,'../kimi-acp');const state=createHarnessState(join(root,'sessions'));
  const diagnostics=new Map();
  const env={PATH:process.env.PATH,HOME:root,KIMI_CODE_HOME:join(root,'home'),LANG:process.env.LANG||'en_US.UTF-8'};
@@ -23,7 +23,7 @@ export function createAcpRuntime(config){
     const cwd=join(root,'workspaces',fingerprint(key));await mkdir(join(cwd,'.git'),{recursive:true});await mkdir(join(cwd,'.kimi-code','agents'),{recursive:true});await mkdir(env.KIMI_CODE_HOME,{recursive:true});
     const agent=join(cwd,'.kimi-code','agents','agent.md');await writeFile(agent,'---\nname: agent\noverride: true\ndescription: Lumi companion\ntools:\n  - mcp__lumi__*\nsubagents: []\n---\n'+system,{mode:0o600});
     bridge=await openBusinessMcp(tools,executeTool);let text='',thinking='',usage={};
-    client=new AcpClient({command:process.execPath,args:[cli,'acp'],env,onRequest:async(method,p)=>{
+    client=clientFactory({command:process.execPath,args:[cli,'acp'],env,onRequest:async(method,p)=>{
      if(method !== 'session/request_permission')return;
      const title=p.toolCall?.title;
      const allowed=tools.some(t=>title===t.name||title===`mcp__lumi__${t.name}`);
