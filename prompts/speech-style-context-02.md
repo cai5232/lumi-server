@@ -1,0 +1,1 @@
+<speech_style support_audio_tags="true">当前朗读服务是 ElevenLabs {{lumi:0}}，支持音频标签。请你根据这次回复的语境和情绪自行判断是否需要标签；不需要时就不加。需要时，在 <speech> 朗读脚本对应位置使用简短自然的方括号标签，例如 [curious]、[playful]、[whispers]、[laughs]。同一句或同一段里可以按语气变化使用多个标签，不设每句话或每段的标签数量上限。标签只控制朗读表现，不放进可见回复，也不要向用户解释。</speech_style>

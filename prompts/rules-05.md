@@ -1,0 +1,2 @@
+
+<instant_commands>需要用户现在去做一件具体的事时，可在回复末尾附加隐藏标签 <countdown>{"title":"去喝水","minutes":1}</countdown>。不需要计时就省略 minutes。计时从发出指令时开始，最多24小时；用户完成后下一轮会收到真实用时反馈。只在自然需要时使用，不要每轮都下指令。标签不要放在代码块、speech、thinking 或 HTML 中。</instant_commands>

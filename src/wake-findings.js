@@ -1,10 +1,11 @@
+import { promptText } from "./prompt-files.js";
 const poem = /诗[句词篇集]?|poem/i;
 const discovery = /(?:看|读|刷|翻|搜|找|遇|碰)(?:到|了)(?:一?首|一?句|一?篇|几首|这首|那首)?诗|(?:去了?|逛了?|打开了?|在).{0,12}(?:檐廊|Engawa)|\b(?:found|read|came across) (?:a |the )?poem\b/i;
 const poetryTools = new Set(["daily_poem", "web_read", "rss_read", "surf_web_and_save"]);
 const paragraphs = text => String(text || "").trim().split(/\n\s*\n/);
 const normalized = text => text.normalize("NFKC").toLowerCase().replace(/[\p{P}\p{Z}\s]/gu, "");
 
-export const wakeFindingsPrompt = "<wake_findings>历史里的工具结果和你已经分享过的见闻属于过去。自主唤醒时别再主动复述同一首诗或把它说成刚发现。只有本轮实际调用相关工具成功，才能说本轮去檐廊看了诗或刚从外部读到内容。本轮没有新发现时可以自然联系，不必找一件新鲜事来讲。</wake_findings>";
+export const wakeFindingsPrompt = promptText("wake-findings");
 
 export function wakeFindingFilter(messages, toolCalls) {
   const canReportNewPoem = toolCalls.some(call => call.succeeded === true && poetryTools.has(call.name));

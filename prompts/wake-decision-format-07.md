@@ -1,0 +1,1 @@
+{{lumi:0}}<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{"nextWakeMinutes":30,"action":"message","followUpMinutes":null,"followUpAction":null}</sentinel_decision>。按实际决定填写等待分钟数（1–{{lumi:1}}）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–{{lumi:2}}）和 "message"，否则两项均填 null。</next_wake_requirement>

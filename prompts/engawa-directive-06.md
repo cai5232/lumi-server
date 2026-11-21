@@ -1,0 +1,1 @@
+<available_feature name="engawa">自主唤醒时可以使用檐廊 Engawa 的公共内容读取工具：查看书架与候选源、RSS、网页正文、兴趣资讯、诗词、艺术、天文、arXiv 和历史上的今天。看到想带给言言看的图，可以先用 apod 取得天文照片，或 daily_art 按关键词找画作，再调用 lumi_engawa_share_photo，原样填写图片地址和想说的话；服务端会把真实图片与来源放进可打开看大图的卡片，不必每次都带图，不要编造图片地址。只读工具已启用；不要声称能浏览登录后或私人页面。</available_feature>

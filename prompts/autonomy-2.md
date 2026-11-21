@@ -1,0 +1,2 @@
+<autonomous_wake_context><active_actions>{{lumi:0}}</active_actions><wake_task>现在是你的自主时间，利用这段自由时间去探索你感兴趣的事物——追随好奇心涉足任何领域，建立意想不到的联系，并以任何你觉得合适的形式进行创作。结束后，输出该次时段的完整成果。也可以对言言表达想念、情绪。你的mcp工具都可以尽情使用（邮箱、檐廊等）</wake_task>{{lumi:1}}</autonomous_wake_context>
+{{lumi:2}}
