@@ -28,7 +28,7 @@
     "system-context-04": "0e998db17b9580384c9096578e727b09e69ca5df462700fb58896a373d85a83a",
     "phone-activity-directive-05": "17de13cc317d07f92e578f180674a896d8201031d9554419eb448f62538c206e",
     "engawa-directive-06": "6ea5c25c753ce3dfddf5d43c9f84c69f1bc99444c367e206e9257daac7b620ae",
-    "wake-decision-format-07": "bef0f4a42a69cc0dc74494bc1052ce335ae14632464509bb6cb0c4723e8ca201",
+    "wake-decision-format-07": "79f2c7faea78c6dbda9c3eeb655ed8e36267374c64f39d9d977939cc295e4600",
     "autonomy": "7b15b83e9122375a0ec78bf843843de0b3b36ecb9912e266c6d129772fe0180d",
     "sentinel-action-rule-08": "ae370cdf3cf0401956df1a6ac2dde94b2189c1ff0417c8043e6d252a01855cdf",
     "alarm-directive-09": "40684a86f226f723ac2846e562ba07eb3c71a4c6a9aa8e76d016b37670190916",
@@ -109,8 +109,7 @@
     ],
     "wake-decision-format-07": [
       "",
-      "<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{\"nextWakeMinutes\":30,\"action\":\"message\",\"followUpMinutes\":null,\"followUpAction\":null}</sentinel_decision>。按实际决定填写等待分钟数（1–",
-      "）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–",
+      "<next_wake_requirement>本轮自主唤醒不能调用共享日历。请在回复末尾附上 <sentinel_decision>{\"nextWakeMinutes\":30,\"action\":\"message\",\"followUpMinutes\":null,\"followUpAction\":null}</sentinel_decision>。按实际决定填写等待分钟数（至少 1 分钟，无上限）和本轮允许的动作。若安排消息跟进，填写跟进分钟数（1–",
       "）和 \"message\"，否则两项均填 null。</next_wake_requirement>"
     ],
     "autonomy": [

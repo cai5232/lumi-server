@@ -56,7 +56,7 @@ import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, 
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
-import { MAX_WAKE_MINUTES, normalizeFollowUpDecision, wakeIntervalMinutes } from "./sentinel-follow-up.js";
+import { DEFAULT_WAKE_MINUTES, normalizeFollowUpDecision, wakeIntervalMinutes } from "./sentinel-follow-up.js";
 import { createStickerStore, stickerMessageForModel } from "./stickers.js";
 import { createDesktopCompanionService } from "./desktop-companion.js";
 import { applyLiveAttentionUpdate, buildLiveAttentionContext } from "./live-attention.js";
@@ -195,7 +195,7 @@ let keepaliveDone = Promise.resolve();
 let finishKeepalive = null;
 let chatRequestsInFlight = 0;
 const cacheStats = { modelCalls: 0, cacheReadTokens: 0, cacheWriteTokens: 0, memorySearches: 0, memoryCacheHits: 0, memoryResults: 0, memoryLastError: "", lastUsage: {} };
-const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+const proactiveSettings = { enabled: false, dnd: false, lastPhoneCallDate: null, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: DEFAULT_WAKE_MINUTES, intervalMax: DEFAULT_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, lastNudgedForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
 const soloSettings = { enabled: true, mode: "mix", desireThreshold: 0.78, idleMinutes: 30, touchDecayMinutes: 30, cooldownMinutes: 60 };
 let soloMetrics = [];
 const activeSoloRuns = new Map();
@@ -435,14 +435,14 @@ const seed = () => ({
   id: "default",
   title: "沈屿",
   messages: [{ id: randomUUID(), role: "assistant", content: "下午的风很轻，想和你说说话。", createdAt: new Date().toISOString() }],
-  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } },
+  proactive: { enabled: false, threadId: "default", message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: DEFAULT_WAKE_MINUTES, intervalMax: DEFAULT_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } },
   activity: { mode: "sentinel", lastUserActivityAt: new Date().toISOString(), lastWakeAt: null, nextWakeAt: null, nextWakeSource: null, sleepPendingAt: null, sleepStage: null },
   sleep: { dreams: [] }
 });
 
 function ensureProactive(thread) {
   if (!thread.proactive) {
-    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: MAX_WAKE_MINUTES, intervalMax: MAX_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
+    thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: DEFAULT_WAKE_MINUTES, intervalMax: DEFAULT_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
   }
   if (!thread.proactive.actions || typeof thread.proactive.actions !== "object") thread.proactive.actions = { message: true, phone: true, screen: false };
   return thread.proactive;
@@ -1023,12 +1023,6 @@ async function runBackgroundPulse() {
         now - Date.parse(call.turns?.at(-1)?.createdAt || call.startedAt) < 30 * 60_000)) continue;
     const activity = ensureActivity(thread);
     const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
-    const latestWakeAt = now + MAX_WAKE_MINUTES * 60_000;
-    if (proactive.enabled && activity.mode === "sentinel" && Date.parse(activity.nextWakeAt || "") > latestWakeAt) {
-      activity.nextWakeAt = new Date(latestWakeAt).toISOString();
-      proactive.nextDueAt = activity.nextWakeAt;
-      threadChanged = true;
-    }
     // Repair pending-bedtime flags retained by older chat handlers.
     const latestUserMessage = availableChatHistory(thread).findLast(message => message.role === "user");
     if (activity.mode === "sentinel" && activity.sleepPendingAt && latestUserMessage && !isFarewell(latestUserMessage.content)) {
@@ -3526,7 +3520,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     : "";
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const wakeDecisionFormat = promptTemplate("wake-decision-format-07", [wakeFindingsPrompt, MAX_WAKE_MINUTES, MAX_WAKE_MINUTES]);
+  const wakeDecisionFormat = promptTemplate("wake-decision-format-07", [wakeFindingsPrompt, 24 * 60]);
   const proactiveDirective = wakeSceneTriggers?.length
     ? promptTemplate("autonomy", [wakeDecisionFormat])
     : proactive

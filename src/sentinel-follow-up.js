@@ -1,8 +1,8 @@
-export const MAX_WAKE_MINUTES = 50;
+export const DEFAULT_WAKE_MINUTES = 50;
 
-export function wakeIntervalMinutes(value, fallback = MAX_WAKE_MINUTES) {
+export function wakeIntervalMinutes(value, fallback = DEFAULT_WAKE_MINUTES) {
   const minutes = Number(value);
-  return Math.min(MAX_WAKE_MINUTES, Number.isFinite(minutes) && minutes >= 1 ? Math.round(minutes) : fallback);
+  return Number.isFinite(minutes) && minutes >= 1 ? Math.round(minutes) : fallback;
 }
 
 export function normalizeFollowUpDecision(decision, allowedActions) {
