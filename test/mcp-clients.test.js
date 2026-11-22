@@ -88,3 +88,20 @@ test('background tool discovery cannot restore a server disabled or edited durin
     assert.equal(server.enabled,false);assert.equal(server.name,'Disabled');assert.equal(server.tools.length,0);
   } finally { await rm(directory,{recursive:true,force:true}); }
 });
+
+test('companion services permit only their exact deployment URL and preserve tools and switches', async t => {
+ const {validateMcpURL}=await import('../src/mcp-clients.js');
+ const oldURL=process.env.LUMI_KITCHENETTE_MCP_URL,oldToken=process.env.LUMI_KITCHENETTE_MCP_TOKEN;
+ process.env.LUMI_KITCHENETTE_MCP_URL='http://lumi-kitchenette:8765/mcp';
+ process.env.LUMI_KITCHENETTE_MCP_TOKEN='test-only';
+ const directory=await mkdtemp(join(tmpdir(),'lumi-companions-'));
+ t.after(async()=>{if(oldURL===undefined)delete process.env.LUMI_KITCHENETTE_MCP_URL;else process.env.LUMI_KITCHENETTE_MCP_URL=oldURL;if(oldToken===undefined)delete process.env.LUMI_KITCHENETTE_MCP_TOKEN;else process.env.LUMI_KITCHENETTE_MCP_TOKEN=oldToken;await rm(directory,{recursive:true,force:true});});
+ assert.throws(()=>validateMcpURL('http://lumi-kitchenette:8765/mcp'),/HTTPS/);
+ assert.throws(()=>validateMcpURL('http://127.0.0.1:8765/mcp',{companionId:'munch-kitchenette'}),/HTTPS/);
+ assert.throws(()=>validateMcpURL('http://lumi-kitchenette:8765/admin',{companionId:'munch-kitchenette'}),/HTTPS/);
+ const store=new McpClientStore(join(directory,'mcp.json'));
+ let settings=await store.read();
+ const kitchen=settings.servers.find(s=>s.id==='munch-kitchenette');assert.equal(kitchen.name,'吧唧吧唧小厨房');
+ await store.save({servers:settings.servers.map(s=>({...s,enabled:false,tools:[{name:'kitchen_status'}],connectedAt:'2026-11-22T00:00:00Z'}))});
+ settings=await store.read();assert.equal(settings.servers[0].enabled,false);assert.equal(settings.servers[0].tools[0].name,'kitchen_status');
+});

@@ -18,11 +18,14 @@ export function modelToolsForServer(server) {
     : tools;
 }
 
-export function validateMcpURL(value, { allowZeaburInternal = false } = {}) {
+export function validateMcpURL(value, { allowZeaburInternal = false, companionId = null } = {}) {
   let url;
   try { url = new URL(String(value || '').trim()); } catch { throw new Error('MCP URL 无效'); }
+  const companionURLs = { 'night-ferry': process.env.LUMI_NIGHT_FERRY_MCP_URL, 'munch-kitchenette': process.env.LUMI_KITCHENETTE_MCP_URL };
+  const expectedCompanion = { 'night-ferry': 'http://lumi-night-ferry:3210/mcp', 'munch-kitchenette': 'http://lumi-kitchenette:8765/mcp' };
+  const trustedCompanion = companionId && url.href === companionURLs[companionId] && url.href === expectedCompanion[companionId];
   const trustedInternal = allowZeaburInternal && url.protocol === 'http:' && url.hostname.toLowerCase().endsWith('.zeabur.internal');
-  if ((url.protocol !== 'https:' && !trustedInternal) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
+  if ((url.protocol !== 'https:' && !trustedInternal && !trustedCompanion) || url.username || url.password || (privateHost(url.hostname.toLowerCase()) && !trustedInternal && !trustedCompanion)) throw new Error('MCP 服务器必须使用公开 HTTPS 地址');
   return url.toString();
 }
 
@@ -41,7 +44,7 @@ export function normalizeMcpServers(input) {
       headers[key] = String(value).slice(0, 4000);
     }
     const configuredEngawaURL = id === ENGAWA_SERVER_ID && String(item.url || '').trim() === String(process.env.ENGAWA_MCP_URL || '').trim();
-    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
+    return { id, name: String(item.name || 'MCP 服务器').trim().slice(0, 100) || 'MCP 服务器', enabled: item.enabled !== false, url: validateMcpURL(item.url, { allowZeaburInternal: configuredEngawaURL, companionId: id }), headers, tools: Array.isArray(item.tools) ? item.tools.slice(0, 300) : [], connectedAt: item.connectedAt || null, error: '' };
   });
 }
 
@@ -79,6 +82,17 @@ export class McpClientStore {
         id: ENGAWA_SERVER_ID, name: '檐廊 Engawa', enabled: true,
         url: engawaURL, headers: {}, tools: [], connectedAt: null
       }])[0]);
+    }
+    for (const [id, name, prefix] of [['night-ferry', '夜航船', 'LUMI_NIGHT_FERRY'], ['munch-kitchenette', '吧唧吧唧小厨房', 'LUMI_KITCHENETTE']]) {
+      const url = process.env[`${prefix}_MCP_URL`];
+      const token = process.env[`${prefix}_MCP_TOKEN`];
+      if (!url || !token) continue;
+      const existing = settings.servers.find(server => server.id === id);
+      const headers = { Authorization: `Bearer ${token}` };
+      const changed = existing && (existing.url !== url || JSON.stringify(existing.headers) !== JSON.stringify(headers));
+      const next = normalizeMcpServers([{ id, name, url, headers, enabled: existing?.enabled !== false,
+        tools: changed ? [] : existing?.tools || [], connectedAt: changed ? null : existing?.connectedAt || null }])[0];
+      if (existing) Object.assign(existing, next); else settings.servers.push(next);
     }
     const neteaseMcpURL = process.env.LUMI_NETEASE_MCP_URL;
     const neteaseMcpToken = process.env.LUMI_NETEASE_MCP_TOKEN;
