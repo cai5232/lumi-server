@@ -148,6 +148,19 @@ export class McpClientStore {
     });
     this.queue = action.catch(() => {}); return action;
   }
+  async setServerEnabled(id, enabled) {
+    const action = this.queue.then(async () => {
+      const current = await this.read();
+      if (!current.servers.some(server => server.id === id)) throw Object.assign(new Error('mcp_server_not_found'), { status: 404 });
+      // A switch changes only one existing boolean, not unrelated legacy URLs or credentials.
+      const next = { ...current, servers: current.servers.map(server => server.id === id ? { ...server, enabled: enabled === true } : server), revision: current.revision + 1 };
+      await mkdir(dirname(this.path), { recursive: true });
+      const temporary = `${this.path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify(next, null, 2), { mode: 0o600 }); await rename(temporary, this.path);
+      return next;
+    });
+    this.queue = action.catch(() => {}); return action;
+  }
   async setMailEnabled(enabled) {
     return this.setBuiltInEnabled("mailEnabled", enabled);
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, modelToolsForServer } from "../src/mcp-clients.js";
@@ -104,4 +104,19 @@ test('companion services permit only their exact deployment URL and preserve too
  const kitchen=settings.servers.find(s=>s.id==='munch-kitchenette');assert.equal(kitchen.name,'吧唧吧唧小厨房');
  await store.save({servers:settings.servers.map(s=>({...s,enabled:false,tools:[{name:'kitchen_status'}],connectedAt:'2026-11-22T00:00:00Z'}))});
  settings=await store.read();assert.equal(settings.servers[0].enabled,false);assert.equal(settings.servers[0].tools[0].name,'kitchen_status');
+});
+
+
+test('toggling one server preserves unrelated legacy internal URLs and credentials', async t => {
+ const directory=await mkdtemp(join(tmpdir(),'lumi-mcp-toggle-'));
+ t.after(()=>rm(directory,{recursive:true,force:true}));
+ const path=join(directory,'mcp.json');
+ const legacy={id:'legacy',url:'http://127.0.0.1:9000/mcp',headers:{Authorization:'Bearer legacy-test'},enabled:true,tools:[{name:'old_tool'}]};
+ await writeFile(path,JSON.stringify({servers:[legacy,{id:'toy',url:'https://toy.example.test/mcp',headers:{},enabled:true,tools:[]}],revision:5}));
+ const store=new McpClientStore(path);
+ const disabled=await store.setServerEnabled('toy',false);
+ assert.deepEqual(disabled.servers.find(s=>s.id==='legacy'),legacy);
+ assert.equal(disabled.servers.find(s=>s.id==='toy').enabled,false);
+ await assert.rejects(store.setServerEnabled('missing',false),/not_found/);
+ assert.equal((await store.read()).revision,6);
 });

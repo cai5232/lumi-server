@@ -5027,7 +5027,7 @@ const server = createServer(async (req, res) => {
         }
         const { servers } = await mcpClientStore.read();
         if (!servers.some(server => server.id === id)) return send(res, 404, { error: "mcp_server_not_found" });
-        await mcpClientStore.save({ servers: servers.map(server => server.id === id ? { ...server, enabled: input.enabled } : server) });
+        await mcpClientStore.setServerEnabled(id, input.enabled);
         return send(res, 200, await mcpSettingsResponse());
       } catch (error) { return send(res, error.status || 400, { error: error.message || "mcp_update_failed" }); }
     }
