@@ -1267,7 +1267,7 @@ async function runBackgroundPulse() {
       try {
         if (threadChanged && thread) {
           await persistChatThread(threadId, thread); changed = true;
-          if (wakeHarnessReceipt) await kimiHarness.finalize(wakeHarnessReceipt, historyFingerprint(modelChatMessages(thread)));
+          if (wakeHarnessReceipt) await kimiHarness.finalize(wakeHarnessReceipt, historyFingerprint(modelChatMessages(thread)), modelChatMessages(thread));
         }
       } finally {
         sentinelGenerationControllers.delete(threadId);
@@ -2435,7 +2435,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     const startedAt = Date.now();
     const runtime = customProvider.runtime === "kimi-acp" ? kimiAcp : sdkRuntime(model);
     const result = await runtime.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
-      persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash,
+      persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash, archiveMessages: pending?.archiveMessages, compactedAt: pending?.compactedAt,
       tools: [...anthropicLocalTools, ...memoryTools], executeTool,
       maxOutputTokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
       ephemeral: !pending || !(pending.scope === "chat" || (customProvider.runtime === "kimi-harness" && pending.scope === "wake")) || singleAttempt,
@@ -3673,7 +3673,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   let replyHistoryFitted = false;
   const harnessTurn = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) ? {
     scope: callMode ? "call" : desktopCompanion ? "desktop" : proactive ? "wake" : "chat",
-    persona, historyHash: historyFingerprint(modelChatMessages(thread)), receipt: null
+    persona, historyHash: historyFingerprint(modelChatMessages(thread)), archiveMessages: modelChatMessages(thread), compactedAt: thread.compactedAt || null, receipt: null
   } : null;
   if (harnessTurn) {
     if (harnessPending.has(thread.id)) throw Object.assign(new Error("此线程正在生成，请稍后重试"), { statusCode: 409 });
@@ -3818,7 +3818,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     const expected = [...modelChatMessages(thread),
       ...(incomingUserMessage && !thread.messages.some(m => m.id === incomingUserMessage.id) ? [incomingUserMessage] : []),
       { role: "assistant", content, toolCalls }];
-    await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected));
+    await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected), expected);
   }
   return { harnessReceipt: proactive && customProvider?.runtime === "kimi-harness" ? harnessTurn?.receipt : null, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
@@ -6196,7 +6196,7 @@ const server = createServer(async (req, res) => {
         await harnessRoutes.save(id, input.runtime, input.sdkModel);
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
       return send(res, 200, { runtime: await harnessRoutes.selection(id), acp: {enabled: process.env.LUMI_ACP_ENABLED === "true", authentication: "native-oauth"}, harness: { enabled: kimiHarnessConfig.enabled,
-        configured: Boolean(kimiHarnessConfig.key), effort: kimiHarnessConfig.effort, model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
+        configured: Boolean(kimiHarnessConfig.key), sessionPolicy: "rebuild_only_after_application_compaction", effort: kimiHarnessConfig.effort, model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
         compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: sdkRuntime(await harnessRoutes.model(id)).diagnostic(id) } });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);

@@ -97,10 +97,17 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     assert.match(JSON.stringify(bodies[bodyCount]), /"ttl":"1h"/);
     assert.match(JSON.stringify(bodies[bodyCount].messages), /RUNTIME_0/);
     assert.match(JSON.stringify(bodies[bodyCount].messages), /RUNTIME_1/);
+    const updated=await runtime.run({...request,historyHash:'after-second',persona:'PERSONA_UPDATED',
+      messages:[{role:'system',content:'SYSTEM_UPDATED'},{role:'user',content:'CONTINUE_WITH_UPDATED_TOOLS'}],
+      tools:request.tools.map(t=>({...t,description:'Updated tool description'}))});
+    assert.equal(updated.diagnostic.sessionId,resumed.diagnostic.sessionId);
+    assert.equal(updated.diagnostic.mode,'resume');
+    assert.equal(updated.diagnostic.sessionReason,'definition_updated_in_place');
+    assert.match(JSON.stringify(bodies.at(-1).system),/SYSTEM_UPDATED/);
+    await runtime.finalize(updated.receipt,'after-second');
     await rm(join(config.root,'config','projects'),{recursive:true,force:true});
-    const recovered=await runtime.run({...request,historyHash:'after-second',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_0'},{role:'assistant',content:'CONTRACT_OK'},{role:'user',content:'RECOVERED_TURN'}]});
-    assert.equal(recovered.diagnostic.mode,'rebuild');
-    assert.equal(recovered.content,'CONTRACT_OK');
-    assert.notEqual(recovered.diagnostic.sessionId,resumed.diagnostic.sessionId);
+    const beforeMissing=bodies.length;
+    await assert.rejects(runtime.run({...request,historyHash:'after-second'}), /原 Session 文件不可用/);
+    assert.equal(bodies.length,beforeMissing,'missing transcript must not open a paid replacement session');
   } finally { upstream.closeAllConnections(); await new Promise(resolve=>upstream.close(resolve)); await rm(root,{recursive:true,force:true}); }
 });

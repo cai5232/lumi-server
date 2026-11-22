@@ -1,3 +1,4 @@
+import { archiveSnapshot, archiveChanges, archiveChangeBlocks } from './harness-continuity.js';
 import { warmHarnessSession } from './harness-warm.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -69,26 +70,18 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         }
       } finally { busy.delete(key); if (release) await release(); }
     },
-    async finalize(receipt, expectedHistoryHash) {
+    async finalize(receipt, expectedHistoryHash, archiveMessages) {
       if (!receipt) return;
       const release = await store.lock(receipt.key);
       try {
         const state = await store.read(receipt.key);
         if (state?.runId !== receipt.runId || state.status !== 'generated') return;
-        await store.write(receipt.key, { ...state, status: 'ready', expectedHistoryHash });
+        await store.write(receipt.key, { ...state, status: 'ready', expectedHistoryHash, ...(Array.isArray(archiveMessages) ? { archiveCursor: archiveSnapshot(archiveMessages) } : {}) });
       } finally { await release(); }
     },
-    async run(args) {
-      try { return await this.runOnce(args); }
-      catch (error) {
-        // A missing transcript is detected before any model output or tool
-        // call. Recover once on the SAME provider from application history.
-        if (error.code !== 'harness_session_missing') throw error;
-        return this.runOnce({ ...args, forceRebuild: true });
-      }
-    },
-    async runOnce({ threadId, scope = 'chat', messages, persona, tools = [], executeTool, historyHash,
-      signal, onEvent = () => {}, onUsage = () => {}, ephemeral = false, maxOutputTokens = 8192, forceRebuild = false }) {
+    async run(args) { return this.runOnce(args); },
+    async runOnce({ threadId, scope = 'chat', messages, persona, tools = [], executeTool, historyHash, archiveMessages, compactedAt,
+      signal, onEvent = () => {}, onUsage = () => {}, ephemeral = false, maxOutputTokens = 8192 }) {
       if (!config.enabled) throw Object.assign(new Error('Harness 尚未启用'), { statusCode: 503 });
       const env = harnessEnvironment(config);
       if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens >= config.contextTokens) {
@@ -105,22 +98,27 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
       const cancelled = () => abort.abort(signal?.reason);
       signal?.addEventListener('abort', cancelled, { once: true });
       if (signal?.aborted) cancelled();
-      let currentState;
+      let currentState, previous;
       let modelStarted = false, toolStarted = false, stderr = '';
       const runId = randomUUID();
       try {
         release = await store.lock(key);
         const sdk = await loadSDK();
-        const previous = ephemeral || forceRebuild ? null : await store.read(key);
+        previous = ephemeral ? null : await store.read(key);
         const system = messages.filter(m => m.role === 'system' || m.role === 'developer').map(m => m.content).join('\n\n');
         const definition = fingerprint({ system, persona, tools, model: config.model, baseURL: config.baseURL,
           credential: fingerprint(config.key), contextTokens: config.contextTokens, effort: config.effort || 'low', sdk: '0.3.330', policy: 'lumi-managed-compaction-v1' });
-        const resume = previous?.status === 'ready' && previous.definition === definition &&
-          previous.expectedHistoryHash === historyHash && previous.sessionId;
-        const mode = resume ? 'resume' : forceRebuild || previous?.sessionId ? 'rebuild' : 'new';
-        const sessionReason = resume ? 'checkpoint_match' : ephemeral ? 'ephemeral_scope' : forceRebuild ? 'missing_transcript' :
-          !previous ? 'no_saved_session' : previous.status !== 'ready' ? 'checkpoint_not_ready' :
-          previous.definition !== definition ? 'definition_changed' : previous.expectedHistoryHash !== historyHash ? 'archive_changed' : 'no_session_id';
+        const windowChanged = Boolean(previous && compactedAt && (
+          Object.hasOwn(previous, 'compactedAt') ? previous.compactedAt !== compactedAt :
+          Date.parse(compactedAt || '') > Date.parse(previous.diagnostic?.at || previous.startedAt || '')
+        ));
+        if (previous && !previous.sessionId && !windowChanged) throw Object.assign(new Error('原 Session 不可用，已停止请求；不会自动另开会话，聊天记录仍保留'), { code: 'harness_session_unavailable' });
+        const resume = !windowChanged && previous?.sessionId;
+        const definitionChanged = Boolean(previous && previous.definition !== definition);
+        const changes = resume ? archiveChanges(previous.archiveCursor, archiveMessages, previous.expectedHistoryHash, historyHash) : [];
+        const mode = resume ? 'resume' : windowChanged ? 'rebuild' : 'new';
+        const sessionReason = resume ? (changes.length ? 'archive_synced' : definitionChanged ? 'definition_updated_in_place' : 'continued_session') :
+          windowChanged ? 'application_compaction' : ephemeral ? 'ephemeral_scope' : 'first_session';
         const cwd = join(config.root, 'workspaces', fingerprint(key));
         await mkdir(join(cwd, 'prompts'), { recursive: true });
         await mkdir(env.CLAUDE_CONFIG_DIR, { recursive: true });
@@ -128,7 +126,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         // effective editable persona also remains at system priority.
         await writeRuleSnapshot(join(cwd, 'CLAUDE.md'), '@prompts/effective-persona.md\n');
         await writeRuleSnapshot(join(cwd, 'prompts/effective-persona.md'), persona || system);
-        const input = resume ? messageBlocks(messages.at(-1)) : reconstructInput(messages);
+        const input = resume ? [...archiveChangeBlocks(changes), ...messageBlocks(messages.at(-1))] : reconstructInput(messages);
         // Project instructions are also injected by the CLI. Count that copy,
         // and use measured transcript usage when resuming a long session.
         const constructedEstimate = requestInputTokens({ system, messages: [{ role: 'user', content: input }], tools }) +
@@ -158,7 +156,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
           });
         }) });
         const allowed = tools.map(t => `mcp__lumi__${t.name}`);
-        currentState = { runId, status: 'running', definition, sessionId: resume || null, startedAt: new Date().toISOString() };
+        currentState = { ...previous, runId, status: 'running', definition, ...(compactedAt !== undefined ? { compactedAt: compactedAt || previous?.compactedAt || null } : {}), sessionId: resume || null, startedAt: new Date().toISOString() };
         if (!ephemeral) await store.write(key, currentState);
         const usageById = new Map();
         let lastMessageId, sessionId, result, text = '', thinking = '', hadTextDelta = false;
@@ -170,7 +168,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
           return { decision: 'block', reason: 'Lumi owns emotional summaries and exact recent turns; compact at application turn boundaries.' };
         };
         q = sdk.query({ prompt: (async function* () { yield { type: 'user', message: { role: 'user', content: input }, parent_tool_use_id: null }; })(), options: {
-          cwd, env, model: config.model, effort: config.effort || 'low', title: 'Lumi', systemPrompt: system, settingSources: ['project'], tools: [], skills: [],
+          cwd, env, model: config.model, effort: config.effort || 'low', title: 'Lumi', systemPrompt: { type: 'custom', prompt: system, snapshot: false }, settingSources: ['project'], tools: [], skills: [],
           allowedTools: allowed, strictMcpConfig: true, mcpServers: { lumi: server }, permissionMode: 'dontAsk',
           includePartialMessages: true, maxTurns: config.maxTurns, abortController: abort,
           stderr: chunk => { stderr = (stderr + chunk).slice(-2000); },
@@ -183,7 +181,10 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         for await (const m of q) {
           if (m.type === 'system' && m.subtype === 'init') {
             if (m.apiKeySource !== 'ANTHROPIC_API_KEY') throw new Error('Harness credential source differs from the configured Kimi Code key');
+            if (resume && m.session_id !== resume) throw Object.assign(new Error('SDK 返回了不同的 Session，已停止请求，未接受自动换窗'), { code: 'harness_session_mismatch' });
             sessionId = m.session_id;
+            currentState.sessionId = sessionId;
+            if (!ephemeral) await store.write(key, currentState);
           }
           if (m.type === 'system' && m.subtype === 'compact_boundary') compacted = true;
           if (m.type === 'stream_event') {
@@ -210,10 +211,10 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         }
         if (abort.signal.aborted) throw new Error('Harness generation cancelled');
         if (!result || !sessionId || !text.trim()) throw new Error('Kimi Harness 未返回完整回复');
-        if (compacted) throw Object.assign(new Error('检测到非预期的原生压缩；本轮未提交，下次从 Lumi 原文重建'), { code: 'unexpected_harness_compaction', statusCode: 503 });
+        if (compacted) throw Object.assign(new Error('检测到非预期的原生压缩；本轮未提交，请由 Lumi 压缩换窗后继续'), { code: 'unexpected_harness_compaction', statusCode: 503 });
         const lastUsage = usageById.get(lastMessageId) || [...usageById.values()].at(-1) || result.usage || {};
         onUsage(lastUsage);
-        const diagnostic = { runtime: 'kimi-harness', mode, scope, ephemeral, sessionReason, effort: config.effort || 'low', model: config.model, sessionId, at: new Date().toISOString(),
+        const diagnostic = { runtime: 'kimi-harness', mode, scope, ephemeral, sessionReason, definitionChanged, archiveChangeCount: changes.length, effort: config.effort || 'low', model: config.model, sessionId, at: new Date().toISOString(),
           usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta,
           contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', requestedCacheTTL: config.cacheTTL || '1h', costUSD: null };
         diagnostics.set(threadId, diagnostic);
@@ -222,11 +223,11 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         return { content: text.trim(), thinking, usage: result.usage || lastUsage, lastUsage, diagnostic,
           receipt: ephemeral ? null : { key, runId }, finishReason: result.stop_reason || 'end_turn' };
       } catch (error) {
-        if (release && !ephemeral) await store.write(key, { ...currentState, runId, status: 'invalid', sessionId: null }).catch(() => {});
+        if (release && !ephemeral && (currentState || previous)) await store.write(key, { ...(currentState || previous), runId, status: 'interrupted' }).catch(() => {});
         const message = String(error.message || error).replaceAll(config.key || '\0', '[redacted]');
-        const missing = !forceRebuild && currentState?.sessionId && !modelStarted && !toolStarted &&
+        const missing = currentState?.sessionId && !modelStarted && !toolStarted &&
           /No conversation found|session[^\n]{0,100}(?:not found|does not exist)/i.test(message + stderr);
-        throw Object.assign(new Error(message), { code: missing ? 'harness_session_missing' : error.code || 'kimi_harness_failed', statusCode: error.statusCode || 503 });
+        throw Object.assign(new Error(missing ? '原 Session 文件不可用，已停止请求；不会自动另开会话，聊天记录仍保留' : message), { code: missing ? 'harness_session_missing' : error.code || 'kimi_harness_failed', statusCode: error.statusCode || 503 });
       } finally {
         clearTimeout(timeout); q?.close(); signal?.removeEventListener('abort', cancelled); busy.delete(key); if (release) await release();
       }

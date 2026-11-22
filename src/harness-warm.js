@@ -24,7 +24,7 @@ export async function warmHarnessSession(config, state, { signal, loadSDK }) {
   let q, usage, forkId;
   try {
     q = sdk.query({ prompt: (async function* () { yield { type: 'user', message: { role: 'user', content: 'Cache maintenance only. Reply with a dot. Do not use tools or change any state.' }, parent_tool_use_id: null }; })(), options: {
-      cwd: setup.cwd, env, model: config.model, effort: config.effort || 'low', systemPrompt: setup.system, title: 'Lumi',
+      cwd: setup.cwd, env, model: config.model, effort: config.effort || 'low', systemPrompt: { type: 'custom', prompt: setup.system, snapshot: false }, title: 'Lumi',
       resume: state.sessionId, persistSession: false,
       settingSources: ['project'], tools: [], skills: [], permissionMode: 'dontAsk',
       strictMcpConfig: true, mcpServers: { lumi: server }, allowedTools: setup.tools.map(t => `mcp__lumi__${t.name}`),

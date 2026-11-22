@@ -11,6 +11,7 @@ test('existing chat HTTP route: Harness stream/image/memory, restart/resume, fai
   const dir=await mkdtemp(join(tmpdir(),'lumi-harness-chat-'));
   const capture=join(dir,'sdk-calls.jsonl'), writes=join(dir,'memory-writes.jsonl');
   const probe=createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
+  const duettoProbe=createServer();await new Promise(r=>duettoProbe.listen(0,'127.0.0.1',r));const duettoTestPort=duettoProbe.address().port;await new Promise(r=>duettoProbe.close(r));
   const fake=join(dir,'fake-sdk.mjs'),loader=join(dir,'loader.mjs'),preload=join(dir,'preload.mjs');
   await writeFile(fake,`import {appendFile} from 'node:fs/promises';import {randomUUID} from 'node:crypto';
 export const tool=(name,description,inputSchema,handler)=>({name,description,inputSchema,handler});
@@ -18,12 +19,12 @@ export const createSdkMcpServer=options=>options;
 export function query({prompt,options}){return {close(){},async *[Symbol.asyncIterator](){
  const input=[];for await(const m of prompt)input.push(m);
  const session=options.resume||randomUUID();const blocks=input[0].message.content;const current=blocks.filter(b=>b.type==='text').at(-1)?.text||'';
- await appendFile(${JSON.stringify(capture)},JSON.stringify({resume:options.resume||null,session,system:options.systemPrompt,input,tools:options.tools,registered:options.mcpServers.lumi.tools.map(t=>t.name)})+'\\n');
+ await appendFile(${JSON.stringify(capture)},JSON.stringify({resume:options.resume||null,session,system:typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt,input,tools:options.tools,registered:options.mcpServers.lumi.tools.map(t=>t.name)})+'\\n');
  yield {type:'system',subtype:'init',apiKeySource:'ANTHROPIC_API_KEY',session_id:session};
  if(current.includes('FAIL_HARNESS'))throw new Error('SYNTHETIC_KIMI_FAILURE');
  let text='测试回复';
  if(current.includes('MEMORY_TEST')){const tools=options.mcpServers.lumi.tools;await tools.find(t=>t.name==='memory_search').handler({query:'共同回忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});text+='<memory>合成记忆</memory>';}
- if(options.systemPrompt.includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
+ if((typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt).includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
  yield {type:'stream_event',event:{type:'message_start',message:{id:'m',usage:{input_tokens:100,cache_read_input_tokens:200}}}};
  yield {type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text}}};
  yield {type:'assistant',message:{id:'m',content:[{type:'text',text}]}};
@@ -39,7 +40,7 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
  return Response.json({});};`);
   let child,stderr='';
   async function start(){
-    stderr='';child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),LUMI_DATA_DIR:dir,LUMI_PUSH_API_TOKEN:'test-token',LUMI_HARNESS_ENABLED:'true',LUMI_CHAT_RUNTIME:'kimi-harness',LUMI_KIMI_CODE_API_KEY:'fake-key',LUMI_KIMI_CODE_CONTEXT_TOKENS:'100000',LUMI_MEMORY_API_URL:'https://memory.test',LUMI_CACHE_KEEPALIVE_ENABLED:'false',LUMI_PROMISE_ALARM_ENABLED:'false',LUMI_BACKGROUND_PULSE_MS:'600000',DUETTO_INTERNAL_PORT:'0'},stdio:['ignore','pipe','pipe']});
+    stderr='';child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),LUMI_DATA_DIR:dir,LUMI_PUSH_API_TOKEN:'test-token',LUMI_HARNESS_ENABLED:'true',LUMI_CHAT_RUNTIME:'kimi-harness',LUMI_KIMI_CODE_API_KEY:'fake-key',LUMI_KIMI_CODE_CONTEXT_TOKENS:'100000',LUMI_MEMORY_API_URL:'https://memory.test',LUMI_CACHE_KEEPALIVE_ENABLED:'false',LUMI_PROMISE_ALARM_ENABLED:'false',LUMI_BACKGROUND_PULSE_MS:'600000',DUETTO_INTERNAL_PORT:String(duettoTestPort)},stdio:['ignore','pipe','pipe']});
     child.stderr.on('data',b=>stderr+=b);child.stdout.on('data',b=>stderr+=b);
     for(let i=0;i<500;i++){if(child.exitCode!==null)throw Error(stderr);try{if((await fetch(base+'/health')).ok)return;}catch{}await new Promise(r=>setTimeout(r,40));}throw Error('backend not ready '+stderr);
   }

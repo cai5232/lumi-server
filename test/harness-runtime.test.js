@@ -31,7 +31,7 @@ async function fixture() {
 }
 const turn = (overrides = {}) => ({ threadId:'one', persona:'人格', historyHash:historyFingerprint([]), messages:[{role:'system',content:'人格'},{role:'user',content:'新消息'}], ...overrides });
 
-test('persists disk session; resumes on exact application checkpoint; rebuilds on edits, switches, summary or persona changes', async () => {
+test('persists disk session; resumes on exact application checkpoint; continues through edits, switches, summary or persona changes', async () => {
   const { root, config } = await fixture(), calls = [];
   const loadSDK = async () => fakeSDK(calls);
   try {
@@ -48,23 +48,23 @@ test('persists disk session; resumes on exact application checkpoint; rebuilds o
     assert.equal(calls[1].capturedInput[0].message.content.length,1,'resume sends only the new turn');
     await runtime.finalize(second.receipt,'archive-checkpoint');
     const edited = await runtime.run(turn({historyHash:'edited-history'}));
-    assert.equal(edited.diagnostic.mode,'rebuild');
+    assert.equal(edited.diagnostic.mode,'resume');
     await runtime.finalize(edited.receipt,'edited-history');
     const persona = await runtime.run(turn({historyHash:'edited-history',persona:'新的人格'}));
-    assert.equal(persona.diagnostic.mode,'rebuild');
+    assert.equal(persona.diagnostic.mode,'resume');
     const other = await runtime.run(turn({threadId:'two'}));
     assert.equal(other.diagnostic.mode,'new');
     assert.equal(runtime.diagnostic('one').costUSD,null,'Claude price estimate must not be reported as Kimi billing');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
-test('failed or unexpectedly compacted sessions never resume or call an API fallback', async () => {
+test('provider failures retain the session; unexpected compaction fails without an API fallback', async () => {
   const {root,config}=await fixture(), calls=[];
   try {
     const runtime=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls,{error:true})});
     await assert.rejects(runtime.run(turn()),/synthetic provider failure/);
     const recovered=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls)});
-    assert.equal((await recovered.run(turn())).diagnostic.mode,'new');
+    assert.equal((await recovered.run(turn())).diagnostic.mode,'resume');
     const compact=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls,{compact:true})});
     await assert.rejects(compact.run(turn()),/非预期的原生压缩/);
     assert.equal(calls.length,3,'one selected-provider invocation per turn');
@@ -159,18 +159,18 @@ test('wake sessions resume after restart independently of chat checkpoints, with
     runtime=createHarnessRuntime(config,{loadSDK});
     const next=await runtime.run(turn({scope:'wake',historyHash:'persisted-wake-archive',ephemeral:false}));
     assert.equal(next.diagnostic.mode,'resume');
-    assert.equal(next.diagnostic.sessionReason,'checkpoint_match');
+    assert.equal(next.diagnostic.sessionReason,'continued_session');
     assert.equal(calls[2].options.resume,wake.diagnostic.sessionId);
     assert.notEqual(calls[2].options.resume,chat.diagnostic.sessionId);
     await runtime.finalize(next.receipt,'persisted-wake-archive');
     const changed=await runtime.run(turn({scope:'wake',historyHash:'edited-or-compacted-archive'}));
-    assert.equal(changed.diagnostic.mode,'rebuild');
-    assert.equal(changed.diagnostic.sessionReason,'archive_changed');
+    assert.equal(changed.diagnostic.mode,'resume');
+    assert.equal(changed.diagnostic.sessionReason,'continued_session');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
 
-test('SDK effort defaults to low and changes invalidate the old checkpoint', async () => {
+test('SDK effort defaults to low and changes continue the old session', async () => {
   assert.equal(harnessConfig({}).effort,'low');
   assert.equal(harnessConfig({LUMI_HARNESS_EFFORT:'high'}).effort,'high');
   assert.throws(()=>harnessConfig({LUMI_HARNESS_EFFORT:'medium'}),/low, high or max/);
@@ -184,9 +184,32 @@ test('SDK effort defaults to low and changes invalidate the old checkpoint', asy
     assert.equal(calls[1].options.effort,'low');
     assert.equal(calls[1].options.env.CLAUDE_CODE_EFFORT_LEVEL,'low');
     assert.equal(next.diagnostic.effort,'low');
-    assert.equal(next.diagnostic.sessionReason,'definition_changed');
+    assert.equal(next.diagnostic.sessionReason,'definition_updated_in_place');
     await low.finalize(next.receipt,'same-archive');
     const continued=await low.run(turn({historyHash:'same-archive'}));
     assert.equal(continued.diagnostic.mode,'resume');
   } finally {await rm(root,{recursive:true,force:true});}
+});
+
+test('only application compaction replaces an existing session; history/config changes are synchronized in place', async()=>{
+ const {root,config}=await fixture(),calls=[],loadSDK=async()=>fakeSDK(calls);
+ try{
+  let runtime=createHarnessRuntime(config,{loadSDK});
+  const old=[{id:'a',role:'user',content:'旧原话'},{id:'b',role:'assistant',content:'旧回复'}];
+  const first=await runtime.run(turn({archiveMessages:old,historyHash:historyFingerprint(old),compactedAt:null}));
+  await runtime.finalize(first.receipt,historyFingerprint(old),old);
+  const edited=[{...old[0],content:'更正后的原话'},{id:'c',role:'assistant',content:'唤醒后新增'}];
+  runtime=createHarnessRuntime({...config,model:'k3',effort:'high'},{loadSDK});
+  const continued=await runtime.run(turn({archiveMessages:edited,historyHash:historyFingerprint(edited),compactedAt:null,persona:'更新人格',tools:[{name:'new_business_tool',input_schema:{type:'object',properties:{}}}]}));
+  assert.equal(continued.diagnostic.mode,'resume');assert.equal(continued.diagnostic.sessionId,first.diagnostic.sessionId);
+  const payload=JSON.stringify(calls.at(-1).capturedInput);
+  assert.match(payload,/更正后的原话/);assert.match(payload,/旧回复/);assert.match(payload,/唤醒后新增/);assert.match(payload,/lumi_archive_changes/);
+  await runtime.finalize(continued.receipt,historyFingerprint(edited),edited);
+  const compacted=await runtime.run(turn({archiveMessages:edited,historyHash:historyFingerprint(edited),compactedAt:'2026-11-22T12:00:00Z'}));
+  assert.equal(compacted.diagnostic.mode,'rebuild');assert.equal(compacted.diagnostic.sessionReason,'application_compaction');
+  assert.equal(calls.at(-1).options.resume,undefined);
+  await runtime.finalize(compacted.receipt,historyFingerprint(edited),edited);
+  const next=await runtime.run(turn({archiveMessages:edited,historyHash:historyFingerprint(edited),compactedAt:'2026-11-22T12:00:00Z'}));
+  assert.equal(next.diagnostic.mode,'resume');
+ }finally{await rm(root,{recursive:true,force:true});}
 });
