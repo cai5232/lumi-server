@@ -12,7 +12,10 @@ export function harnessConfig(env = process.env) {
   if (!Number.isSafeInteger(contextTokens) || contextTokens < 20000 || contextTokens > 1048576) {
     throw new Error('LUMI_KIMI_CODE_CONTEXT_TOKENS must be the verified model window (20000–1048576)');
   }
+  const effort = String(env.LUMI_HARNESS_EFFORT || 'low');
+  if (!['low', 'high', 'max'].includes(effort)) throw new Error('LUMI_HARNESS_EFFORT must be low, high or max');
   return {
+    effort,
     enabled: env.LUMI_HARNESS_ENABLED === 'true',
     key: String(env.LUMI_KIMI_CODE_API_KEY || '').trim(), baseURL, model, contextTokens,
     root: resolve(env.LUMI_DATA_DIR || 'data', 'harness'),
@@ -49,6 +52,7 @@ export function harnessEnvironment(config, source = process.env) {
     CLAUDE_AGENT_SDK_CLIENT_APP: 'lumi-server',
     CLAUDE_CODE_MAX_RETRIES: '1',
     ENABLE_TOOL_SEARCH: 'false',
+    CLAUDE_CODE_EFFORT_LEVEL: config.effort || 'low',
     CLAUDE_CODE_PROMPT_CACHE_TTL: config.cacheTTL || '1h',
     CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: config.cacheTTL || '1h',
     API_TIMEOUT_MS: '120000',

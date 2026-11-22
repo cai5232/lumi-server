@@ -114,7 +114,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         const previous = ephemeral || forceRebuild ? null : await store.read(key);
         const system = messages.filter(m => m.role === 'system' || m.role === 'developer').map(m => m.content).join('\n\n');
         const definition = fingerprint({ system, persona, tools, model: config.model, baseURL: config.baseURL,
-          credential: fingerprint(config.key), contextTokens: config.contextTokens, sdk: '0.3.330', policy: 'lumi-managed-compaction-v1' });
+          credential: fingerprint(config.key), contextTokens: config.contextTokens, effort: config.effort || 'low', sdk: '0.3.330', policy: 'lumi-managed-compaction-v1' });
         const resume = previous?.status === 'ready' && previous.definition === definition &&
           previous.expectedHistoryHash === historyHash && previous.sessionId;
         const mode = resume ? 'resume' : forceRebuild || previous?.sessionId ? 'rebuild' : 'new';
@@ -170,7 +170,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
           return { decision: 'block', reason: 'Lumi owns emotional summaries and exact recent turns; compact at application turn boundaries.' };
         };
         q = sdk.query({ prompt: (async function* () { yield { type: 'user', message: { role: 'user', content: input }, parent_tool_use_id: null }; })(), options: {
-          cwd, env, model: config.model, title: 'Lumi', systemPrompt: system, settingSources: ['project'], tools: [], skills: [],
+          cwd, env, model: config.model, effort: config.effort || 'low', title: 'Lumi', systemPrompt: system, settingSources: ['project'], tools: [], skills: [],
           allowedTools: allowed, strictMcpConfig: true, mcpServers: { lumi: server }, permissionMode: 'dontAsk',
           includePartialMessages: true, maxTurns: config.maxTurns, abortController: abort,
           stderr: chunk => { stderr = (stderr + chunk).slice(-2000); },
@@ -213,7 +213,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         if (compacted) throw Object.assign(new Error('检测到非预期的原生压缩；本轮未提交，下次从 Lumi 原文重建'), { code: 'unexpected_harness_compaction', statusCode: 503 });
         const lastUsage = usageById.get(lastMessageId) || [...usageById.values()].at(-1) || result.usage || {};
         onUsage(lastUsage);
-        const diagnostic = { runtime: 'kimi-harness', mode, scope, ephemeral, sessionReason, model: config.model, sessionId, at: new Date().toISOString(),
+        const diagnostic = { runtime: 'kimi-harness', mode, scope, ephemeral, sessionReason, effort: config.effort || 'low', model: config.model, sessionId, at: new Date().toISOString(),
           usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta,
           contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', requestedCacheTTL: config.cacheTTL || '1h', costUSD: null };
         diagnostics.set(threadId, diagnostic);

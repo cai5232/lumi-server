@@ -168,3 +168,25 @@ test('wake sessions resume after restart independently of chat checkpoints, with
     assert.equal(changed.diagnostic.sessionReason,'archive_changed');
   } finally { await rm(root,{recursive:true,force:true}); }
 });
+
+
+test('SDK effort defaults to low and changes invalidate the old checkpoint', async () => {
+  assert.equal(harnessConfig({}).effort,'low');
+  assert.equal(harnessConfig({LUMI_HARNESS_EFFORT:'high'}).effort,'high');
+  assert.throws(()=>harnessConfig({LUMI_HARNESS_EFFORT:'medium'}),/low, high or max/);
+  const {root,config}=await fixture(),calls=[];
+  const loadSDK=async()=>fakeSDK(calls);
+  try {
+    const old=createHarnessRuntime({...config,effort:'max'},{loadSDK});
+    const first=await old.run(turn());await old.finalize(first.receipt,'same-archive');
+    const low=createHarnessRuntime({...config,effort:'low'},{loadSDK});
+    const next=await low.run(turn({historyHash:'same-archive'}));
+    assert.equal(calls[1].options.effort,'low');
+    assert.equal(calls[1].options.env.CLAUDE_CODE_EFFORT_LEVEL,'low');
+    assert.equal(next.diagnostic.effort,'low');
+    assert.equal(next.diagnostic.sessionReason,'definition_changed');
+    await low.finalize(next.receipt,'same-archive');
+    const continued=await low.run(turn({historyHash:'same-archive'}));
+    assert.equal(continued.diagnostic.mode,'resume');
+  } finally {await rm(root,{recursive:true,force:true});}
+});

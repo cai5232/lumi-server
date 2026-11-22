@@ -6192,7 +6192,7 @@ const server = createServer(async (req, res) => {
         await harnessRoutes.save(id, input.runtime, input.sdkModel);
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
       return send(res, 200, { runtime: await harnessRoutes.selection(id), acp: {enabled: process.env.LUMI_ACP_ENABLED === "true", authentication: "native-oauth"}, harness: { enabled: kimiHarnessConfig.enabled,
-        configured: Boolean(kimiHarnessConfig.key), model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
+        configured: Boolean(kimiHarnessConfig.key), effort: kimiHarnessConfig.effort, model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
         compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: sdkRuntime(await harnessRoutes.model(id)).diagnostic(id) } });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);
