@@ -1,3 +1,4 @@
+import { createCompanionPages } from './companion-pages.js';
 import { createAcpAuth } from './acp/auth.js';
 import { createAcpRuntime } from './acp/runtime.js';
 import { createNocturneTools } from "./nocturne-tools.js";
@@ -4570,6 +4571,8 @@ async function executeLubdubTool(name, args) {
   return { ...metadata, content: result.content, replies: (result.replies || []).slice(-4) };
 }
 
+const companionPages = createCompanionPages({ authorized: pushRequestAuthorized });
+
 async function proxyLubdub(req, res, url) {
   res.setHeader("cache-control", "no-store");
   if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
@@ -4638,6 +4641,7 @@ const server = createServer(async (req, res) => {
   let callReservationID;
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.pathname.startsWith("/v1/companions/")) return await companionPages(req, res, url);
     if (url.pathname.startsWith("/v1/lubdub/")) return await proxyLubdub(req, res, url);
     if (url.pathname === "/v1/xiaohongshu/preview" && req.method === "POST") {
       if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
