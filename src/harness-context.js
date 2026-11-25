@@ -3,7 +3,7 @@
 export function harnessContextPolicy(config, settings) {
   const reserve = 12000;
   // Preserve room for the response, tool results and estimation error.
-  const compactionHeadroom = Math.min(32000, Math.floor(config.contextTokens * 0.2));
+  const compactionHeadroom = Math.max(reserve + 4000, Math.min(32000, Math.floor(config.contextTokens * 0.2)));
   const requestedTrigger = Number(settings.triggerTokensEstimate);
   return {
     contextTokens: config.contextTokens,

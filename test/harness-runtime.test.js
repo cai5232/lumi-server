@@ -220,4 +220,5 @@ test('256K model honors the requested 230K compaction threshold with reply/tool 
  assert.equal(policy.triggerTokens,230000);assert.equal(policy.requestedTriggerTokens,230000);
  assert.equal(policy.inputBudget,250144);assert.ok(policy.contextTokens-policy.triggerTokens>=32000);
  assert.equal(harnessContextPolicy({contextTokens:200000},{triggerTokensEstimate:230000}).triggerTokens,168000,'a 230K request is never used on a 200K window');
+ const small=harnessContextPolicy({contextTokens:20000},{triggerTokensEstimate:230000});assert.ok(small.triggerTokens<small.inputBudget,'small windows must also reserve preflight headroom');
 });
