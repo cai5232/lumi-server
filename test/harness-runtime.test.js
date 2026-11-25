@@ -128,7 +128,7 @@ test('budget guard includes project instructions before issuing a model request'
  const config=harnessConfig({});
  assert.equal(config.model,'k3');assert.equal(config.contextTokens,200000);
  const policy=harnessContextPolicy(config,{triggerTokensEstimate:300000});
- assert.equal(policy.inputBudget,188000);assert.equal(policy.triggerTokens,150400);
+ assert.equal(policy.inputBudget,188000);assert.equal(policy.triggerTokens,168000);
  });
 
 test('SDK model choice persists per thread while runtime switching preserves it',async()=>{
@@ -199,7 +199,7 @@ test('only application compaction replaces an existing session; history/config c
   const first=await runtime.run(turn({archiveMessages:old,historyHash:historyFingerprint(old),compactedAt:null}));
   await runtime.finalize(first.receipt,historyFingerprint(old),old);
   const edited=[{...old[0],content:'更正后的原话'},{id:'c',role:'assistant',content:'唤醒后新增'}];
-  runtime=createHarnessRuntime({...config,model:'k3',effort:'high'},{loadSDK});
+  runtime=createHarnessRuntime({...config,model:'k3',effort:'high',contextTokens:262144},{loadSDK});
   const continued=await runtime.run(turn({archiveMessages:edited,historyHash:historyFingerprint(edited),compactedAt:null,persona:'更新人格',tools:[{name:'new_business_tool',input_schema:{type:'object',properties:{}}}]}));
   assert.equal(continued.diagnostic.mode,'resume');assert.equal(continued.diagnostic.sessionId,first.diagnostic.sessionId);
   const payload=JSON.stringify(calls.at(-1).capturedInput);
@@ -212,4 +212,12 @@ test('only application compaction replaces an existing session; history/config c
   const next=await runtime.run(turn({archiveMessages:edited,historyHash:historyFingerprint(edited),compactedAt:'2026-11-22T12:00:00Z'}));
   assert.equal(next.diagnostic.mode,'resume');
  }finally{await rm(root,{recursive:true,force:true});}
+});
+
+
+test('256K model honors the requested 230K compaction threshold with reply/tool headroom',()=>{
+ const policy=harnessContextPolicy({contextTokens:262144},{triggerTokensEstimate:230000});
+ assert.equal(policy.triggerTokens,230000);assert.equal(policy.requestedTriggerTokens,230000);
+ assert.equal(policy.inputBudget,250144);assert.ok(policy.contextTokens-policy.triggerTokens>=32000);
+ assert.equal(harnessContextPolicy({contextTokens:200000},{triggerTokensEstimate:230000}).triggerTokens,168000,'a 230K request is never used on a 200K window');
 });

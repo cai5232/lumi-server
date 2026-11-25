@@ -2414,10 +2414,9 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     const pending = harnessContext;
     const nocturne = createNocturneTools({
       search: async query => { const result = await memorySearchRequest(String(query).slice(0, 800)); return { memories: normalizeMemories(result), matches: result.matches || [] }; },
-      write: content => writeMemory(content, threadId), trace: toolTrace,
+      trace: toolTrace, allowWrites: false,
       ...(process.env.LUMI_MEMORY_PASSWORD ? {
         get: id => nocturneBucketRequest(id),
-        update: (id, content) => nocturneBucketRequest(id, content),
       } : {}),
     });
     const memoryTools = threadId && !singleAttempt ? nocturne.tools : [];
