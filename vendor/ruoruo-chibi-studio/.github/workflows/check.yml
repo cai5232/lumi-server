@@ -1,0 +1,25 @@
+# 每次 push / PR 自动跑总检查：渲染全部 chibi、lint、schema、snippets 比对、文档链接。
+# 本地等价命令：node scripts/check.mjs（只用 Node 自带模块，不用 npm install）
+name: check
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: node scripts/check.mjs

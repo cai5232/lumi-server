@@ -24,6 +24,7 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
  if(current.includes('FAIL_HARNESS'))throw new Error('SYNTHETIC_KIMI_FAILURE');
  let text='测试回复';
  if(current.includes('MEMORY_TEST')){const tools=options.mcpServers.lumi.tools;await tools.find(t=>t.name==='memory_search').handler({query:'共同回忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});text+='<memory>合成记忆</memory>';}
+ if(current.includes('STUDIO_TEST')){const tools=options.mcpServers.lumi.tools;const read=await tools.find(t=>t.name==='lumi_chibi_read').handler({path:'templates/小狐狸1.chibi.json'});const document=JSON.parse(JSON.parse(read.content[0].text).content);await tools.find(t=>t.name==='lumi_chibi_render').handler({document,caption:'本地模拟画作'});}
  if((typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt).includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
  yield {type:'stream_event',event:{type:'message_start',message:{id:'m',usage:{input_tokens:100,cache_read_input_tokens:200}}}};
  yield {type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text}}};
@@ -52,15 +53,47 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     console.log('harness-test-phase: initial');
     await start();
     const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhT8AAAAASUVORK5CYII=';
-    const first=await chat('MEMORY_TEST',{images:[image],stream:true});
+    const first=await chat('MEMORY_TEST STUDIO_TEST',{images:[image],stream:true});
     assert.equal(first.status,200,await first.clone().text());
     const stream=await first.text();assert.match(stream, /"type":"text"/);assert.match(stream,/"type":"complete"/);assert.ok(!stream.includes('<memory>'));
     assert.equal((await readFile(writes,'utf8')).trim().split('\n').length,1,'retrieval, repeated tool call and hidden memory marker never duplicate a write');
+    const firstArchive = JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
+    const drawing = firstArchive.at(-1).toolCalls.find(call => call.name === 'lumi_chibi_render');
+    assert.equal(drawing.succeeded,true);
+    const drawingReceipt = JSON.parse(drawing.result);
+    const actualPNG = await fetch(base + new URL(drawingReceipt.photo.imageURL).pathname, {headers});
+    assert.equal(actualPNG.status,200);
+    assert.equal(Buffer.from(await actualPNG.arrayBuffer()).subarray(1,4).toString(),'PNG');
+    assert.match(stream,/lumi_chibi_render/,'stream completion retains native image receipt');
     const firstCalls=await calls();assert.ok(firstCalls[0].input[0].message.content.some(b=>b.type==='image'));
+    assert.ok(firstCalls[0].registered.includes('lumi_chibi_render'), 'drawing tool is exposed through the existing SDK business bridge');
+    assert.ok(firstCalls[0].registered.includes('lumi_chibi_read'));
+    const originalPersona = await (await fetch(base+'/v1/settings/system-prompt',{headers})).json();
+    const editedPersona = originalPersona.prompt + '\n用户编辑入口测试标记';
+    assert.equal((await fetch(base+'/v1/settings/system-prompt',{method:'PUT',headers,body:JSON.stringify({prompt:editedPersona,revision:originalPersona.revision})})).status,200);
+    const wakeBefore = await (await fetch(base+'/v1/settings/autonomy-prompt',{headers})).json();
+    const wakeEdited = '自主唤醒编辑测试标记';
+    assert.equal((await fetch(base+'/v1/settings/autonomy-prompt',{method:'PUT',headers,body:JSON.stringify({prompt:wakeEdited,revision:wakeBefore.revision})})).status,200);
+    assert.equal((await fetch(base+'/v1/settings/autonomy-prompt',{method:'PUT',headers,body:JSON.stringify({prompt:'旧版本',revision:wakeBefore.revision})})).status,409);
+    assert.equal((await fetch(base+'/v1/settings/autonomy-prompt')).status,401);
+    const sceneBefore = await (await fetch(base+'/v1/settings/wake-scene-prompt',{headers})).json();
+    assert.ok(!sceneBefore.prompt.includes(wakeEdited));
     console.log('harness-test-phase: restart');
     await stop();await start();
     const second=await chat('继续聊天');assert.equal(second.status,200,await second.clone().text());
     const secondCalls=await calls();assert.equal(secondCalls[1].resume,firstCalls[0].session,'HTTP restart uses the persisted checkpoint');
+    assert.ok(secondCalls[1].system.includes('用户编辑入口测试标记'), 'persona editor applies on resumed session');
+    assert.ok(!JSON.stringify(secondCalls[1].input).includes('自主唤醒编辑测试标记'), 'wake-only rules stay out of daily chat');
+    assert.equal((await (await fetch(base+'/v1/settings/autonomy-prompt',{headers})).json()).prompt,wakeEdited, 'wake editor survives restart');
+    const imageID = 'a'.repeat(32);
+    await (await import('node:fs/promises')).mkdir(join(dir,'chibi-images'),{recursive:true});
+    await writeFile(join(dir,'chibi-images',imageID+'.png'),Buffer.from('fixture'));
+    assert.equal((await fetch(base+'/v1/chibi/images/'+imageID+'.png')).status,401);
+    const ownImage = await fetch(base+'/v1/chibi/images/'+imageID+'.png',{headers});
+    assert.equal(ownImage.status,200); assert.equal(ownImage.headers.get('content-type'),'image/png');
+    assert.equal(await ownImage.text(),'fixture');
+    assert.equal((await fetch(base+'/v1/chibi/images/'+'b'.repeat(32)+'.png',{headers})).status,404);
+
     const beforeArchive=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
     console.log('harness-test-phase: failure');
     const failure=await chat('FAIL_HARNESS');assert.equal(failure.status,503);assert.match(await failure.text(),/SYNTHETIC_KIMI_FAILURE/);

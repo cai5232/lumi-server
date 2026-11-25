@@ -22,6 +22,8 @@ import { DEFAULT_CHAT_PERSONA, CHAT_FEATURE_PROMPT, CHAT_PROMPT_SEPARATOR } from
 import { createAppControlStore } from "./app-control.js";
 import { readNote, readNoteImage } from "./xiaohongshu.js";
 import { sleepMessageDecision, sleepInbox, sleepInboxContext, dreamRecords, acknowledgeSleepInbox, validateSoloSettings } from "./sleep-inbox.js";
+import { editablePrompt } from "./editable-prompt.js";
+import { chibiTools, executeChibiTool } from "./chibi-studio.js";
 import { loadChatImages, saveChatImages } from "./chat-images.js";
 import { createInstantCommandStore, parseInstantCommands, commandFeedbackText } from "./instant-commands.js";
 import { createChatJobs } from "./chat-jobs.js";
@@ -1398,6 +1400,8 @@ function saveEmotionState() {
   return operation;
 }
 
+const autonomousPrompt = editablePrompt(dataDir, "autonomy-prompt", promptText("autonomy-2").match(/<wake_task>([\s\S]*?)<\/wake_task>/)[1]);
+const wakeScenePrompt = editablePrompt(dataDir, "wake-scene-prompt", promptText("autonomy").match(/<wake_task>([\s\S]*?)<\/wake_task>/)[1]);
 const chatPersonaPath = join(dataDir, "chat-persona.json");
 let chatPersonaWrite = Promise.resolve();
 
@@ -2329,6 +2333,15 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
       mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
     }
   }
+  if (mcpThreadId && !singleAttempt) {
+    for (const tool of chibiTools) {
+      mcpToolMap.set(tool.name, { tool, chibi: true, allowWrite: true, execute: args => {
+        if (tool.name === "lumi_chibi_render" && toolTrace.filter(call => call.name === tool.name && call.succeeded).length >= 4) throw new Error("这一轮最多画四张图片。");
+        return executeChibiTool(tool.name, args, dataDir);
+      } });
+      mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
+    }
+  }
   for (const [serverIndex, server] of mcpServers.entries()) {
     for (const [toolIndex, tool] of modelToolsForServer(server).entries()) {
       if (!tool?.name || tool.disabled === true) continue;
@@ -2393,7 +2406,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     }
   }
   const anthropicLocalTools = nativeAnthropic && mcpRound < 4
-    ? mcpTools.filter(({ function: tool }) => nativeKimiCache || customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool || mcpToolMap.get(tool.name)?.nativeAlarmTool)
+    ? mcpTools.filter(({ function: tool }) => nativeKimiCache || customProvider?.apiFormat === "anthropic" || mcpToolMap.get(tool.name)?.server?.id === ENGAWA_SERVER_ID || mcpToolMap.get(tool.name)?.engawaPhoto || mcpToolMap.get(tool.name)?.chibi || mcpToolMap.get(tool.name)?.tool?.name === "surf_web_and_save" || mcpToolMap.get(tool.name)?.appControlTool || mcpToolMap.get(tool.name)?.lubdubTool || mcpToolMap.get(tool.name)?.friendCircleTool || mcpToolMap.get(tool.name)?.nativeAlarmTool)
       .map(({ function: tool }) => ({ name: tool.name, description: tool.description, input_schema: tool.parameters }))
     : [];
   if (isHarness) {
@@ -3528,11 +3541,16 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
   const wakeDecisionFormat = promptTemplate("wake-decision-format-07", [wakeFindingsPrompt, 24 * 60]);
-  const proactiveDirective = wakeSceneTriggers?.length
+  let proactiveDirective = wakeSceneTriggers?.length
     ? promptTemplate("autonomy", [wakeDecisionFormat])
     : proactive
     ? promptTemplate("autonomy-2", [activeSentinelActions.join("|"), wakeDecisionFormat, sentinelActivitySummary ? `<phone_activity_summary>${sentinelActivitySummary}</phone_activity_summary>\n` : ""])
     : "";
+  if (proactiveDirective) {
+    const prompt = await (wakeSceneTriggers?.length ? wakeScenePrompt : autonomousPrompt).read();
+    // Only the editable task body changes; action/protocol fields stay server-owned.
+    proactiveDirective = proactiveDirective.replace(/<wake_task>[\s\S]*?<\/wake_task>/, () => `<wake_task>${prompt}</wake_task>`);
+  }
   const sentinelActionRule = proactive && !wakeSceneTriggers?.length
     ? promptTemplate("sentinel-action-rule-08", [Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2), Number(sharedEmotionState.drives?.anger || 0).toFixed(2)])
     : "";
@@ -6062,6 +6080,28 @@ const server = createServer(async (req, res) => {
         }
       }
       return send(res, 405, { error: "method_not_allowed" });
+    }
+    const chibiImage = url.pathname.match(/^\/v1\/chibi\/images\/([a-f0-9]{32})\.png$/);
+    if (chibiImage) {
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
+      try {
+        const png = await readFile(join(dataDir, "chibi-images", `${chibiImage[1]}.png`));
+        res.writeHead(200, { "content-type": "image/png", "cache-control": "private, max-age=86400", "x-content-type-options": "nosniff" });
+        return res.end(png);
+      } catch (error) { if (error.code === "ENOENT") return send(res, 404, { error: "image_not_found" }); throw error; }
+    }
+    if (["/v1/settings/autonomy-prompt", "/v1/settings/wake-scene-prompt"].includes(url.pathname)) {
+      res.setHeader("cache-control", "no-store");
+      if (!pushRequestAuthorized(req)) return send(res, 401, { error: "unauthorized" });
+      const store = url.pathname.endsWith("/autonomy-prompt") ? autonomousPrompt : wakeScenePrompt;
+      if (req.method === "GET") return send(res, 200, store.snapshot(await store.read()));
+      if (req.method !== "PUT") return send(res, 405, { error: "method_not_allowed" });
+      const input = await limitedJSONBody(req, 3600000);
+      if (typeof input?.prompt !== "string" || typeof input?.revision !== "string") return send(res, 400, { error: "invalid_prompt" });
+      const saved = await store.save(input.prompt, input.revision);
+      if (!saved) return send(res, 409, { error: "提示词已更新。请重新读取最新版本，再合并你的修改。" });
+      return send(res, 200, saved);
     }
     if (url.pathname === "/v1/settings/system-prompt") {
       res.setHeader("cache-control", "no-store");

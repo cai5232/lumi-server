@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ruo-rongyu/ruoruo-chibi-studio/schema/ruoruo-chibi.schema.json",
+  "title": "ruoruo-chibi@0.1",
+  "description": "若若 Q 版小动物的源文件格式。坐标系头宽 W = 100，原点在头外框左上角。字段含义见 references/output.md。顶层字段写错（比如 bodyview）直接报错；部件里不认识的字段 lint 会提醒并猜你想写哪个。",
+  "type": "object",
+  "required": ["schema", "parts"],
+  "properties": {
+    "schema": { "const": "ruoruo-chibi@0.1" },
+    "title": { "type": "string" },
+    "from": { "type": "string", "description": "从哪个模板改来的，对应 templates/<from>.chibi.json。写了 lint 就拿五官和它逐点比" },
+    "source": { "type": "string", "description": "这份底稿从哪来，给人看的说明" },
+    "axis": { "type": "number", "description": "mirror 的对称轴 x，默认 50" },
+    "view": { "$ref": "#/$defs/viewAngles" },
+    "bodyView": { "$ref": "#/$defs/viewAngles" },
+    "viewBox": { "$ref": "#/$defs/num4" },
+    "background": { "$ref": "#/$defs/paint" },
+    "sticker": { "$ref": "#/$defs/effect" },
+    "pastel": { "$ref": "#/$defs/effect" },
+    "pose": {
+      "type": "object",
+      "description": "动作分组：组名 → 转轴和位移。部件用 group 归组",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "rotate": { "type": "number" },
+          "cx": { "type": "number" },
+          "cy": { "type": "number" },
+          "dx": { "type": "number" },
+          "dy": { "type": "number" },
+          "parent": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "action": {
+      "type": "object",
+      "description": "这份底稿由哪个动作从哪个模板算出来。check.mjs 拿它和原模板对比，查动作有没有真的做到",
+      "required": ["type", "from"],
+      "properties": {
+        "type": { "enum": ["坐下"] },
+        "from": { "type": "string", "description": "原模板名，对应 templates/<from>.chibi.json" },
+        "legScale": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+        "legUp": { "type": "number" },
+        "tailTurn": { "type": "number", "description": "尾巴绕尾根转了多少度，0 表示没转" },
+        "tailRoot": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "tailUp": { "type": "number", "minimum": 0, "description": "转完尾巴还比脚底低时，整条竖直上提了多少" }
+      },
+      "additionalProperties": false
+    },
+    "backdrop": { "type": "object", "description": "scripts/backdrop.mjs 写的记录：用了哪个套路、哪张色卡" },
+    "//": { "type": "string", "description": "注释，渲染时忽略" },
+    "parts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/part" } }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "viewAngles": {
+      "type": "object",
+      "properties": {
+        "yaw": { "type": "number", "minimum": -40, "maximum": 40 },
+        "pitch": { "type": "number", "minimum": -24, "maximum": 24 }
+      },
+      "additionalProperties": false
+    },
+    "num4": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 },
+    "point": {
+      "type": "array",
+      "description": "[x, y] 或 [x, y, 这个角的圆角]",
+      "items": { "type": "number" },
+      "minItems": 2,
+      "maxItems": 3
+    },
+    "color": { "type": "string", "pattern": "^(#[0-9a-fA-F]{3,8}|none|white|black|transparent)$" },
+    "stop": {
+      "oneOf": [
+        { "$ref": "#/$defs/color" },
+        { "type": "array", "prefixItems": [{ "$ref": "#/$defs/color" }, { "type": "number" }, { "type": "number" }], "minItems": 2, "maxItems": 3 }
+      ]
+    },
+    "gradient": {
+      "type": "object",
+      "required": ["stops"],
+      "properties": {
+        "linear": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "minItems": 2, "maxItems": 2 },
+        "radial": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 4 },
+        "stops": { "type": "array", "items": { "$ref": "#/$defs/stop" }, "minItems": 1 }
+      },
+      "oneOf": [{ "required": ["linear"] }, { "required": ["radial"] }]
+    },
+    "paint": { "oneOf": [{ "$ref": "#/$defs/color" }, { "$ref": "#/$defs/gradient" }] },
+    "effect": {
+      "description": "true / false / 数字 / 参数对象",
+      "oneOf": [{ "type": "boolean" }, { "type": "number" }, { "type": "object" }]
+    },
+    "names": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" }, "minItems": 1 }] },
+    "part": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "description": "部位中文名。clip 靠它找遮罩；新部件不要再用 Rectangle 23 这类导出名" },
+        "type": {
+          "enum": ["ellipse", "line", "path", "star", "noise", "blob", "halftone", "sparkle", "doodle", "scatter", "band", "lace", "flap"]
+        },
+        "//": { "type": "string", "description": "注释，渲染时忽略" },
+        "pts": { "type": "array", "items": { "$ref": "#/$defs/point" }, "minItems": 2 },
+        "d": { "type": "string" },
+        "r": { "type": "number" },
+        "smooth": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fill": { "$ref": "#/$defs/paint" },
+        "stroke": { "$ref": "#/$defs/color" },
+        "sw": { "type": "number", "exclusiveMinimum": 0 },
+        "join": { "enum": ["round", "miter", "bevel"] },
+        "opacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "blur": { "type": "number", "minimum": 0 },
+        "blend": { "type": "string" },
+        "hidden": { "type": "boolean" },
+        "expr": { "type": "boolean", "description": "故意换过的表情五官（wink、笑眯眼……），lint 不拿它和模板比" },
+        "clip": { "$ref": "#/$defs/names" },
+        "mirror": { "oneOf": [{ "type": "boolean" }, { "const": "before" }] },
+        "mirrorName": { "type": "string" },
+        "mirrorGroup": { "type": "string" },
+        "group": { "type": "string" },
+        "rotate": { "type": "number" },
+        "cx": { "type": "number" },
+        "cy": { "type": "number" },
+        "rx": { "type": "number" },
+        "ry": { "type": "number" },
+        "points": { "type": "integer", "minimum": 2 },
+        "inner": { "type": "number" },
+        "fold": {
+          "type": "object",
+          "required": ["line"],
+          "properties": {
+            "line": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }, "minItems": 2, "maxItems": 2 },
+            "bend": { "type": "number" },
+            "r": { "type": "number" },
+            "keep": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 }
+          }
+        },
+        "of": { "type": "string" },
+        "along": { "type": "array", "items": { "type": "string" } },
+        "around": { "type": "array", "items": { "type": "string" } },
+        "brush": { "$ref": "#/$defs/effect" },
+        "sticker": { "$ref": "#/$defs/effect" },
+        "kind": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "kinds": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "kindsInOrder": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "size": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "rot": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "waist": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "waistR": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "tipR": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "notchR": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "innerR": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "lobes": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "wobble": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "seed": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "colors": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "colorsInOrder": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "count": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "dist": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "jitter": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "center": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "orbit": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "soft": { "description": "装饰 doodle / sparkle / blob / scatter 的参数，见 references/output.md" },
+        "patch": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "area": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "gap": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "from": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "to": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "gamma": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "radius": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "edge": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "grid": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "angle": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "dot": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "dotScale": { "description": "网点 halftone 的参数，见 references/output.md" },
+        "freq": { "description": "噪点 noise 的参数，见 references/output.md" },
+        "octaves": { "description": "噪点 noise 的参数，见 references/output.md" },
+        "cover": { "description": "噪点 noise 的参数，见 references/output.md" },
+        "turbulence": { "description": "噪点 noise 的参数，见 references/output.md" },
+        "span": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "width": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "ease": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "tuck": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "top": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "end": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "inset": { "description": "月牙带 band / 蕾丝 lace 的参数，见 references/output.md" },
+        "keep": { "description": "scatter 只留哪一段，见 references/output.md" },
+        "scale": { "not": {}, "description": "不许用 scale 改部件形状，改形状靠拉点" }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "ellipse" } }, "required": ["type"] }, "then": { "required": ["cx", "cy", "rx", "ry"] } },
+        { "if": { "properties": { "type": { "const": "star" } }, "required": ["type"] }, "then": { "required": ["cx", "cy", "rx", "ry"] } },
+        { "if": { "properties": { "type": { "const": "path" } }, "required": ["type"] }, "then": { "required": ["d"] } },
+        { "if": { "properties": { "type": { "const": "line" } }, "required": ["type"] }, "then": { "required": ["pts"] } },
+        { "if": { "properties": { "type": { "const": "flap" } }, "required": ["type"] }, "then": { "required": ["of"] } },
+        { "if": { "not": { "required": ["type"] } }, "then": { "required": ["pts"] } }
+      ]
+    }
+  }
+}

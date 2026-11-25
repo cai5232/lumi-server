@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="300" height="300" data-snippet="brush@2026-11-24">
+<!--
+笔刷毛边（render.mjs 部件字段 brush: 8 的默认值，2026-11-24），用在天空、草地、水面这类环境色块和涂鸦色块上。
+整段复制进 <defs>，一个字都不改，只允许给 id 加前缀，把 filter="url(#brush)" 写在色块自己身上。
+色块要当蒙版用时，把带 filter 的白色块放进 <mask>（不是 <clipPath>），毛边才会带进去。要别的毛边大小时走 A 路线。
+-->
+<defs>
+<filter id="brush" x="-20%" y="-20%" width="140%" height="140%"><feTurbulence type="fractalNoise" baseFrequency="0.03 0.06" numOctaves="3" seed="5" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="8" xChannelSelector="R" yChannelSelector="G"/></filter>
+</defs>
+<rect x="15" y="30" width="70" height="40" rx="10" fill="#cfe3b4" filter="url(#brush)"/>
+</svg>

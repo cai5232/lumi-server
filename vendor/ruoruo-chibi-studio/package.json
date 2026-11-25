@@ -1,0 +1,15 @@
+{
+  "name": "ruoruo-chibi-studio",
+  "version": "0.1.0",
+  "description": "若若的小动物画室：把相处瞬间画成圆角多边形 Q 版小动物（SVG）",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "snippets": "node scripts/snippets.mjs && node scripts/backdrop-snippets.mjs",
+    "pack": "node scripts/pack-skill.mjs"
+  }
+}

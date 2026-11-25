@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="300" height="300" data-snippet="sticker@2026-11-24">
+<!--
+贴纸白边（render.mjs 顶层 sticker 默认值：白色、宽 2.4，2026-11-24）。
+整段复制进 <defs>，一个字都不改，只允许给 id 加前缀。把要描边的角色或装饰包在 <g filter="url(#sticker)">。
+B 路线只用这一版；要换宽度、外圈色边（edge）时走 A 路线由 render.mjs 生成。
+-->
+<defs>
+<filter id="sticker" x="-20%" y="-20%" width="140%" height="140%"><feMorphology in="SourceAlpha" operator="dilate" radius="1.68" result="d"/><feGaussianBlur in="d" stdDeviation="0.96" result="b"/><feComponentTransfer in="b" result="a"><feFuncA type="linear" slope="12" intercept="-4"/></feComponentTransfer><feFlood flood-color="#ffffff"/><feComposite in2="a" operator="in" result="o"/><feMerge><feMergeNode in="o"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+<g filter="url(#sticker)"><circle cx="50" cy="50" r="28" fill="#f2b98a"/></g>
+</svg>
