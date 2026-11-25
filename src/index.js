@@ -2336,8 +2336,8 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
   if (mcpThreadId && !singleAttempt) {
     for (const tool of chibiTools) {
       mcpToolMap.set(tool.name, { tool, chibi: true, allowWrite: true, execute: args => {
-        if (tool.name === "lumi_chibi_render" && toolTrace.filter(call => call.name === tool.name && call.succeeded).length >= 4) throw new Error("这一轮最多画四张图片。");
-        return executeChibiTool(tool.name, args, dataDir);
+        if (["lumi_chibi_render", "lumi_chibi_send"].includes(tool.name) && toolTrace.filter(call => call.name === tool.name && call.succeeded).length >= 4) throw new Error("这一轮最多画四张图片。");
+        return executeChibiTool(tool.name, args, dataDir, { threadId: mcpThreadId });
       } });
       mcpTools.push({ type: "function", function: { name: tool.name, description: tool.description, parameters: tool.inputSchema } });
     }

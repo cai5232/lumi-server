@@ -24,7 +24,7 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
  if(current.includes('FAIL_HARNESS'))throw new Error('SYNTHETIC_KIMI_FAILURE');
  let text='测试回复';
  if(current.includes('MEMORY_TEST')){const tools=options.mcpServers.lumi.tools;await tools.find(t=>t.name==='memory_search').handler({query:'共同回忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});await tools.find(t=>t.name==='memory_write').handler({content:'合成记忆'});text+='<memory>合成记忆</memory>';}
- if(current.includes('STUDIO_TEST')){const tools=options.mcpServers.lumi.tools;const read=await tools.find(t=>t.name==='lumi_chibi_read').handler({path:'templates/小狐狸1.chibi.json'});const document=JSON.parse(JSON.parse(read.content[0].text).content);await tools.find(t=>t.name==='lumi_chibi_render').handler({document,caption:'本地模拟画作'});}
+ if(current.includes('STUDIO_TEST')){const tools=options.mcpServers.lumi.tools;const read=await tools.find(t=>t.name==='lumi_chibi_read').handler({path:'templates/小狐狸1.chibi.json'});const document=JSON.parse(JSON.parse(read.content[0].text).content);const preview=await tools.find(t=>t.name==='lumi_chibi_render').handler({document,preview_only:true});if(!preview.content.some(c=>c.type==='image'))throw Error('missing visual preview');const draft=JSON.parse(preview.content[0].text);await tools.find(t=>t.name==='lumi_chibi_send').handler({draft_id:draft.draft_id,caption:'本地模拟画作'});}
  if((typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt).includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
  yield {type:'stream_event',event:{type:'message_start',message:{id:'m',usage:{input_tokens:100,cache_read_input_tokens:200}}}};
  yield {type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text}}};
@@ -58,7 +58,7 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     const stream=await first.text();assert.match(stream, /"type":"text"/);assert.match(stream,/"type":"complete"/);assert.ok(!stream.includes('<memory>'));
     assert.equal((await readFile(writes,'utf8')).trim().split('\n').length,1,'retrieval, repeated tool call and hidden memory marker never duplicate a write');
     const firstArchive = JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
-    const drawing = firstArchive.at(-1).toolCalls.find(call => call.name === 'lumi_chibi_render');
+    const drawing = firstArchive.at(-1).toolCalls.find(call => call.name === 'lumi_chibi_send');
     assert.equal(drawing.succeeded,true);
     const drawingReceipt = JSON.parse(drawing.result);
     const actualPNG = await fetch(base + new URL(drawingReceipt.photo.imageURL).pathname, {headers});

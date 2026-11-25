@@ -1,3 +1,4 @@
+import { sdkToolResponse } from "./tool-media.js";
 import { archiveSnapshot, archiveChanges, archiveChangeBlocks } from './harness-continuity.js';
 import { warmHarnessSession } from './harness-warm.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -152,7 +153,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
             onEvent({ type: 'tool_use', name: t.name });
             const result = await executeTool(t.name, schema.parse(args));
             onEvent({ type: 'tool_result', name: t.name, isError: Boolean(result?.isError) });
-            return { content: [{ type: 'text', text: JSON.stringify(result) }], ...(result?.isError ? { isError: true } : {}) };
+            return sdkToolResponse(result);
           });
         }) });
         const allowed = tools.map(t => `mcp__lumi__${t.name}`);

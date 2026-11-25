@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { query, tool, createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import { withToolImages } from '../src/tool-media.js';
 import { harnessEnvironment } from '../src/harness-config.js';
 import { createHarnessRuntime } from '../src/harness-runtime.js';
 
@@ -71,9 +72,10 @@ test('real pinned SDK: project instructions, streamed tool loop, image blocks, d
     let businessExecutions = 0;
     const request = {threadId:'thread',persona:'PERSONA_EXACT',historyHash:'empty',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_0'}],
       tools:[{name:'probe_echo',description:'Echo',input_schema:{type:'object',properties:{value:{type:'string'}},required:['value'],additionalProperties:false}}],
-      executeTool: async(_name,args)=>{businessExecutions++;return {echo:args.value};}};
+      executeTool: async(_name,args)=>{businessExecutions++;return withToolImages({echo:args.value},[{type:'image',mimeType:'image/png',data:'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhT8AAAAASUVORK5CYII='}]);}};
     const generated = await runtime.run(request);
     assert.equal(generated.content,'CONTRACT_OK');
+    assert.ok(bodies.some(body=>body.messages.some(message=>Array.isArray(message.content)&&message.content.some(block=>block.type==='tool_result'&&Array.isArray(block.content)&&block.content.some(item=>item.type==='image')))), 'real SDK forwards drawing preview as a model-visible image tool result');
     await runtime.finalize(generated.receipt,'after-first');
     runtime = makeRuntime();
     const resumed = await runtime.run({...request,historyHash:'after-first',messages:[{role:'system',content:'PERSONA_EXACT'},{role:'user',content:'RUNTIME_1'}]});

@@ -79,7 +79,7 @@ const escapeHTML = value => String(value || '').replace(/[&<>"']/g, char => ({ '
 export function engawaPhotoCard(toolTrace, reply = '') {
   const photos = [];
   for (const call of toolTrace) {
-    if (![ENGAWA_PHOTO_TOOL, 'lumi_chibi_render'].includes(call.name) || call.succeeded !== true) continue;
+    if (call.name !== ENGAWA_PHOTO_TOOL || call.succeeded !== true) continue;
     let result;
     try { result = JSON.parse(call.result); } catch { continue; }
     const photo = result?.ok && result.photo;
