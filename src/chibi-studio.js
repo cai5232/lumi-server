@@ -15,7 +15,7 @@ async function list(directory = '') {
   for (const item of items) {
     if (item.name.startsWith('.')) continue;
     const path = directory ? `${directory}/${item.name}` : item.name;
-    if (item.isDirectory() && ['templates','references','schema','snippets'].includes(path.split('/')[0])) out.push(...await list(path));
+    if (item.isDirectory() && ['templates','references','schema','snippets','examples'].includes(path.split('/')[0])) out.push(...await list(path));
     else if (item.isFile() && /\.(md|json|svg)$/.test(path)) out.push(path);
   }
   return out;
