@@ -23,7 +23,7 @@ test('original studio template renders durable private PNG with small chat recei
     const file = (await readdir(join(dir, 'chibi-images')))[0];
     const png = await readFile(join(dir, 'chibi-images', file));
     const meta = await sharp(png).metadata();
-    assert.equal(meta.format, 'png'); assert.equal(meta.width, 1600);
+    assert.equal(meta.format, 'png'); assert.equal(meta.width, 1024);
     assert.match(result.photo.imageURL, /\/v1\/chibi\/images\/[a-f0-9]{32}\.png$/);
     // The model cannot turn the renderer into a file/network/script execution tool.
     await assert.rejects(renderChibiImage(dir, { document: { ...document, background: 'url(https://internal/secret)' } }));

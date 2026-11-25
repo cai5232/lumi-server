@@ -5,5 +5,6 @@ const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
 const svg = renderChibi(input);
 // Renderer produces local vectors only. Never let SVG load external resources.
 if (/<(?:script|image|foreignObject|iframe|style)\b|\bon\w+\s*=|\bhref\s*=|<!ENTITY|<!DOCTYPE|url\(\s*[^#]/i.test(svg)) throw Error('unsafe_svg');
-const png = await sharp(Buffer.from(svg), { limitInputPixels: 16_000_000 }).resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: false }).png().toBuffer();
+sharp.concurrency(1);
+const png = await sharp(Buffer.from(svg), { limitInputPixels: 16_000_000 }).resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: false }).png().toBuffer();
 process.stdout.write(png);

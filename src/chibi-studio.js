@@ -47,7 +47,7 @@ export async function renderChibiImage(dataDir, args, { publicBaseURL = process.
   const png = await new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ['--max-old-space-size=256', fileURLToPath(new URL('./chibi-render-worker.js', import.meta.url))], { stdio: ['pipe','pipe','pipe'], env: { PATH: process.env.PATH } });
     const chunks = []; let size = 0; let errorText = '';
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('chibi_render_timeout')); }, 30000);
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(Error('chibi_render_timeout')); }, 60000);
     child.stdout.on('data', chunk => { size += chunk.length; if (size > 12000000) { child.kill('SIGKILL'); reject(Error('chibi_image_too_large')); } else chunks.push(chunk); });
     child.stderr.on('data', chunk => { errorText = (errorText + chunk).slice(-1000); });
     child.on('error', reject);
