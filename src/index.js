@@ -59,7 +59,7 @@ import { ENGAWA_READ_ONLY_TOOLS, ENGAWA_SERVER_ID, McpClientStore, callMcpTool, 
 import { calendarEnvironment, calendarTool, calendarTools, calendarRoute, applyCalendarMessage, markCalendarChangesSeen } from "./calendar.js";
 import { createMusicService } from "./music.js";
 import { capturePromiseAlarm, promiseAlarmAuthorized, promiseAlarmContext, promiseAlarmEnabled, proxyPromiseAlarm, startPromiseAlarm, stopPromiseAlarm } from "./promise-alarm.js";
-import { DEFAULT_WAKE_MINUTES, normalizeFollowUpDecision, wakeIntervalMinutes } from "./sentinel-follow-up.js";
+import { DEFAULT_WAKE_MINUTES, SILENT_WAKE_TOKEN, wakeOutcome, wakeSessionScope, wakeIntervalMinutes } from "./sentinel-follow-up.js";
 import { createStickerStore, stickerMessageForModel } from "./stickers.js";
 import { createDesktopCompanionService } from "./desktop-companion.js";
 import { applyLiveAttentionUpdate, buildLiveAttentionContext } from "./live-attention.js";
@@ -448,6 +448,7 @@ function ensureProactive(thread) {
     thread.proactive = { enabled: false, threadId: thread.id, message: "有一段时间没聊了，结合我们的上下文自然地来找我说句话。", intervalMin: DEFAULT_WAKE_MINUTES, intervalMax: DEFAULT_WAKE_MINUTES, nextDueAt: null, scheduledForUserMessageId: null, actions: { message: true, phone: true, screen: false } };
   }
   if (!thread.proactive.actions || typeof thread.proactive.actions !== "object") thread.proactive.actions = { message: true, phone: true, screen: false };
+  thread.proactive.intervalMin = thread.proactive.intervalMax = DEFAULT_WAKE_MINUTES;
   return thread.proactive;
 }
 
@@ -635,16 +636,13 @@ function emotionPushDue(state, now) {
   return { drive: top.drive, label: top.label, message: copy[top.drive] || "忽然想来找你说说话。" };
 }
 
-async function generateSentinelWake(thread, sceneTriggers) {
+async function generateSentinelWake(thread, sceneTriggers = []) {
   const proactive = proactiveSettings.threadId === thread.id ? proactiveSettings : ensureProactive(thread);
   const actionSettings = proactive.actions || { message: true, phone: true, screen: false };
   const nightActivityWake = Date.parse(ensureActivity(thread).nightActivityWakeUntil || "") > Date.now();
-  const fatigue = Number(sharedEmotionState.drives?.fatigue || 0);
-  const anger = Number(sharedEmotionState.drives?.anger || 0);
-  const restAllowed = sceneTriggers.length > 0 || fatigue >= 0.85 || anger >= 0.90;
-  const allowedActions = (nightActivityWake || sceneTriggers.length ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
-  if (!allowedActions.length) allowedActions.push("message");
-  if (restAllowed) allowedActions.push("none");
+  const allowedActions = (proactive.dnd ? [] : nightActivityWake || sceneTriggers.length ? ["message"] : ["message", "phone", "screen"]).filter((action) => actionSettings[action] === true && (action !== "phone" || canPlaceProactiveCall(thread)));
+  if (!allowedActions.length && !proactive.dnd) allowedActions.push("message");
+  allowedActions.push("none");
   // Background wakes have no frontend payload: use the persisted, encrypted
   // conversation route rather than the cache provider (custom chats store
   // "zenmux" there for cache compatibility).
@@ -671,18 +669,17 @@ async function generateSentinelWake(thread, sceneTriggers) {
     customProvider: route.customProvider || null
   });
   const decision = generated.sentinelDecision || {};
-  const requestedAction = allowedActions.includes(decision.action) ? decision.action : "message";
-  const action = requestedAction === "none" && !restAllowed ? "message" : requestedAction;
-  const nextWakeMinutes = wakeIntervalMinutes(decision.nextWakeMinutes, wakeIntervalMinutes(proactive.intervalMin));
-  const followUpDecision = normalizeFollowUpDecision(decision, allowedActions);
+  const { action, nextWakeMinutes, followUp } = wakeOutcome(generated, allowedActions);
+  thread.lastMeasuredInputTokens = generated.measuredInputTokens;
   return {
-    message: { id: randomUUID(), role: "assistant", content: generated.content || "我刚刚想到你，想来找你说说话。", toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
+    message: { id: randomUUID(), role: "assistant", content: action === "none" ? "" : generated.content || "我刚刚想到你，想来找你说说话。", toolCalls: generated.toolCalls || [], thinking: generated.thinking, modelContent: generated.modelContent, precedingUserModelContent: generated.userModelContent, contentType: "sentinel", htmlContent: generated.htmlContent || null, htmlTitle: generated.htmlTitle || null, createdAt: new Date().toISOString() },
     action,
+    compactionRoute: route,
     actionReason: typeof decision.actionReason === "string" ? decision.actionReason.trim() : "",
     callOpening: typeof decision.callOpening === "string" ? decision.callOpening.trim() : "",
     nextWakeMinutes,
     harnessReceipt: generated.harnessReceipt,
-    followUp: followUpDecision,
+    followUp,
     hasSceneReply: Boolean(generated.content?.trim() || generated.htmlContent),
     emotionUpdate: generated.emotionUpdate,
     cacheSnapshot: {
@@ -1020,6 +1017,7 @@ async function runBackgroundPulse() {
     let threadChanged = false;
     let thread;
     let wakeHarnessReceipt;
+    let wakeCompactionRoute;
     try {
     thread = (await readThreads())[threadId] || cachedThread;
     if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
@@ -1101,18 +1099,6 @@ async function runBackgroundPulse() {
         threadChanged = true;
       }
     } else if (proactive.enabled && activity.mode === "sentinel" && !activity.sleepPendingAt && (regularWakeDue || sceneTriggers.length)) {
-      const lastActivityAt = Date.parse(activity.lastUserActivityAt || 0);
-      const followUpForWake = regularWakeDue ? activity.followUp || null : null;
-      const isFollowUp = Boolean(followUpForWake);
-      // The configured interval is the first system wake after chat/settings.
-      // Keep the plan's 30-minute recent-activity guard only for AI-written notes.
-      if (!sceneTriggers.length && !isFollowUp && activity.nextWakeSource !== "settings" && activity.nextWakeSource !== "sleep_wake" && now - lastActivityAt < 30 * 60_000) {
-        activity.nextWakeAt = new Date(lastActivityAt + 30 * 60_000).toISOString();
-        activity.nextWakeSource = "ai";
-        proactive.nextDueAt = activity.nextWakeAt;
-        threadChanged = true;
-        continue;
-      }
 
       try {
         proactiveDiagnostics.lastReason = "generating";
@@ -1121,21 +1107,24 @@ async function runBackgroundPulse() {
         const wakeStartedAt = new Date();
         const wake = await generateSentinelWake(thread, sceneTriggers);
         wakeHarnessReceipt = wake.harnessReceipt;
+        wakeCompactionRoute = wake.compactionRoute;
         if (sentinelGenerationControllers.get(threadId)?.signal.aborted) continue;
+        if (wake.emotionUpdate) emotionChanged = true;
         if (wake.action === "none" || (sceneTriggers.length && !wake.hasSceneReply)) {
           const restEvent = recordActivityEvent(thread, "rest", "休息一下", sceneTriggers.length
             ? "这次情境唤醒没有发消息，保留待处理的事件和字条。"
-            : "这次因疲惫或生气值偏高，选择暂时休息。", new Date(now));
+            : "这次醒来选择安静陪伴，没有发送聊天消息。", new Date(now));
           activity.lastWakeAt = new Date(now).toISOString();
           if (sceneTriggers.length) thread.wakeScenes = { ...scenes, retryAt: now + 15 * 60_000 };
+          activity.followUp = null;
           if (regularWakeDue) {
-            activity.nextWakeAt = new Date(now + wake.nextWakeMinutes * 60_000).toISOString();
+            activity.nextWakeAt = new Date(Date.now() + wake.nextWakeMinutes * 60_000).toISOString();
             activity.nextWakeSource = "ai";
             proactive.nextDueAt = activity.nextWakeAt;
           }
           proactiveDiagnostics.lastSuccessAt = new Date(now).toISOString();
           proactiveDiagnostics.lastError = null;
-          proactiveDiagnostics.lastReason = "resting_for_high_fatigue_or_anger";
+          proactiveDiagnostics.lastReason = "silent_wake";
           finishWakeRecord(restEvent, wakeStartedAt, activity.nextWakeAt);
           threadChanged = true;
           continue;
@@ -1173,7 +1162,6 @@ async function runBackgroundPulse() {
           }
         }
         if (wake.action === "screen") wake.message.createdAt = new Date().toISOString();
-        if (wake.emotionUpdate) emotionChanged = true;
         thread.messages.push(wake.message);
         const wakeAt = Date.parse(wake.message.createdAt) || now;
         thread.wakeScenes = completeWakeScenes(scenes, sceneTriggers, wakeAt);
@@ -1228,19 +1216,10 @@ async function runBackgroundPulse() {
         proactiveDiagnostics.lastError = null;
         proactiveDiagnostics.lastReason = "generated";
         activity.lastWakeAt = wake.message.createdAt;
-        if (followUpForWake) {
-          const followUp = activity.followUp || followUpForWake;
-          activity.followUp = { ...followUp, minutes: wakeIntervalMinutes(followUp.minutes) };
-          activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + activity.followUp.minutes * 60_000).toISOString();
-          activity.nextWakeSource = "follow_up";
-        } else if (wake.followUp) {
-          activity.followUp = wake.followUp;
-          activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.followUp.minutes * 60_000).toISOString();
-          activity.nextWakeSource = "follow_up";
-        } else if (regularWakeDue) {
-          activity.followUp = null;
-          activity.nextWakeAt = new Date(Date.parse(wake.message.createdAt) + wake.nextWakeMinutes * 60_000).toISOString();
-          activity.nextWakeSource = "ai";
+        activity.followUp = null;
+        if (regularWakeDue) {
+          activity.nextWakeAt = new Date(Date.now() + DEFAULT_WAKE_MINUTES * 60_000).toISOString();
+          activity.nextWakeSource = "settings";
         }
         proactive.nextDueAt = activity.nextWakeAt;
         finishWakeRecord(wakeEvent, wakeStartedAt, activity.nextWakeAt, wakeSteps);
@@ -1255,7 +1234,7 @@ async function runBackgroundPulse() {
         // A malformed model response must not be presented as an AI decision
         // or retried (and billed) on every 15-second pulse.
         if (regularWakeDue) {
-          activity.nextWakeAt = new Date(now + 5 * 60_000).toISOString();
+          activity.nextWakeAt = new Date(Date.now() + DEFAULT_WAKE_MINUTES * 60_000).toISOString();
           activity.nextWakeSource = "ai";
           proactive.nextDueAt = activity.nextWakeAt;
         }
@@ -1274,6 +1253,7 @@ async function runBackgroundPulse() {
       } finally {
         sentinelGenerationControllers.delete(threadId);
         activeChatThreads.delete(threadId);
+        if (threadChanged && wakeCompactionRoute) scheduleBackgroundCompaction(threadId, wakeCompactionRoute.model, wakeCompactionRoute.customProvider);
       }
     }
   }
@@ -1545,8 +1525,7 @@ async function loadProactiveSettings() {
   catch (error) { if (error?.code !== "ENOENT") console.warn(`proactive settings unavailable: ${error.message}`); }
   if (!proactiveSettings.actions || typeof proactiveSettings.actions !== "object") proactiveSettings.actions = { message: true, phone: true, screen: false };
   proactiveSettings.dnd = Boolean(proactiveSettings.dnd);
-  proactiveSettings.intervalMin = wakeIntervalMinutes(proactiveSettings.intervalMin);
-  proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, wakeIntervalMinutes(proactiveSettings.intervalMax));
+  proactiveSettings.intervalMin = proactiveSettings.intervalMax = DEFAULT_WAKE_MINUTES;
   if (typeof proactiveSettings.lastPhoneCallDate !== "string") proactiveSettings.lastPhoneCallDate = null;
 }
 
@@ -3539,7 +3518,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     : "";
   const sleepingMessages = sleepInboxContext(thread);
   // Pass only the active action values. User-managed system instructions define behavior.
-  const wakeDecisionFormat = promptTemplate("wake-decision-format-07", [wakeFindingsPrompt, 24 * 60]);
+  const wakeDecisionFormat = promptTemplate("wake-fixed-silent", [wakeFindingsPrompt, DEFAULT_WAKE_MINUTES]);
   let proactiveDirective = wakeSceneTriggers?.length
     ? promptTemplate("autonomy", [wakeDecisionFormat])
     : proactive
@@ -3550,9 +3529,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     // Only the editable task body changes; action/protocol fields stay server-owned.
     proactiveDirective = proactiveDirective.replace(/<wake_task>[\s\S]*?<\/wake_task>/, () => `<wake_task>${prompt}</wake_task>`);
   }
-  const sentinelActionRule = proactive && !wakeSceneTriggers?.length
-    ? promptTemplate("sentinel-action-rule-08", [Number(sharedEmotionState.drives?.fatigue || 0).toFixed(2), Number(sharedEmotionState.drives?.anger || 0).toFixed(2)])
-    : "";
+  const sentinelActionRule = ""; // Optional contact is governed by wake-fixed-silent.
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
   const wakeSceneDirective = wakeSceneTriggers?.length
     ? wakeSceneContext(thread.wakeScenes, wakeSceneTriggers, Date.now())
@@ -3689,7 +3666,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   }
   let replyHistoryFitted = false;
   const harnessTurn = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) ? {
-    scope: callMode ? "call" : desktopCompanion ? "desktop" : proactive ? "wake" : "chat",
+    scope: wakeSessionScope({ callMode, desktopCompanion, proactive, runtime: customProvider.runtime }),
     persona, historyHash: historyFingerprint(modelChatMessages(thread)), archiveMessages: modelChatMessages(thread), compactedAt: thread.compactedAt || null, receipt: null
   } : null;
   if (harnessTurn) {
@@ -3797,6 +3774,8 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const thinking = thought.text || harnessTurn?.modelThinking || ((callMode || desktopCompanion) ? extractThinkingText(raw) : null);
   let content = stripInternalContextMarkup(visibleRaw.replace(/<memory>[\s\S]*?<\/memory>/gi, "").replace(/<user_remark>[\s\S]*?<\/user_remark>/gi, "").replace(/<emotion_update\b[^>]*>[\s\S]*?<\/emotion_update>/gi, "").replace(/<speech>[\s\S]*?<\/speech>/gi, "").replace(/<emoji_mood>[\s\S]*?<\/emoji_mood>/gi, "").replace(/<gallery_collection>[\s\S]*?<\/gallery_collection>/gi, "").replace(/<diary_entry>[\s\S]*?<\/diary_entry>/gi, "").replace(/<diary_action>[\s\S]*?<\/diary_action>/gi, "").replace(/<promise_alarm_decision>[\s\S]*?<\/promise_alarm_decision>/gi, "").replace(/<calendar_events>[\s\S]*?<\/calendar_events>/gi, "").replace(/<call_decision>[\s\S]*?<\/call_decision>/gi, "").replace(/<call_user_text>[\s\S]*?<\/call_user_text>/gi, "").replace(/<html_title>[\s\S]*?<\/html_title>/gi, ""));
   content = stripOptionMarkers(content);
+  // Capture delivery intent before HTML/photo extraction can hide the token.
+  const silentWake = proactive && (content.includes(SILENT_WAKE_TOKEN) || sentinelDecision?.action === "none");
   const filterWakeFinding = proactive ? wakeFindingFilter(relevantMessages, toolCalls) : null;
   const wakeContent = filterWakeFinding ? filterWakeFinding(content) : content;
   let wakeFindingRemoved = wakeContent !== content;
@@ -3837,7 +3816,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       { role: "assistant", content, toolCalls }];
     await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected), expected);
   }
-  return { harnessReceipt: proactive && customProvider?.runtime === "kimi-harness" ? harnessTurn?.receipt : null, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
+  return { harnessReceipt: proactive && customProvider?.runtime === "kimi-harness" ? harnessTurn?.receipt : null, silentWake, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
 async function checkCacheKeepalive() {
@@ -5386,8 +5365,8 @@ const server = createServer(async (req, res) => {
       const requestedMin = Number(input.intervalMin);
       const requestedMax = Number(input.intervalMax ?? requestedMin);
       if (!Number.isFinite(requestedMin) || !Number.isFinite(requestedMax) || requestedMin < 10 || requestedMax < requestedMin || requestedMax > 1440) return send(res, 400, { error: "invalid_interval_minutes" });
-      const min = wakeIntervalMinutes(requestedMin);
-      const max = wakeIntervalMinutes(requestedMax);
+      const min = DEFAULT_WAKE_MINUTES;
+      const max = DEFAULT_WAKE_MINUTES;
       proactiveSettings.enabled = input.enabled;
       proactiveSettings.dnd = input.dnd === true;
       proactiveSettings.threadId = typeof input.threadId === "string" && input.threadId ? input.threadId : "default";
@@ -5668,8 +5647,7 @@ const server = createServer(async (req, res) => {
         proactiveSettings.enabled = Boolean(input.enabled);
         proactiveSettings.threadId = input.threadId || "default";
         if (typeof input.message === "string" && input.message.trim()) proactiveSettings.message = input.message.trim();
-        proactiveSettings.intervalMin = wakeIntervalMinutes(input.intervalMin);
-        proactiveSettings.intervalMax = Math.max(proactiveSettings.intervalMin, wakeIntervalMinutes(input.intervalMax, proactiveSettings.intervalMin));
+        proactiveSettings.intervalMin = proactiveSettings.intervalMax = DEFAULT_WAKE_MINUTES;
         if (input.actions && typeof input.actions === "object") proactiveSettings.actions = { message: input.actions.message !== false, phone: input.actions.phone !== false, screen: input.actions.screen === true };
         if (typeof input.dnd === "boolean") proactiveSettings.dnd = input.dnd;
         if (!proactiveSettings.enabled) proactiveSettings.nextDueAt = null;

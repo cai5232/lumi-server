@@ -1,3 +1,4 @@
+import { wakeOutcome } from "../src/sentinel-follow-up.js";
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
@@ -62,7 +63,7 @@ test('autonomous wakes retain the photo card and next wake plan in the saved ass
     sharedEmotionState: { drives: {} }, canPlaceProactiveCall: () => true,
     resolveMurmurRoute: async () => ({ provider: 'custom', model: 'test', customProvider: {} }),
     generateReply: async options => { assert.equal(options.proactive, true); return { ...card, content: '想给你看。', sentinelDecision: { action: 'message', nextWakeMinutes: 45 } }; },
-    normalizeFollowUpDecision: () => null, randomUUID: () => 'photo-wake'
+    wakeOutcome, randomUUID: () => 'photo-wake'
   };
   const wakeStart = source.indexOf('async function generateSentinelWake(');
   const wakeEnd = source.indexOf('\nasync function ', wakeStart + 1);
@@ -71,7 +72,7 @@ test('autonomous wakes retain the photo card and next wake plan in the saved ass
   assert.equal(wake.message.htmlContent, card.htmlContent);
   assert.equal(wake.message.htmlTitle, card.htmlTitle);
   assert.equal(wake.message.content, '想给你看。');
-  assert.equal(wake.nextWakeMinutes, 45);
+  assert.equal(wake.nextWakeMinutes, 18);
 });
 
 for (const format of ['openai', 'anthropic']) test(`${format} model can browse Engawa, select a real image, and produce a card without a client update`, async () => {

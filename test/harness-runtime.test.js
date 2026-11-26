@@ -1,3 +1,4 @@
+import { wakeSessionScope, SILENT_WAKE_TOKEN } from "../src/sentinel-follow-up.js";
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
@@ -9,7 +10,7 @@ import { harnessConfig, harnessEnvironment } from '../src/harness-config.js';
 import { harnessContextPolicy } from '../src/harness-context.js';
 import { createHarnessRoutes } from '../src/harness-routes.js';
 
-function fakeSDK(calls, { error = false, compact = false, pause = null } = {}) {
+function fakeSDK(calls, { error = false, compact = false, pause = null, text = "回复" } = {}) {
   return { tool: (...args) => args, createSdkMcpServer: options => options, query(args) {
     calls.push(args);
     return { close() {}, async *[Symbol.asyncIterator]() {
@@ -19,8 +20,8 @@ function fakeSDK(calls, { error = false, compact = false, pause = null } = {}) {
       if (compact) yield { type: 'system', subtype: 'compact_boundary' };
       if (error) throw new Error('synthetic provider failure');
       yield { type: 'stream_event', event: { type: 'message_start', message: { id: 'm', usage: { input_tokens: 10, cache_read_input_tokens: 100 } } } };
-      yield { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '回复' } } };
-      yield { type: 'assistant', message: { id: 'm', content: [{ type: 'text', text: '回复' }] } };
+      yield { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } };
+      yield { type: 'assistant', message: { id: 'm', content: [{ type: 'text', text }] } };
       yield { type: 'result', session_id: args.options.resume || 'session-'+calls.length, subtype: 'success', stop_reason: 'end_turn', is_error: false, usage: { input_tokens: 10, cache_read_input_tokens: 100, output_tokens: 2 } };
     } };
   } };
@@ -221,4 +222,26 @@ test('256K model honors the requested 230K compaction threshold with reply/tool 
  assert.equal(policy.inputBudget,250144);assert.ok(policy.contextTokens-policy.triggerTokens>=32000);
  assert.equal(harnessContextPolicy({contextTokens:200000},{triggerTokensEstimate:230000}).triggerTokens,168000,'a 230K request is never used on a 200K window');
  const small=harnessContextPolicy({contextTokens:20000},{triggerTokensEstimate:230000});assert.ok(small.triggerTokens<small.inputBudget,'small windows must also reserve preflight headroom');
+});
+
+
+test('silent SDK wake resumes primary Session and next chat resumes it after backend restart without phantom archive changes', async()=> {
+  const {root,config}=await fixture(),calls=[];
+  const archive=[{id:'u',role:'user',content:'记得一起看星星'}];
+  const hash=historyFingerprint(archive);
+  try {
+    let runtime=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls)});
+    const chat=await runtime.run(turn({archiveMessages:archive,historyHash:hash}));
+    await runtime.finalize(chat.receipt,hash,archive);
+    runtime=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls,{text:SILENT_WAKE_TOKEN})});
+    const wake=await runtime.run(turn({scope:wakeSessionScope({proactive:true,runtime:'kimi-harness'}),archiveMessages:archive,historyHash:hash,messages:[{role:'system',content:'人格'},{role:'user',content:'本次可以安静陪伴'}]}));
+    assert.equal(wake.content,SILENT_WAKE_TOKEN);assert.equal(wake.diagnostic.mode,'resume');
+    assert.equal(calls[1].options.resume,'session-1');
+    await runtime.finalize(wake.receipt,hash,archive);
+    runtime=createHarnessRuntime(config,{loadSDK:async()=>fakeSDK(calls)});
+    const next=await runtime.run(turn({archiveMessages:archive,historyHash:hash}));
+    assert.equal(next.diagnostic.mode,'resume');assert.equal(next.diagnostic.sessionReason,'continued_session');
+    assert.equal(calls[2].options.resume,'session-1');
+    assert.equal(calls[2].capturedInput[0].message.content.length,1);
+  } finally {await rm(root,{recursive:true,force:true});}
 });

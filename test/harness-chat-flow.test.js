@@ -52,6 +52,9 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
   try {
     console.log('harness-test-phase: initial');
     await start();
+    const cadenceResponse=await fetch(base+'/v1/settings/proactive',{method:'PUT',headers,body:JSON.stringify({enabled:false,threadId:'default',intervalMin:20,intervalMax:45,dnd:false})});
+    assert.equal(cadenceResponse.status,200);
+    const cadence=await cadenceResponse.json();assert.equal(cadence.intervalMin,18);assert.equal(cadence.intervalMax,18);
     const image='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jhT8AAAAASUVORK5CYII=';
     const first=await chat('MEMORY_TEST STUDIO_TEST',{images:[image],stream:true});
     assert.equal(first.status,200,await first.clone().text());
