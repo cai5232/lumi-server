@@ -2234,7 +2234,7 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
   // Native Anthropic is opt-in for the primary provider. Backup relays remain
   // OpenAI-compatible unless they get their own explicit native-API configuration.
   const nativeKimiCache = Boolean(!isHarness && serverZenMuxRoute && promptCacheEnabled && ["moonshotai/kimi-k3:moonshotai", "moonshotai/kimi-k2.8-preview:moonshotai"].includes(model));
-  const stableKimiTools = nativeKimiCache || Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k2.8-preview:moonshotai");
+  const stableKimiTools = isHarness || nativeKimiCache || Boolean(serverZenMuxRoute && promptCacheEnabled && model === "moonshotai/kimi-k2.8-preview:moonshotai");
   const nativeAnthropic = nativeKimiCache || customProvider?.apiFormat === "anthropic" || (provider === "zenmux" && isClaude && process.env.LUMI_NATIVE_ANTHROPIC === "true");
   const normalizedBaseURL = configuredURL.replace(/\/+$/, "");
   const directAnthropicAPI = new URL(normalizedBaseURL).hostname.toLowerCase() === "api.anthropic.com";
@@ -2344,11 +2344,11 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
   if (localMailMcpEnabled) {
     for (const tool of mailMcpTools) {
       const name = `lumi_email_${tool.name}`;
-      const schema = tool.name === "mail_send" && autonomous
+      const schema = tool.name === "mail_send" && autonomous && !isHarness
         ? { ...tool.inputSchema, properties: Object.fromEntries(Object.entries(tool.inputSchema.properties || {}).filter(([key]) => key !== "to" && key !== "cc")), required: (tool.inputSchema.required || []).filter((key) => key !== "to" && key !== "cc") }
         : tool.inputSchema;
       mcpToolMap.set(name, { tool, execute: (args) => executeMailTool(tool.name, args, mailThreadId, autonomous), allowWrite: true });
-      mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}${tool.name === "mail_send" && autonomous ? " 自主唤醒时只能发送给默认邮箱" : ""}`, parameters: schema && typeof schema === "object" ? schema : { type: "object", properties: {} } } });
+      mcpTools.push({ type: "function", function: { name, description: `163 邮箱: ${String(tool.description || "").slice(0, 500)}${tool.name === "mail_send" && autonomous && !isHarness ? " 自主唤醒时只能发送给默认邮箱" : ""}`, parameters: schema && typeof schema === "object" ? schema : { type: "object", properties: {} } } });
     }
   }
   const appControlSettings = mcpThreadId ? await appControl.get() : { apps: [], autonomous: false };
@@ -3330,7 +3330,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     system = system.replace(/\n\n【邮箱】[\s\S]*?(?=\n\n【情绪独白】)/,
       "\n\n【邮箱工具状态】当前聊天线路没有连接邮箱工具。不要声称已查看、发送或修改邮件；如用户要求邮件操作，明确说明工具当前不可用。");
   }
-  if (proactive && mailToolsAvailable) {
+  if (proactive && mailToolsAvailable && !["kimi-harness", "kimi-acp"].includes(customProvider?.runtime)) {
     system = system.replace(
       "自主唤醒时，你如果想发也可以直接发送，自由决策，引用邮件内容前，先查找并读取原邮件。",
       `自主唤醒时可以自主决定是否写信，但只能发给默认收件人 ${MAIL_OWNER_EMAIL}，不得添加抄送或发给其他人；服务端会强制执行此限制。引用邮件内容前，先查找并读取原邮件。`
@@ -3530,6 +3530,11 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     proactiveDirective = proactiveDirective.replace(/<wake_task>[\s\S]*?<\/wake_task>/, () => `<wake_task>${prompt}</wake_task>`);
   }
   const sentinelActionRule = ""; // Optional contact is governed by wake-fixed-silent.
+  // Mode-specific mail permissions belong in the changing user suffix. The
+  // system and tool definitions stay identical to the preceding chat turn;
+  // executeMailTool still enforces the restriction independently of prompts.
+  const autonomousMailDirective = proactive && mailToolsAvailable
+    ? promptTemplate("wake-mail-permission", [MAIL_OWNER_EMAIL]) : "";
   const emotionDirective = `\n${chatEmotionContext(thread)}`;
   const wakeSceneDirective = wakeSceneTriggers?.length
     ? wakeSceneContext(thread.wakeScenes, wakeSceneTriggers, Date.now())
@@ -3579,7 +3584,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? promptText("widget-directive-13")
     : "";
   const incomingAlreadyInHistory = incomingUserMessage?.id && relevantMessages.some(message => message.id === incomingUserMessage.id);
-  const userModelContent = withUserMessageTimestamp(incomingAlreadyInHistory ? null : incomingUserMessage, `${systemContext}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${sleepingMessages}${proactiveDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmState}${alarmDirective}${calendarDirective}${appControlState}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`);
+  const userModelContent = withUserMessageTimestamp(incomingAlreadyInHistory ? null : incomingUserMessage, `${systemContext}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${sleepingMessages}${proactiveDirective}${autonomousMailDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmState}${alarmDirective}${calendarDirective}${appControlState}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`);
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
