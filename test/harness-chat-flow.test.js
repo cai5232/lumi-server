@@ -23,6 +23,7 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
  yield {type:'system',subtype:'init',apiKeySource:'ANTHROPIC_API_KEY',session_id:session};
  if(current.includes('FAIL_HARNESS'))throw new Error('SYNTHETIC_KIMI_FAILURE');
  let text='测试回复';
+ if(current.includes('SLEEP_NAG_BLOCK')){if(!options.hooks.Stop?.length)throw Error('MISSING_STOP_HOOK');text='早点睡，晚安。';}
  if(current.includes('MEMORY_TEST')){const tools=options.mcpServers.lumi.tools;await tools.find(t=>t.name==='memory_search').handler({query:'共同回忆'});if(tools.some(t=>['memory_write','memory_update'].includes(t.name)))throw Error('MEMORY_WRITE_TOOL_MUST_BE_DISABLED');text+='<memory>合成记忆</memory>';}
  if(current.includes('STUDIO_TEST')){const tools=options.mcpServers.lumi.tools;const read=await tools.find(t=>t.name==='lumi_chibi_read').handler({path:'templates/小狐狸1.chibi.json'});const document=JSON.parse(JSON.parse(read.content[0].text).content);const preview=await tools.find(t=>t.name==='lumi_chibi_render').handler({document,preview_only:true});if(!preview.content.some(c=>c.type==='image'))throw Error('missing visual preview');const draft=JSON.parse(preview.content[0].text);await tools.find(t=>t.name==='lumi_chibi_send').handler({draft_id:draft.draft_id,caption:'本地模拟画作'});}
  if((typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt).includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
@@ -141,6 +142,19 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     const afterTexts=afterCall.input[0].message.content.filter(b=>b.type==='text').map(b=>b.text);
     for(const old of older.slice(-28))assert.ok(afterTexts.some(text=>text.includes(old.content)),old.id);
     const route=await fetch(base+'/v1/chats/default/runtime',{headers});assert.equal((await route.json()).runtime,'kimi-harness');
+    console.log('harness-test-phase: no-sleep-nag-delivery');
+    const beforeNag=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
+    const beforeNagCalls=(await calls()).length;
+    const blockedNag=await chat('SLEEP_NAG_BLOCK 我还想继续聊');
+    assert.equal(blockedNag.status,422,await blockedNag.clone().text());
+    assert.match(await blockedNag.text(),/禁催睡保护/);
+    assert.deepEqual(JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages,beforeNag,'rejected drafts never enter the archive');
+    assert.equal((await calls()).length,beforeNagCalls+1,'a missing/ineffective hook does not start another API request');
+    const requestIndex=JSON.parse(await readFile(join(dir,'model-request-index.json'),'utf8'));
+    const guardRecord=requestIndex.requests.find(r=>r.status===422);
+    assert.ok(guardRecord,'rejected generation usage remains visible');assert.ok(guardRecord.inputTokens>0);assert.equal(guardRecord.cachedTokens,200);
+    const bedtime=await chat('我要睡了 SLEEP_NAG_BLOCK');assert.equal(bedtime.status,200,await bedtime.clone().text());
+    assert.match(JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages.at(-1).content,/晚安/);
     const changed=await fetch(base+'/v1/chats/default/runtime',{method:'PUT',headers,body:JSON.stringify({runtime:'api'})});assert.equal(changed.status,200);
     assert.equal((await changed.json()).runtime,'api');
   } finally {await stop();await rm(dir,{recursive:true,force:true});}

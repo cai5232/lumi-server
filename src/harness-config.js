@@ -16,6 +16,7 @@ export function harnessConfig(env = process.env) {
   if (!['low', 'high', 'max'].includes(effort)) throw new Error('LUMI_HARNESS_EFFORT must be low, high or max');
   return {
     effort,
+    noSleepNagEnabled: env.LUMI_NO_SLEEP_NAG_ENABLED !== 'false',
     enabled: env.LUMI_HARNESS_ENABLED === 'true',
     key: String(env.LUMI_KIMI_CODE_API_KEY || '').trim(), baseURL, model, contextTokens,
     root: resolve(env.LUMI_DATA_DIR || 'data', 'harness'),

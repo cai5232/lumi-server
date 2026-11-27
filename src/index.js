@@ -1,3 +1,4 @@
+import { assertNoSleepNag } from './no-sleep-nag.js';
 import { createCompanionPages } from './companion-pages.js';
 import { createAcpAuth } from './acp/auth.js';
 import { createAcpRuntime } from './acp/runtime.js';
@@ -2425,12 +2426,28 @@ async function callModel({ messages, harnessContext = null, maxOutputTokens, use
     };
     const startedAt = Date.now();
     const runtime = customProvider.runtime === "kimi-acp" ? kimiAcp : sdkRuntime(model);
-    const result = await runtime.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
-      persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash, archiveMessages: pending?.archiveMessages, compactedAt: pending?.compactedAt,
+    let result;
+    try { result = await runtime.run({ threadId: threadId || "auxiliary", scope: pending?.scope || "auxiliary", messages,
+      persona: pending?.persona || await readChatPersona(), historyHash: pending?.historyHash, archiveMessages: pending?.archiveMessages, compactedAt: pending?.compactedAt, noSleepNag: pending?.noSleepNag,
       tools: [...anthropicLocalTools, ...memoryTools], executeTool,
       maxOutputTokens: Number(maxOutputTokens || (useMaximumModelOutput ? 128000 : process.env.LUMI_MAX_OUTPUT_TOKENS || 8192)),
       ephemeral: !pending || !(pending.scope === "chat" || (customProvider.runtime === "kimi-harness" && pending.scope === "wake")) || singleAttempt,
       signal: signal || (proactive ? sentinelGenerationControllers.get(threadId)?.signal : undefined), onUsage });
+    } catch (error) {
+      if (error.harnessDiagnostic && error.usage) {
+        const usage = error.usage, cache = cacheUsage(usage);
+        cacheStats.modelCalls += error.harnessDiagnostic.calls;
+        cacheStats.lastUsage = error.harnessDiagnostic.lastUsage;
+        cacheStats.cacheReadTokens += cache.read; cacheStats.cacheWriteTokens += cache.created;
+        await saveCacheStats().catch(() => {});
+        await recordModelRequest({ id: randomUUID(), createdAt: new Date(startedAt).toISOString(), provider: customProvider.runtime, model,
+          status: error.statusCode || 422, durationMs: Date.now() - startedAt, inputTokens: Number(usage.input_tokens || 0) + cache.read + cache.created,
+          outputTokens: Number(usage.output_tokens || 0), cachedTokens: cache.read, harness: error.harnessDiagnostic,
+          requestJSON: modelRequestLogJSON({ messages, tools: [...anthropicLocalTools, ...memoryTools] }),
+          responseJSON: modelRequestLogJSON({ error: error.code, usage }) }).catch(() => {});
+      }
+      throw error;
+    }
     if (pending) { pending.receipt = result.receipt; pending.modelThinking = result.thinking; }
     const usage = result.usage;
     const cache = cacheUsage(usage);
@@ -3669,9 +3686,11 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
         : promptText("scene-15")
     });
   }
+  const sleepNagUserText = proactive || desktopCompanion ? "" : String(incomingUserMessage?.content ?? (callMode ? input : "") ?? "");
   let replyHistoryFitted = false;
   const harnessTurn = ["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) ? {
     scope: wakeSessionScope({ callMode, desktopCompanion, proactive, runtime: customProvider.runtime }),
+    ...(kimiHarnessConfig.noSleepNagEnabled ? { noSleepNag: { userText: sleepNagUserText } } : {}),
     persona, historyHash: historyFingerprint(modelChatMessages(thread)), archiveMessages: modelChatMessages(thread), compactedAt: thread.compactedAt || null, receipt: null
   } : null;
   if (harnessTurn) {
@@ -3805,9 +3824,10 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   const htmlBlock = extractHTMLBlock(content, titleMatch?.[1]);
   if (htmlBlock) content = htmlBlock.content;
   const photoCard = !callMode ? engawaPhotoCard(toolCalls, content) : null;
+  const speechText = speechMatch ? stripOptionMarkers(spokenReply(speechMatch[1])) : "";
+  if (kimiHarnessConfig.noSleepNagEnabled) assertNoSleepNag([content, photoCard?.htmlContent || htmlBlock?.htmlContent, speechText].filter(Boolean).join("\n"), sleepNagUserText);
   const alreadyWrittenMemory = toolCalls.some(t => t.name === "memory_write" && t.succeeded && (() => { try { return JSON.parse(t.arguments).content === memoryContent; } catch { return false; } })());
   const memorySaved = alreadyWrittenMemory || (memoryContent ? await writeMemory(memoryContent, thread.id) : false);
-  const speechText = speechMatch ? stripOptionMarkers(spokenReply(speechMatch[1])) : "";
   // Preserve the exact provider text for the next request's cache prefix. The
   // user-visible content is intentionally cleaned separately below.
   // Snapshot the exact request prefix used for this chat turn. Keepalive replays
@@ -6218,7 +6238,7 @@ const server = createServer(async (req, res) => {
         await harnessRoutes.save(id, input.runtime, input.sdkModel);
       } else if (req.method !== "GET") return send(res, 405, { error: "method_not_allowed" });
       return send(res, 200, { runtime: await harnessRoutes.selection(id), acp: {enabled: process.env.LUMI_ACP_ENABLED === "true", authentication: "native-oauth"}, harness: { enabled: kimiHarnessConfig.enabled,
-        configured: Boolean(kimiHarnessConfig.key), sessionPolicy: "rebuild_only_after_application_compaction", effort: kimiHarnessConfig.effort, model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
+        configured: Boolean(kimiHarnessConfig.key), sessionPolicy: "rebuild_only_after_application_compaction", effort: kimiHarnessConfig.effort, noSleepNag: { enabled: kimiHarnessConfig.noSleepNagEnabled, maxRewrites: 1 }, model: await harnessRoutes.model(id), models: [{id:"k3",name:"K3"},{id:"kimi-for-coding",name:"K2.8 Preview"}], contextTokens: kimiHarnessConfig.contextTokens,
         compaction: "lumi-emotional-summary-and-original-tail", contextPolicy: harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot), cacheTTL: "provider_default_unverified", requestedCacheTTL: kimiHarnessConfig.cacheTTL, keepalive: { enabled: keepaliveEnabled, intervalMs: kimiHarnessConfig.keepaliveIntervalMs, maxIdleMs: kimiHarnessConfig.keepaliveMaxIdleMs }, last: sdkRuntime(await harnessRoutes.model(id)).diagnostic(id) } });
     }
     const match = url.pathname.match(/^\/v1\/chats\/([^/]+)(\/messages|\/calls)?$/);

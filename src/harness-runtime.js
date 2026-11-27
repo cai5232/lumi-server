@@ -1,3 +1,4 @@
+import { createSleepNagGuard } from './no-sleep-nag.js';
 import { sdkToolResponse } from "./tool-media.js";
 import { archiveSnapshot, archiveChanges, archiveChangeBlocks } from './harness-continuity.js';
 import { warmHarnessSession } from './harness-warm.js';
@@ -82,9 +83,10 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
     },
     async run(args) { return this.runOnce(args); },
     async runOnce({ threadId, scope = 'chat', messages, persona, tools = [], executeTool, historyHash, archiveMessages, compactedAt,
-      signal, onEvent = () => {}, onUsage = () => {}, ephemeral = false, maxOutputTokens = 8192 }) {
+      signal, noSleepNag, onEvent = () => {}, onUsage = () => {}, ephemeral = false, maxOutputTokens = 8192 }) {
       if (!config.enabled) throw Object.assign(new Error('Harness 尚未启用'), { statusCode: 503 });
       const env = harnessEnvironment(config);
+      const sleepGuard = noSleepNag && config.noSleepNagEnabled !== false ? createSleepNagGuard(noSleepNag) : null;
       if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens >= config.contextTokens) {
         throw new Error('Kimi Harness 输出预算超出已配置的模型窗口');
       }
@@ -149,6 +151,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
           const schema = z.fromJSONSchema(t.input_schema || { type: 'object', properties: {} });
           return sdk.tool(t.name, t.description || t.name, schema.shape, async args => {
             if (abort.signal.aborted) throw abort.signal.reason || new Error('aborted');
+            if (sleepGuard?.rewrites) return { isError: true, content: [{ type: 'text', text: '禁催睡重写阶段不重复执行工具。' }] };
             toolStarted = true;
             onEvent({ type: 'tool_use', name: t.name });
             const result = await executeTool(t.name, schema.parse(args));
@@ -161,9 +164,10 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
         if (!ephemeral) await store.write(key, currentState);
         const usageById = new Map();
         let lastMessageId, sessionId, result, text = '', thinking = '', hadTextDelta = false;
-        let compacted = false;
-        const forbiddenTool = async input => allowed.includes(input.tool_name)
-          ? {} : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Only registered Lumi business tools are allowed' } };
+        let compacted = false, lastAssistantText = '', finalGuardText = '';
+        const assistantSegments = [];
+        const forbiddenTool = async input => !sleepGuard?.rewrites && allowed.includes(input.tool_name)
+          ? {} : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: sleepGuard?.rewrites ? 'Only rewrite the reply; do not repeat completed tool actions.' : 'Only registered Lumi business tools are allowed' } };
         const compactionBlocked = async () => {
           onEvent({ type: 'compaction', status: 'application_managed' });
           return { decision: 'block', reason: 'Lumi owns emotional summaries and exact recent turns; compact at application turn boundaries.' };
@@ -174,7 +178,7 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
           includePartialMessages: true, maxTurns: config.maxTurns, abortController: abort,
           stderr: chunk => { stderr = (stderr + chunk).slice(-2000); },
           settings: { autoCompactEnabled: false, idleCompaction: false },
-          hooks: { PreToolUse: [{ hooks: [forbiddenTool] }], PreCompact: [{ hooks: [compactionBlocked] }],
+          hooks: { ...(sleepGuard ? { Stop: [{ hooks: [input => sleepGuard.stop(input)] }] } : {}), PreToolUse: [{ hooks: [forbiddenTool] }], PreCompact: [{ hooks: [compactionBlocked] }],
             PostCompact: [{ hooks: [async () => { compacted = true; return {}; }] }] },
           ...(resume ? { resume } : {}),
         } });
@@ -192,13 +196,15 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
             const e = m.event;
             if (e.type === 'message_start') { modelStarted = true; lastMessageId = e.message.id; usageById.set(lastMessageId, e.message.usage || {}); }
             if (e.type === 'message_delta' && e.usage && lastMessageId) usageById.set(lastMessageId, { ...usageById.get(lastMessageId), ...e.usage });
-            if (e.delta?.type === 'text_delta') { hadTextDelta = true; onEvent({ type: 'text', content: e.delta.text }); }
-            if (e.delta?.type === 'thinking_delta') onEvent({ type: 'thinking', content: e.delta.thinking });
+            if (e.delta?.type === 'text_delta') { hadTextDelta = true; if (!sleepGuard) onEvent({ type: 'text', content: e.delta.text }); }
+            if (e.delta?.type === 'thinking_delta' && !sleepGuard) onEvent({ type: 'thinking', content: e.delta.thinking });
           }
           if (m.type === 'assistant' && !m.parent_tool_use_id) {
             modelStarted = true;
             if (m.error) throw new Error(`Kimi SDK error: ${m.error}`);
             // Complete blocks are authoritative; do not append deltas twice.
+            lastAssistantText = (m.message.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+            assistantSegments.push({ text: lastAssistantText, thinking: (m.message.content || []).filter(b => b.type === 'thinking').map(b => b.thinking).join('') });
             for (const b of m.message.content || []) {
               if (b.type === 'text') text += b.text;
               if (b.type === 'thinking') thinking += b.thinking;
@@ -210,25 +216,44 @@ export function createHarnessRuntime(config, { loadSDK = () => import('@anthropi
             if (m.is_error || m.subtype !== 'success') throw new Error(`Kimi Harness 未完成：${m.subtype} ${(m.errors || []).join(' ').slice(0, 500)}`);
           }
         }
+        if (sleepGuard && result) {
+          finalGuardText = typeof result.result === 'string' ? result.result : lastAssistantText;
+          if (sleepGuard.rewrites) {
+            const approved = assistantSegments.filter(segment => !sleepGuard.wasRejected(segment.text));
+            text = approved.map(segment => segment.text).join('') || finalGuardText;
+            thinking = approved.map(segment => segment.thinking).join('');
+          }
+        }
         if (abort.signal.aborted) throw new Error('Harness generation cancelled');
         if (!result || !sessionId || !text.trim()) throw new Error('Kimi Harness 未返回完整回复');
         if (compacted) throw Object.assign(new Error('检测到非预期的原生压缩；本轮未提交，请由 Lumi 压缩换窗后继续'), { code: 'unexpected_harness_compaction', statusCode: 503 });
         const lastUsage = usageById.get(lastMessageId) || [...usageById.values()].at(-1) || result.usage || {};
         onUsage(lastUsage);
         const diagnostic = { runtime: 'kimi-harness', mode, scope, ephemeral, sessionReason, definitionChanged, archiveChangeCount: changes.length, effort: config.effort || 'low', model: config.model, sessionId, at: new Date().toISOString(),
-          usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta,
+          ...(sleepGuard ? { noSleepNag: sleepGuard.diagnostic() } : {}),
+          usage: result.usage || {}, lastUsage, calls: usageById.size, textStreamed: hadTextDelta && !sleepGuard, textBufferedForGuard: Boolean(sleepGuard),
           contextTokens: config.contextTokens, maxOutputTokens: effectiveMaxOutputTokens, cacheTTL: 'provider_default_unverified', requestedCacheTTL: config.cacheTTL || '1h', costUSD: null };
+        if (sleepGuard) {
+          try { sleepGuard.validate(finalGuardText); sleepGuard.validate(text); }
+          catch (error) {
+            diagnostic.noSleepNag.deliveryBlocked = true;
+            diagnostics.set(threadId, diagnostic);
+            throw Object.assign(error, { harnessDiagnostic: diagnostic, usage: result.usage || lastUsage });
+          }
+          onEvent({ type: 'text', content: text });
+          if (thinking) onEvent({ type: 'thinking', content: thinking });
+        }
         diagnostics.set(threadId, diagnostic);
         if (!ephemeral) await store.write(key, { ...currentState, status: 'generated', sessionId, diagnostic, warmSetup: { system, tools, cwd } });
         onEvent({ type: 'done', ...diagnostic });
         return { content: text.trim(), thinking, usage: result.usage || lastUsage, lastUsage, diagnostic,
           receipt: ephemeral ? null : { key, runId }, finishReason: result.stop_reason || 'end_turn' };
       } catch (error) {
-        if (release && !ephemeral && (currentState || previous)) await store.write(key, { ...(currentState || previous), runId, status: 'interrupted' }).catch(() => {});
+        if (release && !ephemeral && (currentState || previous)) await store.write(key, { ...(currentState || previous), runId, status: 'interrupted', ...(error.harnessDiagnostic ? { diagnostic: error.harnessDiagnostic } : {}) }).catch(() => {});
         const message = String(error.message || error).replaceAll(config.key || '\0', '[redacted]');
         const missing = currentState?.sessionId && !modelStarted && !toolStarted &&
           /No conversation found|session[^\n]{0,100}(?:not found|does not exist)/i.test(message + stderr);
-        throw Object.assign(new Error(missing ? '原 Session 文件不可用，已停止请求；不会自动另开会话，聊天记录仍保留' : message), { code: missing ? 'harness_session_missing' : error.code || 'kimi_harness_failed', statusCode: error.statusCode || 503 });
+        throw Object.assign(new Error(missing ? '原 Session 文件不可用，已停止请求；不会自动另开会话，聊天记录仍保留' : message), { code: missing ? 'harness_session_missing' : error.code || 'kimi_harness_failed', statusCode: error.statusCode || 503, ...(error.harnessDiagnostic ? { harnessDiagnostic: error.harnessDiagnostic, usage: error.usage } : {}) });
       } finally {
         clearTimeout(timeout); q?.close(); signal?.removeEventListener('abort', cancelled); busy.delete(key); if (release) await release();
       }
