@@ -159,10 +159,11 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     await stop();
     const largeTailEnv={LUMI_KIMI_CODE_CONTEXT_TOKENS:'1048576',LUMI_HARNESS_TAIL_MIN_TURNS:'40',LUMI_HARNESS_TAIL_MAX_TURNS:'50',LUMI_HARNESS_TAIL_TARGET_TOKENS:'100000'};
     const extended=Array.from({length:120},(_,i)=>({id:'extended-'+i,role:i%2?'assistant':'user',content:`完整原文${i}：“约定一直有效”。`+'共同经历'.repeat(125),createdAt:new Date(Date.now()-120000+i*1000).toISOString()}));
-    await writeFile(join(dir,'threads.json'),JSON.stringify({default:{id:'default',title:'extended',messages:extended,chatRuntime:'kimi-harness',lastMeasuredInputTokens:0}}));
+    const previousCompactedAt=new Date(Date.now()-1000).toISOString();
+    await writeFile(join(dir,'threads.json'),JSON.stringify({default:{id:'default',title:'extended',messages:extended,chatRuntime:'kimi-harness',lastMeasuredInputTokens:0,contextSummary:'【情感与关系】原有情感摘要。',compactedAt:previousCompactedAt,compactedThroughMessageId:'extended-89',activeContextStartMessageId:'extended-90'}}));
     await writeFile(join(dir,'context-compression.json'),JSON.stringify({triggerTokens:900000}));await start(largeTailEnv);
     const extendedResponse=await chat('SDK_TRANSCRIPT_FULL 提高保留原文测试');assert.equal(extendedResponse.status,200,await extendedResponse.clone().text());
-    let extendedState;for(let i=0;i<500;i++){extendedState=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default;if(extendedState.compactedAt)break;await new Promise(r=>setTimeout(r,30));}
+    let extendedState;for(let i=0;i<500;i++){extendedState=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default;if(extendedState.compactedAt&&extendedState.compactedAt!==previousCompactedAt)break;await new Promise(r=>setTimeout(r,30));}
     assert.ok(extendedState.compactedAt,stderr);assert.equal(extendedState.activeContextStartMessageId,'extended-22');
     for(const original of extended)assert.equal(extendedState.messages.find(m=>m.id===original.id)?.content,original.content);
     const beforeResumeLarge=(await calls()).length;

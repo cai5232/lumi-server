@@ -3040,8 +3040,10 @@ function compactionPlan(thread, projectedInputTokens = 0) {
   const upstreamInputTokens = Math.max(previousChatInputTokens(thread), Number(projectedInputTokens || 0));
   const trigger = ["kimi-harness", "kimi-acp"].includes(thread.chatRuntime) ? harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot).triggerTokens : compressionSettings.snapshot.triggerTokensEstimate;
   if (upstreamInputTokens < trigger) return null;
-  const tail = preservedChatTail(messages, turns => activeHistoryTokens(thread, turns), preservedTailPolicyForThread(thread));
-  const older = messages.slice(0, messages.length - tail.length);
+  const tailSource = ["kimi-harness", "kimi-acp"].includes(thread.chatRuntime) ? availableChatHistory(thread) : messages;
+  const tail = preservedChatTail(tailSource, turns => activeHistoryTokens(thread, turns), preservedTailPolicyForThread(thread));
+  const retained = new Set(tail.map(message => message.id || message));
+  const older = messages.filter(message => !retained.has(message.id || message));
   if (!older.length) {
     // SDK transcript/tool history can fill a window with fewer visible turns.
     // Summarize these same messages while retaining ALL of their originals.
