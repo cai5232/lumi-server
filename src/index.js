@@ -3338,7 +3338,8 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
   // nudge-specific instruction is placed in the changing user suffix below.
   const persona = await readChatPersona();
   let system = CHAT_FEATURE_PROMPT;
-  if (["kimi-harness", "kimi-acp"].includes(customProvider?.runtime) && !callMode && !allowSpeech) system = system.replace(promptText("voice"), "");
+  // Keep the voice rule bytes stable across chat/wake and TTS on/off.
+  // Per-turn speech_enabled in the user suffix still gates speech generation.
   const mailSettings = await mcpClientStore.read();
   system += promptText("rules-01");
   const mailToolsAvailable = !callMode && Boolean(thread?.id) &&

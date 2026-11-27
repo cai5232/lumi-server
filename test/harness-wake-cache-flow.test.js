@@ -58,7 +58,8 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
   const calls=async()=>(await readFile(capture,'utf8')).trim().split('\n').map(JSON.parse);
   try {
     await start();
-    const initial=await chat('开始正常聊天');assert.equal(initial.status,200,await initial.clone().text());
+    const tts={enabled:true,apiKey:'fake-tts-key',provider:'minimax',model:'speech-2.8-hd'};
+    const initial=await chat('开始正常聊天',{tts});assert.equal(initial.status,200,await initial.clone().text());
     const afterCall=(await calls()).at(-1);
     assert.ok(afterCall.registered.includes('lumi_email_mail_send'),'fixture exercises configured mail');
 
@@ -84,10 +85,19 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     assert.equal(wakeCall.system,afterCall.system,'chat and wake have identical system bytes');
     assert.deepEqual(wakeCall.definitions,afterCall.definitions,'full tool schemas and descriptions are identical');
     assert.ok(JSON.stringify(wakeCall.input).includes('<autonomous_mail_permission>'),'wake-only mail policy is a user suffix');
-    const returned=await chat('正常聊天回来');assert.equal(returned.status,200,await returned.clone().text());
+    assert.ok(JSON.stringify(afterCall.input).includes('<speech_enabled>true</speech_enabled>'));
+    assert.ok(JSON.stringify(wakeCall.input).includes('<speech_enabled>false</speech_enabled>'));
+    const returned=await chat('正常聊天回来',{tts});assert.equal(returned.status,200,await returned.clone().text());
     const returnedCall=(await calls()).at(-1);
     assert.equal(returnedCall.resume,afterCall.session);
     assert.equal(returnedCall.system,wakeCall.system);
     assert.deepEqual(returnedCall.definitions,wakeCall.definitions);
+    const muted=await chat('继续聊',{tts:{...tts,enabled:false}});assert.equal(muted.status,200,await muted.clone().text());
+    const mutedCall=(await calls()).at(-1);
+    assert.equal(mutedCall.system,returnedCall.system,'TTS toggle cannot change the system prefix');
+    assert.deepEqual(mutedCall.definitions,returnedCall.definitions);
+    assert.equal(mutedCall.resume,afterCall.session);
+    assert.ok(JSON.stringify(mutedCall.input).includes('<speech_enabled>false</speech_enabled>'));
+
   } finally {await stop();await rm(dir,{recursive:true,force:true});}
 });
