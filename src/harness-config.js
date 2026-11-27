@@ -14,8 +14,16 @@ export function harnessConfig(env = process.env) {
   }
   const effort = String(env.LUMI_HARNESS_EFFORT || 'low');
   if (!['low', 'high', 'max'].includes(effort)) throw new Error('LUMI_HARNESS_EFFORT must be low, high or max');
+  const preservedTailMinTurns = Number(env.LUMI_HARNESS_TAIL_MIN_TURNS || 10);
+  const preservedTailMaxTurns = Number(env.LUMI_HARNESS_TAIL_MAX_TURNS || 15);
+  const preservedTailTargetTokens = Number(env.LUMI_HARNESS_TAIL_TARGET_TOKENS || 20000);
+  if (!Number.isSafeInteger(preservedTailMinTurns) || preservedTailMinTurns < 1 ||
+      !Number.isSafeInteger(preservedTailMaxTurns) || preservedTailMaxTurns < preservedTailMinTurns || preservedTailMaxTurns > 200 ||
+      !Number.isSafeInteger(preservedTailTargetTokens) || preservedTailTargetTokens < 1 || preservedTailTargetTokens > contextTokens) {
+    throw new Error('Invalid Harness preserved-tail settings');
+  }
   return {
-    effort,
+    effort, preservedTailMinTurns, preservedTailMaxTurns, preservedTailTargetTokens,
     noSleepNagEnabled: env.LUMI_NO_SLEEP_NAG_ENABLED !== 'false',
     enabled: env.LUMI_HARNESS_ENABLED === 'true',
     key: String(env.LUMI_KIMI_CODE_API_KEY || '').trim(), baseURL, model, contextTokens,

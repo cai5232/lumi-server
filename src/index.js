@@ -2969,19 +2969,28 @@ async function writeMemory(content, threadId) {
   } catch (error) { console.warn(`memory write skipped: ${error.message}`); return false; }
 }
 
-function preservedChatTail(messages, countTokens = messageTokens) {
+function preservedChatTail(messages, countTokens = messageTokens, policy = { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }) {
   let index = messages.length;
   let turns = 0;
   let tokens = 0;
-  while (index > 0 && turns < preservedTailMaxTurns) {
+  while (index > 0 && turns < policy.maximum) {
     let start = index - 1;
     if (messages[start].role === "assistant" && start > 0 && messages[start - 1].role === "user") start--;
     tokens += countTokens(messages.slice(start, index));
     index = start;
     turns++;
-    if (turns >= preservedTailMinTurns && tokens >= preservedTailTargetTokens) break;
+    if (turns >= policy.minimum && tokens >= policy.targetTokens) break;
   }
   return messages.slice(index);
+}
+
+function preservedTailPolicyForThread(thread) {
+  if (["kimi-harness", "kimi-acp"].includes(thread.chatRuntime)) return {
+    minimum: kimiHarnessConfig.preservedTailMinTurns ?? 10,
+    maximum: kimiHarnessConfig.preservedTailMaxTurns ?? 15,
+    targetTokens: kimiHarnessConfig.preservedTailTargetTokens ?? 20000
+  };
+  return { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens };
 }
 
 function withoutExcludedMessages(thread, messages) {
@@ -2991,6 +3000,15 @@ function withoutExcludedMessages(thread, messages) {
 }
 
 function activeChatMessages(thread) {
+  if (thread.compactedAt && thread.activeContextStartMessageId) {
+    // A summary may overlap retained originals when the SDK transcript is
+    // large but visible history is short. Honor the raw-tail boundary BEFORE
+    // removing summarized messages, so the overlap cannot erase the tail.
+    const archive = contextMessages({ ...thread, compactedThroughMessageId: null }, { includeExcluded: true });
+    const rawStart = archive.findIndex(message => message.id === thread.activeContextStartMessageId);
+    const summarizedThrough = archive.findIndex(message => message.id === thread.compactedThroughMessageId);
+    if (rawStart >= 0 && summarizedThrough >= rawStart) return withoutExcludedMessages(thread, archive.slice(rawStart));
+  }
   const messages = contextMessages(thread, { includeExcluded: true });
   if (!thread.compactedAt) return withoutExcludedMessages(thread, messages);
   const start = messages.findIndex(message => message.id === thread.activeContextStartMessageId);
@@ -3000,7 +3018,7 @@ function activeChatMessages(thread) {
   const last = messages.findLastIndex(message => Date.parse(message.createdAt) <= compactedAt);
   if (last < 0) return withoutExcludedMessages(thread, messages);
   const atCompaction = messages.slice(0, last + 1);
-  const tail = preservedChatTail(atCompaction, turns => activeHistoryTokens(thread, turns));
+  const tail = preservedChatTail(atCompaction, turns => activeHistoryTokens(thread, turns), preservedTailPolicyForThread(thread));
   return withoutExcludedMessages(thread, messages.slice(atCompaction.length - tail.length));
 }
 
@@ -3022,9 +3040,17 @@ function compactionPlan(thread, projectedInputTokens = 0) {
   const upstreamInputTokens = Math.max(previousChatInputTokens(thread), Number(projectedInputTokens || 0));
   const trigger = ["kimi-harness", "kimi-acp"].includes(thread.chatRuntime) ? harnessContextPolicy(kimiHarnessConfig, compressionSettings.snapshot).triggerTokens : compressionSettings.snapshot.triggerTokensEstimate;
   if (upstreamInputTokens < trigger) return null;
-  const tail = preservedChatTail(messages, turns => activeHistoryTokens(thread, turns));
+  const tail = preservedChatTail(messages, turns => activeHistoryTokens(thread, turns), preservedTailPolicyForThread(thread));
   const older = messages.slice(0, messages.length - tail.length);
-  if (!older.length) return null;
+  if (!older.length) {
+    // SDK transcript/tool history can fill a window with fewer visible turns.
+    // Summarize these same messages while retaining ALL of their originals.
+    // This is still application compaction at the configured threshold.
+    if (["kimi-harness", "kimi-acp"].includes(thread.chatRuntime) && messages.length) {
+      return { olderMessages: messages, activeContextStartMessageId: tail[0]?.id, overlapsPreservedTail: true };
+    }
+    return null;
+  }
   return { olderMessages: older, activeContextStartMessageId: tail[0]?.id };
 }
 
@@ -5527,7 +5553,7 @@ const server = createServer(async (req, res) => {
       prompt: { enabled: promptCacheEnabled, model: process.env.LUMI_MODEL_NAME || "", explicitMode: /anthropic|claude/i.test(process.env.LUMI_MODEL_NAME || ""), strategy: "stable-history-v3-inline-compaction-dynamic-emotion-suffix-v1", emotionContext: "dynamic-user-suffix-v1", ttl: activeThread.chatRuntime === "kimi-harness" ? "provider_default_unverified" : cacheTTL, speechFallback: "full-visible-reply-v2", modelCalls: cacheStats.modelCalls, readTokens: cacheStats.cacheReadTokens, writeTokens: cacheStats.cacheWriteTokens, hitRate: cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens > 0 ? Math.round(cacheStats.cacheReadTokens / (cacheStats.cacheReadTokens + cacheStats.cacheWriteTokens) * 10000) / 100 : null, lastUsage: cacheStats.lastUsage, lastChatContinuity: activeThread.cacheLastChatContinuity || null, keepalive: { enabled: keepaliveEnabled, intervalMs: keepaliveIntervalMs, maxIdleMs: keepaliveMaxIdleMs, attempts: keepaliveState.attempts, successes: keepaliveState.successes, readTokens: keepaliveState.readTokens, writeTokens: keepaliveState.writeTokens, lastReadTokens: keepaliveState.lastReadTokens, lastWriteTokens: keepaliveState.lastWriteTokens, lastAt: keepaliveState.lastAt, lastError: keepaliveState.lastError } },
         memory: { searches: cacheStats.memorySearches, hits: cacheStats.memoryCacheHits, results: cacheStats.memoryResults, lastError: cacheStats.memoryLastError, ttlMs: memoryCacheTTL }
       },
-      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: activeHistoryTokens(activeThread), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: { minimum: preservedTailMinTurns, maximum: preservedTailMaxTurns, targetTokens: preservedTailTargetTokens }, lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: "selected_chat_model", triggerSource: "upstream_input_tokens" },
+      compaction: { count: activeThread.compactionCount || 0, lastAt: activeThread.compactedAt || null, hasSummary: Boolean(activeThread.contextSummary), activeHistoryTokensEstimate: activeHistoryTokens(activeThread), lastMeasuredInputTokens: activeThread.lastMeasuredInputTokens || 0, ...compressionSettings.snapshot, preservedTailTurns: preservedTailPolicyForThread(activeThread), lastRun: compactionDiagnostics.get(activeThread.id) || null, summaryModel: "selected_chat_model", triggerSource: "upstream_input_tokens" },
       sleep: { delayMinutes: sleepDelayMinutes, durationHours: sleepHours },
       emotion: { enabled: true, scope: "shared_across_chats", drives: Object.keys(EMOTION_DRIVES), tickMinutes: EMOTION_TICK_MS / 60_000, reflectionMinutes: EMOTION_REFLECTION_MS / 60_000, reflectionThreshold: EMOTION_REFLECTION_THRESHOLD, pushThreshold: EMOTION_PUSH_THRESHOLD, quietHours: [emotionQuietStartHour, emotionQuietEndHour], activeTop: topEmotion(sharedEmotionState) }
       });

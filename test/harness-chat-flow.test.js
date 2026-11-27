@@ -27,10 +27,10 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
  if(current.includes('MEMORY_TEST')){const tools=options.mcpServers.lumi.tools;await tools.find(t=>t.name==='memory_search').handler({query:'共同回忆'});if(tools.some(t=>['memory_write','memory_update'].includes(t.name)))throw Error('MEMORY_WRITE_TOOL_MUST_BE_DISABLED');text+='<memory>合成记忆</memory>';}
  if(current.includes('STUDIO_TEST')){const tools=options.mcpServers.lumi.tools;const read=await tools.find(t=>t.name==='lumi_chibi_read').handler({path:'templates/小狐狸1.chibi.json'});const document=JSON.parse(JSON.parse(read.content[0].text).content);const preview=await tools.find(t=>t.name==='lumi_chibi_render').handler({document,preview_only:true});if(!preview.content.some(c=>c.type==='image'))throw Error('missing visual preview');const draft=JSON.parse(preview.content[0].text);await tools.find(t=>t.name==='lumi_chibi_send').handler({draft_id:draft.draft_id,caption:'本地模拟画作'});}
  if((typeof options.systemPrompt==='string'?options.systemPrompt:options.systemPrompt.prompt).includes('当前任务：由你整理'))text='<context_summary>【情感与关系】我与言言记得合成约定，原话“下次一起看星星”。未完成：继续聊天。</context_summary>';
- yield {type:'stream_event',event:{type:'message_start',message:{id:'m',usage:{input_tokens:100,cache_read_input_tokens:200}}}};
+ yield {type:'stream_event',event:{type:'message_start',message:{id:'m',usage:{input_tokens:current.includes('SDK_TRANSCRIPT_FULL')?900000:100,cache_read_input_tokens:200}}}};
  yield {type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text}}};
  yield {type:'assistant',message:{id:'m',content:[{type:'text',text}]}};
- yield {type:'result',subtype:'success',is_error:false,session_id:session,stop_reason:'end_turn',usage:{input_tokens:100,cache_read_input_tokens:200,output_tokens:10}};
+ yield {type:'result',subtype:'success',is_error:false,session_id:session,stop_reason:'end_turn',usage:{input_tokens:current.includes('SDK_TRANSCRIPT_FULL')?900000:100,cache_read_input_tokens:200,output_tokens:10}};
 }};}`);
   await writeFile(loader,`export async function resolve(specifier,context,next){if(specifier==='@anthropic-ai/claude-agent-sdk')return {url:${JSON.stringify(new URL('file://'+fake).href)},shortCircuit:true};return next(specifier,context);}`);
   await writeFile(preload,`import {register} from 'node:module';import {appendFile} from 'node:fs/promises';register(${JSON.stringify(new URL('file://'+loader).href)},import.meta.url);
@@ -41,8 +41,8 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
  if(u.includes('model.test'))throw new Error('API_FALLBACK_FORBIDDEN');
  return Response.json({});};`);
   let child,stderr='';
-  async function start(){
-    stderr='';child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),LUMI_DATA_DIR:dir,LUMI_PUSH_API_TOKEN:'test-token',LUMI_HARNESS_ENABLED:'true',LUMI_CHAT_RUNTIME:'kimi-harness',LUMI_KIMI_CODE_API_KEY:'fake-key',LUMI_KIMI_CODE_CONTEXT_TOKENS:'100000',LUMI_MEMORY_API_URL:'https://memory.test',LUMI_CACHE_KEEPALIVE_ENABLED:'false',LUMI_PROMISE_ALARM_ENABLED:'false',LUMI_BACKGROUND_PULSE_MS:'600000',DUETTO_INTERNAL_PORT:String(duettoTestPort)},stdio:['ignore','pipe','pipe']});
+  async function start(extraEnv={}){
+    stderr='';child=spawn(process.execPath,['--import',preload,'src/index.js'],{cwd:new URL('..',import.meta.url),env:{...process.env,PORT:String(port),LUMI_DATA_DIR:dir,LUMI_PUSH_API_TOKEN:'test-token',LUMI_HARNESS_ENABLED:'true',LUMI_CHAT_RUNTIME:'kimi-harness',LUMI_KIMI_CODE_API_KEY:'fake-key',LUMI_KIMI_CODE_CONTEXT_TOKENS:'100000',LUMI_MEMORY_API_URL:'https://memory.test',LUMI_CACHE_KEEPALIVE_ENABLED:'false',LUMI_PROMISE_ALARM_ENABLED:'false',LUMI_BACKGROUND_PULSE_MS:'600000',DUETTO_INTERNAL_PORT:String(duettoTestPort),...extraEnv},stdio:['ignore','pipe','pipe']});
     child.stderr.on('data',b=>stderr+=b);child.stdout.on('data',b=>stderr+=b);
     for(let i=0;i<500;i++){if(child.exitCode!==null)throw Error(stderr);try{if((await fetch(base+'/health')).ok)return;}catch{}await new Promise(r=>setTimeout(r,40));}throw Error('backend not ready '+stderr);
   }
@@ -155,6 +155,38 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     assert.ok(guardRecord,'rejected generation usage remains visible');assert.ok(guardRecord.inputTokens>0);assert.equal(guardRecord.cachedTokens,200);
     const bedtime=await chat('我要睡了 SLEEP_NAG_BLOCK');assert.equal(bedtime.status,200,await bedtime.clone().text());
     assert.match(JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages.at(-1).content,/晚安/);
+    console.log('harness-test-phase: large-original-tail');
+    await stop();
+    const largeTailEnv={LUMI_KIMI_CODE_CONTEXT_TOKENS:'1048576',LUMI_HARNESS_TAIL_MIN_TURNS:'40',LUMI_HARNESS_TAIL_MAX_TURNS:'50',LUMI_HARNESS_TAIL_TARGET_TOKENS:'100000'};
+    const extended=Array.from({length:120},(_,i)=>({id:'extended-'+i,role:i%2?'assistant':'user',content:`完整原文${i}：“约定一直有效”。`+'共同经历'.repeat(125),createdAt:new Date(Date.now()-120000+i*1000).toISOString()}));
+    await writeFile(join(dir,'threads.json'),JSON.stringify({default:{id:'default',title:'extended',messages:extended,chatRuntime:'kimi-harness',lastMeasuredInputTokens:0}}));
+    await writeFile(join(dir,'context-compression.json'),JSON.stringify({triggerTokens:900000}));await start(largeTailEnv);
+    const extendedResponse=await chat('SDK_TRANSCRIPT_FULL 提高保留原文测试');assert.equal(extendedResponse.status,200,await extendedResponse.clone().text());
+    let extendedState;for(let i=0;i<500;i++){extendedState=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default;if(extendedState.compactedAt)break;await new Promise(r=>setTimeout(r,30));}
+    assert.ok(extendedState.compactedAt,stderr);assert.equal(extendedState.activeContextStartMessageId,'extended-22');
+    for(const original of extended)assert.equal(extendedState.messages.find(m=>m.id===original.id)?.content,original.content);
+    const beforeResumeLarge=(await calls()).length;
+    const resumeLarge=await chat('压缩后继续');assert.equal(resumeLarge.status,200,await resumeLarge.clone().text());
+    const largeCall=(await calls())[beforeResumeLarge];
+    assert.ok(!largeCall.system.includes('当前任务：由你整理'));assert.equal(largeCall.resume,null,'only the completed compaction rebuilds');
+    const largeTexts=largeCall.input[0].message.content.filter(b=>b.type==='text').map(b=>b.text);
+    for(const original of extended.slice(22))assert.ok(largeTexts.some(text=>text.includes(original.content)),original.id);
+    const largeInfo=await(await fetch(base+'/v1/chats/default/runtime',{headers})).json();
+    assert.equal(largeInfo.harness.contextPolicy.preservedTailMinTurns,40);assert.equal(largeInfo.harness.contextPolicy.preservedTailMaxTurns,50);assert.equal(largeInfo.harness.contextPolicy.preservedTailTargetTokens,100000);
+
+    console.log('harness-test-phase: few-visible-turns-large-sdk-context');
+    await stop();const few=extended.slice(0,16);
+    await writeFile(join(dir,'threads.json'),JSON.stringify({default:{id:'default',messages:few,chatRuntime:'kimi-harness',lastMeasuredInputTokens:0}}));
+    await writeFile(join(dir,'context-compression.json'),JSON.stringify({triggerTokens:900000}));await start(largeTailEnv);
+    const hiddenFull=await chat('SDK_TRANSCRIPT_FULL');assert.equal(hiddenFull.status,200,await hiddenFull.clone().text());
+    let fewState;for(let i=0;i<500;i++){fewState=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default;if(fewState.compactedAt)break;await new Promise(r=>setTimeout(r,30));}
+    assert.ok(fewState.compactedAt,stderr);assert.equal(fewState.activeContextStartMessageId,'extended-0');
+    const beforeAfterFew=(await calls()).length;
+    const afterFew=await chat('所有最近原文保留');assert.equal(afterFew.status,200,await afterFew.clone().text());
+    const fewCall=(await calls())[beforeAfterFew];
+    assert.ok(!fewCall.system.includes('当前任务：由你整理'));assert.equal(fewCall.resume,null);
+    const fewTexts=fewCall.input[0].message.content.filter(b=>b.type==='text').map(b=>b.text);
+    for(const original of few)assert.ok(fewTexts.some(text=>text.includes(original.content)),original.id);
     const changed=await fetch(base+'/v1/chats/default/runtime',{method:'PUT',headers,body:JSON.stringify({runtime:'api'})});assert.equal(changed.status,200);
     assert.equal((await changed.json()).runtime,'api');
   } finally {await stop();await rm(dir,{recursive:true,force:true});}

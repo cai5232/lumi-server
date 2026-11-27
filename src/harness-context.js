@@ -10,7 +10,7 @@ export function harnessContextPolicy(config, settings) {
     inputBudget: config.contextTokens - reserve,
     triggerTokens: Math.min(requestedTrigger, Math.max(1, config.contextTokens - compactionHeadroom)),
     requestedTriggerTokens: requestedTrigger,
-    preservedTailMinTurns: 10, preservedTailMaxTurns: 15, preservedTailTargetTokens: 20000,
+    preservedTailMinTurns: config.preservedTailMinTurns ?? 10, preservedTailMaxTurns: config.preservedTailMaxTurns ?? 15, preservedTailTargetTokens: config.preservedTailTargetTokens ?? 20000,
     strategy: 'lumi-summary-rebuild',
   };
 }
