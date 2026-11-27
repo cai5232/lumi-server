@@ -1,3 +1,4 @@
+import { createLubdubInbox } from './lubdub-inbox.js';
 import { assertNoSleepNag } from './no-sleep-nag.js';
 import { createCompanionPages } from './companion-pages.js';
 import { createAcpAuth } from './acp/auth.js';
@@ -1383,6 +1384,10 @@ function saveEmotionState() {
 
 const autonomousPrompt = editablePrompt(dataDir, "autonomy-prompt", promptText("autonomy-2").match(/<wake_task>([\s\S]*?)<\/wake_task>/)[1]);
 const wakeScenePrompt = editablePrompt(dataDir, "wake-scene-prompt", promptText("autonomy").match(/<wake_task>([\s\S]*?)<\/wake_task>/)[1]);
+const lubdubInbox = createLubdubInbox({ directory: dataDir,
+  listLetters: signal => executeLubdubTool("lubdub_list_letters", {}, { signal }),
+  readLetter: (id, signal) => executeLubdubTool("lubdub_read_letter", { id }, { signal })
+});
 const chatPersonaPath = join(dataDir, "chat-persona.json");
 let chatPersonaWrite = Promise.resolve();
 
@@ -1760,8 +1765,8 @@ function publicChatMessage(value) {
 
 function stripInternalContextMarkup(value) {
   return String(value || "")
-    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
-    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\s*>/gi, "")
+    .replace(/<(context_summary|summary_check|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|time_capsule_inbox|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi, "")
+    .replace(/<\/(?:context_summary|user_profile|retrieved_memories|core_memories|internal_context_compaction|internal_proactive_nudge|time_capsule_inbox|sentinel_decision|sentinel_status|lumi_pulse|user_message_timing|user_sent_at|request_failures)\s*>/gi, "")
     .trim();
 }
 
@@ -3520,6 +3525,11 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? promptTemplate("speech-style-context-02", [speechModel])
     : promptText("speech-style-context-03");
   const bodySnapshot = pulseStore.current({ drives: pulseDrives(), sleeping: activity.mode === "sleeping" });
+  let capsuleDelivery = null;
+  if (!callMode && !desktopCompanion && thread?.id === (proactiveSettings.threadId || "default")) {
+    try { capsuleDelivery = await lubdubInbox.prepare(thread.id); }
+    catch { console.warn("[lubdub-inbox] notification fetch unavailable; will retry next turn"); }
+  }
   const systemContext = promptTemplate("system-context-04", [timestamp, timestamp, allowSpeech, speechStyleContext, sentinelStatus, pulseContext(bodySnapshot), companionMessageTiming(thread, incomingUserMessage), retrieved ? `\n${retrieved}` : "", sentMailMemory ? `\n${sentMailMemory}` : "", emojiMoods.length ? `\n<available_emoji_moods>${emojiMoods.join("、")}</available_emoji_moods>` : ""]);
   const activeSentinelActions = proactive
     ? (Array.isArray(sentinelActions) ? sentinelActions.filter(action => action !== "phone") : ["message", "screen"].filter((action) => ensureProactive(thread).actions?.[action] === true))
@@ -3602,7 +3612,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     ? promptText("widget-directive-13")
     : "";
   const incomingAlreadyInHistory = incomingUserMessage?.id && relevantMessages.some(message => message.id === incomingUserMessage.id);
-  const userModelContent = withUserMessageTimestamp(incomingAlreadyInHistory ? null : incomingUserMessage, `${systemContext}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${sleepingMessages}${proactiveDirective}${autonomousMailDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmState}${alarmDirective}${calendarDirective}${appControlState}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`);
+  const userModelContent = withUserMessageTimestamp(incomingAlreadyInHistory ? null : incomingUserMessage, `${systemContext}${friendCircleDirective}${widgetDirective}${emotionDirective}\n\n${liveAttentionContext.content}\n${sleepingMessages}${capsuleDelivery?.content || ""}${proactiveDirective}${autonomousMailDirective}${phoneActivityDirective}${sentinelActionRule}${engawaDirective}${nativeAlarmState}${alarmDirective}${calendarDirective}${appControlState}\n${commandFeedbackContext}${desktopContext}\n\n${input}${keepsakeDirective}${wakeSceneDirective ? "\n" + wakeSceneDirective : ""}`);
   let cacheSystem = summary ? `${system}\n\n${summary}` : system;
   // When a keepalive has already extended the cache through the exact previous
   // assistant block, reuse that serialized prefix verbatim. Rebuilding it from
@@ -3842,6 +3852,9 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
       { role: "assistant", content, toolCalls }];
     await (harnessTurn.receipt.runtime === "kimi-acp" ? kimiAcp : kimiHarness).finalize(harnessTurn.receipt, historyFingerprint(expected), expected);
   }
+  if (capsuleDelivery) await lubdubInbox.acknowledge(capsuleDelivery.receipt).catch(() => {
+    console.warn("[lubdub-inbox] delivery receipt unavailable; notification may repeat next turn");
+  });
   return { harnessReceipt: proactive && customProvider?.runtime === "kimi-harness" ? harnessTurn?.receipt : null, silentWake, requestFailureIDs: failureTimeline.flatMap(failure => failure.ids), commandFeedbackIDs: commandFeedback.map(item => item.id), content, thinking, toolCalls, htmlContent: photoCard?.htmlContent || htmlBlock?.htmlContent || null, htmlTitle: photoCard?.htmlTitle || htmlBlock?.htmlTitle || null, memorySaved, speechText, optionItems, callDecision, callUserText, sentinelDecision, emotionUpdate, galleryCollection, diaryEntry, diaryAction, promiseAlarmDecision, calendarEvents, modelContent: safeModelContent, userModelContent, cacheSystem, cacheRequestStartedAt, cacheKeepaliveMessages, cacheContinuity, measuredInputTokens, compactionApplied, compactionDirectivePresent: false };
 }
 
@@ -4558,7 +4571,7 @@ function lubdubLetterMetadata(letter) {
     ...(letter.status === "revealed" && letter.title ? { title: letter.title } : {}) };
 }
 
-async function executeLubdubTool(name, args) {
+async function executeLubdubTool(name, args, { signal } = {}) {
   const list = name === "lubdub_list_letters";
   const reply = name === "lubdub_reply_to_letter";
   const id = args?.id;
@@ -4577,7 +4590,7 @@ async function executeLubdubTool(name, args) {
     headers: { "x-lubdub-agent-token": token.trim(), ...(reply ? { "content-type": "application/json" } : {}) },
     body: reply ? JSON.stringify({ content }) : undefined,
     redirect: "error",
-    signal: AbortSignal.timeout(15_000)
+    signal: signal || AbortSignal.timeout(15_000)
   });
   if (response.status === 404) throw new Error("信件不存在或已撤回。");
   if (response.status === 409) throw new Error("这封信还没有揭晓，暂时不能回信。");

@@ -1,0 +1,15 @@
+# Time capsule delivery bridge
+
+## Findings
+
+The frontend's 时间胶囊 entry uses Lubdub through /v1/lubdub/letters. Read-only production checks returned HTTP 200 from the frontend proxy and both writer/agent upstream interfaces. The companion container was healthy. There were four revealed letters; three already had replies and the newest had no reply. Existing Lumi exposed list/read/reply tools but never injected a new-letter/reveal notice or body into normal chat or autonomous wake context. Thus a model that did not spontaneously poll the tool could not know a new letter had arrived.
+
+## Implementation
+
+src/lubdub-inbox.js reuses the existing authenticated agent list/read interface. Before the selected default/active thread's normal chat or regular autonomous generation, it prepares up to two pending notices. Locked letters expose only ID/status/reveal time; no writer credential or title/body is used. Revealed letters are read through the agent interface, with that endpoint rechecking the lock. Full bodies up to 20000 characters are delivered as quoted data in a time_capsule_inbox user-context suffix; larger letters get an explicit full-read-tool instruction, never a silent partial excerpt. Already-replied historical letters are skipped on bootstrap.
+
+The persisted lubdub-inbox.json contains only per-thread delivery version keys and receipt metadata. Actual letter bodies remain in Lubdub, with no replacement memory/letter database. Receipts are acknowledged after a successful model generation; failed or cancelled generations leave the letter pending. Locked and revealed versions are independent, so acknowledging a sealed notice cannot consume a later reveal. Missing/deleted letters disappear from the next list, and a failed service has a 60-second cooldown. Automatic inbox I/O has a shared three-second deadline so an unavailable companion does not stall chat indefinitely.
+
+This does not schedule extra model calls, change the 18-minute wake interval, force a chat message, open a new Session, alter max effort or change tool definitions/system prefixes. The model receives the actual pending letter on its next existing chat/wake and may use the existing lubdub_reply_to_letter tool to reply in the original letter wall. Delivery/silence/DND rules still apply to chat output. Normal and autonomous requests share the existing per-thread locking. Automatic delivery is restricted to the selected proactive/default thread to avoid cross-thread duplicate notifications. Internal wrappers are stripped from display and do not grant bedtime consent to the no-sleep-nag guard.
+
+No real test letters or replies are created and no live model probes are sent. Tests cover locked-body secrecy, reveal transitions, failure/retry, durable acknowledgement, historical replies, deletion, wrapper escaping, size bounds and service cooldown, plus a real HTTP/scheduler fixture showing a new revealed letter automatically reaching the next silent wake in the same Session without repeated injection. Existing voice-cache, memory, image, compaction and Stop-hook tests remain in the regression set.

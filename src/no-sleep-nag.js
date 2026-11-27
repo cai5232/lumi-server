@@ -33,7 +33,7 @@ const overrides = [
 
 export function sleepNagVisibleText(content) {
   return String(content || '')
-    .replace(/<(thinking|memory|context_summary|user_remark|emotion_update|emoji_mood|gallery_collection|diary_entry|diary_action|promise_alarm_decision|calendar_events|call_decision|call_user_text|sentinel_decision|lumi_tool_calls)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/giu, '')
+    .replace(/<(thinking|memory|context_summary|user_remark|emotion_update|emoji_mood|gallery_collection|diary_entry|diary_action|promise_alarm_decision|calendar_events|call_decision|call_user_text|time_capsule_inbox|sentinel_decision|lumi_tool_calls)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/giu, '')
     .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/giu, '')
     .replace(/<[^>]*>/gu, '')
     .replace(/&#(x[0-9a-f]+|[0-9]+);?/giu, (_all, value) => {

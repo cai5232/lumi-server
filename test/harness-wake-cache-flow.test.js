@@ -10,6 +10,9 @@ import { join } from 'node:path';
 test('chat-wake-chat keeps byte-identical system/tools and Session, while enforcing wake permissions', {timeout:120000}, async () => {
   const dir=await mkdtemp(join(tmpdir(),'lumi-harness-chat-'));
   const capture=join(dir,'sdk-calls.jsonl'), writes=join(dir,'memory-writes.jsonl');
+  const capsuleFile=join(dir,'capsule-fixtures.json');
+  await writeFile(capsuleFile,JSON.stringify({letters:[]}));
+  await writeFile(join(dir,'lubdub-agent-token'),'a'.repeat(64));
   const probe=createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
   const duettoProbe=createServer();await new Promise(r=>duettoProbe.listen(0,'127.0.0.1',r));const duettoTestPort=duettoProbe.address().port;await new Promise(r=>duettoProbe.close(r));
   const fake=join(dir,'fake-sdk.mjs'),loader=join(dir,'loader.mjs'),preload=join(dir,'preload.mjs');
@@ -39,9 +42,16 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
  yield {type:'result',subtype:'success',is_error:false,session_id:session,stop_reason:'end_turn',usage:{input_tokens:100,cache_read_input_tokens:200,output_tokens:10}};
 }};}`);
   await writeFile(loader,`export async function resolve(specifier,context,next){if(specifier==='@anthropic-ai/claude-agent-sdk')return {url:${JSON.stringify(new URL('file://'+fake).href)},shortCircuit:true};return next(specifier,context);}`);
-  await writeFile(preload,`import {register} from 'node:module';import {appendFile} from 'node:fs/promises';register(${JSON.stringify(new URL('file://'+loader).href)},import.meta.url);
+  await writeFile(preload,`import {register} from 'node:module';import {appendFile,readFile} from 'node:fs/promises';register(${JSON.stringify(new URL('file://'+loader).href)},import.meta.url);
 const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
  const u=String(url);if(u.startsWith('http://127.0.0.1:')&&!u.includes(':1/'))return real(url,options);
+ if(u.includes('/lubdub/letters')){
+   if(options.method && options.method!=='GET')throw Error('CAPSULE_AUTO_WRITE_FORBIDDEN');
+   const state=JSON.parse(await readFile(${JSON.stringify(capsuleFile)},'utf8'));
+   const id=new URL(u).pathname.match(/\\/letters\\/([a-f0-9]{8})$/)?.[1];
+   return Response.json(id?state.letters.find(l=>l.id===id):state);
+ }
+
  if(u.includes('/nook/memories')){await appendFile(${JSON.stringify(writes)},options.body+'\\n');return Response.json({ok:true});}
  if(u.includes('/nook/recall'))return Response.json({related:'已存在的合成记忆'});
  if(u.includes('model.test'))throw new Error('API_FALLBACK_FORBIDDEN');
@@ -67,6 +77,7 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     await stop();
     const wakeSeed=JSON.parse(await readFile(join(dir,'threads.json'),'utf8'));
     const countBeforeWake=wakeSeed.default.messages.length;
+    await writeFile(capsuleFile,JSON.stringify({letters:[{id:'aabb0011',status:'revealed',reveal_at:1700000000,title:'合成时间胶囊',content:'本地合成来信正文',replies:[]}]}));
     wakeSeed.default.activity={...wakeSeed.default.activity,mode:'sentinel',sleepPendingAt:null,nextWakeAt:new Date(Date.now()-1000).toISOString(),nextWakeSource:'settings'};
     await writeFile(join(dir,'threads.json'),JSON.stringify(wakeSeed));
     await writeFile(join(dir,'proactive-settings.json'),JSON.stringify({enabled:true,threadId:'default',intervalMin:18,intervalMax:18,dnd:false,actions:{message:true,phone:false,screen:false}}));
@@ -82,6 +93,8 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     assert.equal(wakeStored.messages.length,countBeforeWake,'silent wake adds no bubble');
     const wakeCall=(await calls()).at(-1);
     assert.equal(wakeCall.resume,afterCall.session);
+    assert.ok(JSON.stringify(wakeCall.input).includes('本地合成来信正文'),'newly revealed letter reaches the next wake without a model tool lookup');
+    assert.ok(JSON.stringify(wakeCall.input).includes('<time_capsule_inbox>'));
     assert.equal(wakeCall.system,afterCall.system,'chat and wake have identical system bytes');
     assert.deepEqual(wakeCall.definitions,afterCall.definitions,'full tool schemas and descriptions are identical');
     assert.ok(JSON.stringify(wakeCall.input).includes('<autonomous_mail_permission>'),'wake-only mail policy is a user suffix');
@@ -90,6 +103,8 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     const returned=await chat('正常聊天回来',{tts});assert.equal(returned.status,200,await returned.clone().text());
     const returnedCall=(await calls()).at(-1);
     assert.equal(returnedCall.resume,afterCall.session);
+    assert.ok(!JSON.stringify(returnedCall.input).includes('本地合成来信正文'),'accepted silent wake acknowledges the inbox without repeated injection');
+    assert.ok(!(await readFile(join(dir,'lubdub-inbox.json'),'utf8')).includes('本地合成来信正文'),'receipts are not another letter/memory store');
     assert.equal(returnedCall.system,wakeCall.system);
     assert.deepEqual(returnedCall.definitions,wakeCall.definitions);
     const muted=await chat('继续聊',{tts:{...tts,enabled:false}});assert.equal(muted.status,200,await muted.clone().text());
