@@ -6484,7 +6484,7 @@ const server = createServer(async (req, res) => {
         .catch(error => console.warn(`request failure intake unavailable: ${error.message}`));
       const messageText = String(input.content || "").trim();
       const incomingActivity = ensureActivity(threads[id]);
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || (mediaPerceptions.length ? "（发送了音视频）" : images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" }  : {}), createdAt: new Date().toISOString() };
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (mediaPerceptions.length ? "（发送了音视频）" : images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" } : input.contentType === "perception_voice" && mediaPerceptions.some(item => item.mimeType.startsWith("audio/")) ? {contentType:"perception_voice"} : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
       const sentAt = validatedUserSentAt(input.requestedAt, requestArrivedAt);

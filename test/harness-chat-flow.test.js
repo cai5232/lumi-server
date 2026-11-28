@@ -179,6 +179,10 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     for(const original of immutableHistory)assert.deepEqual(afterMediaArchive.find(m=>m.id===original.id),original,'old history is unchanged');
     assert.equal(afterMediaArchive.at(-2).mediaPerceptions[0].id,media.id);
     const usageMedia=await(await fetch(base+'/v1/perception/usage',{headers})).json();assert.equal(usageMedia.requests.length,1);assert.equal(usageMedia.requests[0].usage.promptTokenCount,200);
+    let voiceMedia=await(await fetch(base+'/v1/perception/files',{method:'POST',headers:{...mediaHeaders,'content-type':'audio/mp4'},body:Buffer.from('native press-to-record audio')})).json();
+    for(let i=0;i<100&&voiceMedia.status==='analyzing';i++){await new Promise(r=>setTimeout(r,20));voiceMedia=await(await fetch(base+'/v1/perception/files/'+voiceMedia.id,{headers})).json();}
+    const voiceReply=await chat('（语音消息）',{perceptionIDs:[voiceMedia.id],contentType:'perception_voice'});assert.equal(voiceReply.status,200,await voiceReply.clone().text());
+    const voicePayload=await voiceReply.json();assert.equal(voicePayload.userMessage.contentType,'perception_voice');assert.equal(voicePayload.userMessage.mediaPerceptions[0].mimeType,'audio/mp4');
     const failedUpload=await(await fetch(base+'/v1/perception/files',{method:'POST',headers:{...mediaHeaders,'content-type':'audio/wav'},body:Buffer.from('FAIL_MEDIA')})).json();
     let failedMedia=failedUpload;for(let i=0;i<100&&failedMedia.status==='analyzing';i++){await new Promise(r=>setTimeout(r,20));failedMedia=await(await fetch(base+'/v1/perception/files/'+failedMedia.id,{headers})).json();}
     assert.equal(failedMedia.status,'error');const beforeFailedMedia=(await calls()).length;
