@@ -35,7 +35,7 @@ export function query({prompt,options}){return {close(){},async *[Symbol.asyncIt
   await writeFile(loader,`export async function resolve(specifier,context,next){if(specifier==='@anthropic-ai/claude-agent-sdk')return {url:${JSON.stringify(new URL('file://'+fake).href)},shortCircuit:true};return next(specifier,context);}`);
   await writeFile(preload,`import {register} from 'node:module';import {appendFile} from 'node:fs/promises';register(${JSON.stringify(new URL('file://'+loader).href)},import.meta.url);
 const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
- const u=String(url);if(u.startsWith('http://127.0.0.1:')&&!u.includes(':1/'))return real(url,options);
+ const u=String(url);if(u.includes('perception.test')){await appendFile(${JSON.stringify(join(dir,'perception-calls.jsonl'))},options.body+'\\n');const b=JSON.parse(options.body);if(b.contents[0].parts[0].inlineData?.data===Buffer.from('FAIL_MEDIA').toString('base64'))return Response.json({error:{message:'synthetic perception failure'}},{status:503});return Response.json({candidates:[{finishReason:'STOP',content:{parts:[{text:'00:01 人物挥手，音轨说“你好”，伴有鸟鸣。'}]}}],usageMetadata:{promptTokenCount:200,totalTokenCount:220,candidatesTokenCount:20}});}if(u.startsWith('http://127.0.0.1:')&&!u.includes(':1/'))return real(url,options);
  if(u.includes('/nook/memories')){await appendFile(${JSON.stringify(writes)},options.body+'\\n');return Response.json({ok:true});}
  if(u.includes('/nook/recall'))return Response.json({related:'已存在的合成记忆'});
  if(u.includes('model.test'))throw new Error('API_FALLBACK_FORBIDDEN');
@@ -155,6 +155,39 @@ const real=globalThis.fetch;globalThis.fetch=async(url,options={})=>{
     assert.ok(guardRecord,'rejected generation usage remains visible');assert.ok(guardRecord.inputTokens>0);assert.equal(guardRecord.cachedTokens,200);
     const bedtime=await chat('我要睡了 SLEEP_NAG_BLOCK');assert.equal(bedtime.status,200,await bedtime.clone().text());
     assert.match(JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages.at(-1).content,/晚安/);
+    console.log('harness-test-phase: independent-multimodal-perception');
+    assert.equal((await fetch(base+'/v1/perception/settings')).status,401);
+    await stop();await writeFile(join(dir,'context-compression.json'),JSON.stringify({triggerTokens:90000}));await start();
+    await chat('独立感知前的正常续聊');
+    const perceptionBefore=await calls(), immutableHistory=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
+    const perceptionConfig={enabled:true,baseURL:'https://perception.test',apiKey:'separate-gemini-key',model:'custom-perception-model',protocol:'gemini'};
+    const configuredPerception=await fetch(base+'/v1/perception/settings',{method:'PUT',headers,body:JSON.stringify(perceptionConfig)});
+    assert.equal(configuredPerception.status,200);assert.ok(!(await configuredPerception.text()).includes('separate-gemini-key'));
+    const mediaHeaders={authorization:'Bearer test-token','content-type':'video/mp4','x-file-name':encodeURIComponent('我的视频.mp4')};
+    const rawMedia=Buffer.from('synthetic-original-video-with-audio');
+    let media=await (await fetch(base+'/v1/perception/files',{method:'POST',headers:mediaHeaders,body:rawMedia})).json();
+    for(let i=0;i<100&&media.status==='analyzing';i++){await new Promise(r=>setTimeout(r,20));media=await(await fetch(base+'/v1/perception/files/'+media.id,{headers})).json();}
+    assert.equal(media.status,'ready');assert.equal((await calls()).length,perceptionBefore.length,'perception alone never calls the main model');
+    const duplicateMedia=await(await fetch(base+'/v1/perception/files',{method:'POST',headers:mediaHeaders,body:rawMedia})).json();assert.equal(duplicateMedia.id,media.id);assert.equal(duplicateMedia.reused,true);
+    assert.deepEqual(Buffer.from(await(await fetch(base+'/v1/perception/files/'+media.id+'/content',{headers})).arrayBuffer()),rawMedia);
+    const rangeMedia=await fetch(base+'/v1/perception/files/'+media.id+'/content',{headers:{...headers,range:'bytes=0-3'}});assert.equal(rangeMedia.status,206);assert.equal(await rangeMedia.text(),'synt');
+    const beforeMediaChat=(await calls()).length;
+    const mediaReply=await chat('看看这个视频',{perceptionIDs:[media.id],stream:true});assert.equal(mediaReply.status,200,await mediaReply.clone().text());assert.match(await mediaReply.text(),/"type":"complete"/);
+    const mediaCall=(await calls())[beforeMediaChat];assert.equal(mediaCall.session,perceptionBefore.at(-1).session);assert.equal(mediaCall.system,perceptionBefore.at(-1).system,'media changes no stable system prefix');
+    assert.match(JSON.stringify(mediaCall.input),/00:01 人物挥手/);assert.match(JSON.stringify(mediaCall.input),/音轨说/);assert.ok(!JSON.stringify(mediaCall.input).includes(rawMedia.toString('base64')),'only perception text reaches main model');
+    const afterMediaArchive=JSON.parse(await readFile(join(dir,'threads.json'),'utf8')).default.messages;
+    for(const original of immutableHistory)assert.deepEqual(afterMediaArchive.find(m=>m.id===original.id),original,'old history is unchanged');
+    assert.equal(afterMediaArchive.at(-2).mediaPerceptions[0].id,media.id);
+    const usageMedia=await(await fetch(base+'/v1/perception/usage',{headers})).json();assert.equal(usageMedia.requests.length,1);assert.equal(usageMedia.requests[0].usage.promptTokenCount,200);
+    const failedUpload=await(await fetch(base+'/v1/perception/files',{method:'POST',headers:{...mediaHeaders,'content-type':'audio/wav'},body:Buffer.from('FAIL_MEDIA')})).json();
+    let failedMedia=failedUpload;for(let i=0;i<100&&failedMedia.status==='analyzing';i++){await new Promise(r=>setTimeout(r,20));failedMedia=await(await fetch(base+'/v1/perception/files/'+failedMedia.id,{headers})).json();}
+    assert.equal(failedMedia.status,'error');const beforeFailedMedia=(await calls()).length;
+    assert.equal((await chat('感知失败不能调用主模型',{perceptionIDs:[failedMedia.id]})).status,409);
+    await fetch(base+'/v1/perception/files/'+failedMedia.id+'/retry',{method:'POST',headers});
+    assert.equal((await calls()).length,beforeFailedMedia,'standalone analysis retry never triggers main model');
+    const geminiCalls=(await readFile(join(dir,'perception-calls.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(geminiCalls[0].contents.length,1);assert.ok(!JSON.stringify(geminiCalls).includes('用户编辑入口测试标记'));assert.ok(!JSON.stringify(geminiCalls).includes('已存在的合成记忆'));
+
     console.log('harness-test-phase: large-original-tail');
     await stop();
     const largeTailEnv={LUMI_KIMI_CODE_CONTEXT_TOKENS:'1048576',LUMI_HARNESS_TAIL_MIN_TURNS:'40',LUMI_HARNESS_TAIL_MAX_TURNS:'50',LUMI_HARNESS_TAIL_TARGET_TOKENS:'100000'};

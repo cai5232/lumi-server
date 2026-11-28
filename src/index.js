@@ -1,3 +1,5 @@
+import { createPerceptionStore, perceptionContext } from './multimodal-perception.js';
+import { createPerceptionRoutes } from './perception-routes.js';
 import { createLubdubInbox } from './lubdub-inbox.js';
 import { assertNoSleepNag } from './no-sleep-nag.js';
 import { createCompanionPages } from './companion-pages.js';
@@ -71,6 +73,8 @@ const port = Number(process.env.PORT || 8787);
 let serverZenMuxRoute = configuredZenMuxRoute(process.env);
 const chatJobs = createChatJobs(port);
 const dataDir = process.env.LUMI_DATA_DIR || join(process.cwd(), "data");
+const perceptionStore = createPerceptionStore(dataDir);
+const perceptionRoutes = createPerceptionRoutes(perceptionStore, {authorized:pushRequestAuthorized,send,readJSON:limitedJSONBody,readBinary:binaryBody});
 const kimiHarnessConfig = harnessConfig();
 const kimiHarness = createHarnessRuntime(kimiHarnessConfig);
 const sdkRuntimes = new Map([[kimiHarnessConfig.model, kimiHarness]]);
@@ -3026,7 +3030,7 @@ function activeHistoryTokens(thread, messages = activeChatMessages(thread)) {
   if (!thread.compactedAt && !thread.contextExcludedMessageIDs?.length) return messageTokens(messages);
   return messages.reduce((total, message) => {
     const text = message.toolCalls?.length ? historicalModelContent(message.content, message.toolCalls) : message.content;
-    return total + estimateTokens(text) + 8;
+    return total + estimateTokens(text) + (message.mediaPerceptions?.length ? estimateTokens(perceptionContext(message.mediaPerceptions)) : 0) + 8;
   }, 0);
 }
 
@@ -3119,8 +3123,8 @@ function setCompactionDiagnostics(id, patch) {
 }
 
 function compactionMessageBody(message, visibleOnly = false) {
-  if (visibleOnly === "withTools") return historicalModelContent(stripPrivateReasoning(message.content), message.toolCalls);
-  if (visibleOnly) return stripPrivateReasoning(message.content);
+  if (visibleOnly === "withTools") return historicalModelContent(stripPrivateReasoning(message.content), message.toolCalls) + perceptionContext(message.mediaPerceptions);
+  if (visibleOnly) return stripPrivateReasoning(message.content) + perceptionContext(message.mediaPerceptions);
   return String(historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content || "").trim();
 }
 
@@ -3464,6 +3468,7 @@ async function generateReply({ input, incomingUserMessage, worldBookInput = inpu
     let content = hasCompactedContext || thread.contextExcludedMessageIDs?.length
       ? historicalModelContent(stripPrivateReasoning(message.content), message.toolCalls)
       : historicalModelContent(message.modelContent || message.content, message.toolCalls) || message.content;
+    if ((hasCompactedContext || thread.contextExcludedMessageIDs?.length) && message.mediaPerceptions?.length) content += perceptionContext(message.mediaPerceptions);
     const savedImages = historicalImages.get(message.id) || [];
     if ((message.imageAttachmentCount || message.modelImageIDs?.length) && !savedImages.length) {
       content = `${content || ""}\n[服务器附件记录：这轮用户实际发送了${message.imageAttachmentCount || message.modelImageIDs.length}张图片，当轮模型接收过图片；当前历史未能恢复原图。应区分当时的观察与当前无法重新核对的细节。]`;
@@ -4704,6 +4709,7 @@ const server = createServer(async (req, res) => {
   let callReservationID;
   try {
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (await perceptionRoutes(req,res,url)) return;
     if (url.pathname.startsWith("/v1/companions/")) return await companionPages(req, res, url);
     if (url.pathname.startsWith("/v1/lubdub/")) return await proxyLubdub(req, res, url);
     if (url.pathname === "/v1/xiaohongshu/preview" && req.method === "POST") {
@@ -6410,7 +6416,9 @@ const server = createServer(async (req, res) => {
       const galleryImageIDs = Array.isArray(input.galleryImageIDs)
         ? input.galleryImageIDs.filter((itemID) => typeof itemID === "string" && /^[a-f0-9]{64}$/i.test(itemID)).slice(0, 4)
         : [];
-      if ((!input.content || !String(input.content).trim()) && !images.length && !galleryImageIDs.length) return send(res, 400, { error: "content_image_or_gallery_required" });
+      if ((!input.content || !String(input.content).trim()) && !images.length && !galleryImageIDs.length && !input.perceptionIDs?.length) return send(res, 400, { error: "content_image_or_gallery_required" });
+      const mediaPerceptions = await perceptionStore.attachments(input.perceptionIDs || []);
+      const mediaContext = perceptionContext(mediaPerceptions);
       const requestId = String(req.headers["idempotency-key"] || "");
       if (requestId && !/^[a-zA-Z0-9_-]{8,128}$/.test(requestId)) return send(res, 400, { error: "invalid_idempotency_key" });
       if (requestId) {
@@ -6476,11 +6484,11 @@ const server = createServer(async (req, res) => {
         .catch(error => console.warn(`request failure intake unavailable: ${error.message}`));
       const messageText = String(input.content || "").trim();
       const incomingActivity = ensureActivity(threads[id]);
-      const userMessage = { id: randomUUID(), role: "user", content: messageText || (images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" }  : {}), createdAt: new Date().toISOString() };
+      const userMessage = { id: randomUUID(), role: "user", content: messageText || (mediaPerceptions.length ? "（发送了音视频）" : images.length ? "（发送了图片）" : "（带来了一张相册里的照片）"), ...(isStickerMessage ? { contentType: "sticker", stickerImageURL } : isXHSMessage ? { contentType: "xiaohongshu" }  : {}), createdAt: new Date().toISOString() };
       const updatedOptionMessage = answerPreviousOptions(threads[id], userMessage, input.pick);
       const wasOptionPick = userMessage.attachments?.some((item) => item.type === "pick") === true;
       const sentAt = validatedUserSentAt(input.requestedAt, requestArrivedAt);
-      const storedUserMessage = { ...userMessage, ...(sentAt ? { sentAt } : {}), requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
+      const storedUserMessage = { ...userMessage, ...(mediaPerceptions.length ? { mediaPerceptions } : {}), ...(sentAt ? { sentAt } : {}), requestFingerprint: fingerprint, ...(userMessage.attachments?.length ? { attachments: userMessage.attachments } : {}), ...(images.length ? { imageAttachmentCount: images.length } : {}), ...(galleryImageIDs.length ? { galleryImageIDs } : {}), ...(requestId ? { requestId } : {}) };
       let generated;
       if (images.length) storedUserMessage.modelImageIDs = await saveChatImages(dataDir, images);
       const selectedGalleryMemory = await galleryMemory(id, galleryImageIDs);
@@ -6507,6 +6515,7 @@ const server = createServer(async (req, res) => {
       const widgetAlreadyAttached = widgetContext && threads[id].messages.some(message => message.widgetContext?.id === widgetContext.id);
       const contextAccepted = Boolean(widgetContext);
       if (contextAccepted) storedUserMessage.widgetContextAccepted = true;
+      modelMessageContent += mediaContext;
       let widgetContextSuffix = "";
       if (widgetContext && !widgetAlreadyAttached) {
         storedUserMessage.widgetContext = { id: widgetContext.id, text: widgetContext.text };
