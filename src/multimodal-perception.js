@@ -104,6 +104,7 @@ export function createPerceptionStore(dataDir, {fetchImpl=fetch}={}) {
   }
   async function upload(bytes,mimeType,name='附件',retry=false) {
     const c=await config();ready(c);
+    mimeType=({'audio/vnd.wave':'audio/wav','audio/wave':'audio/wav','audio/x-aiff':'audio/aiff','audio/x-m4a':'audio/mp4','video/x-m4v':'video/mp4'})[mimeType]||mimeType;
     const supported=new Set(['video/mp4','video/mpeg','video/quicktime','video/webm','video/x-msvideo','audio/wav','audio/x-wav','audio/mpeg','audio/mp3','audio/mp4','audio/x-m4a','audio/aac','audio/ogg','audio/flac','audio/aiff','audio/webm']);
     if(!supported.has(mimeType))throw fail('请选择支持的视频或音频格式。',415);
     if(!bytes.length||bytes.length>MAX_MEDIA_BYTES)throw fail('原始文件须为 1 字节至 12 MiB。请选取较短的片段；不会自动截帧或转写。',413);

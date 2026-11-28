@@ -26,7 +26,7 @@ test('native video and audio retain original bytes; isolated request, durable re
 });
 test('failure is explicit, retry is separate, incomplete analyses never reach main model',async t=>{
  let count=0;const {store}=await setup(t,async()=>{count++;return count===1?Response.json({error:{message:'upstream '+settings.apiKey}},{status:429}):Response.json(output);});
- const item=await store.upload(Buffer.from('audio'),'audio/wav','录音.wav');await store.idle();
+ const item=await store.upload(Buffer.from('audio'),'audio/vnd.wave','录音.wav');await store.idle();
  const failed=await store.get(item.id);assert.equal(failed.status,'error');assert.match(failed.error,/429/);assert.ok(!failed.error.includes(settings.apiKey));
  await assert.rejects(store.attachments([item.id]),/尚未完成/);await store.upload(Buffer.from('audio'),'audio/wav');assert.equal(count,1);
  await store.retry(item.id);await store.idle();assert.equal(count,2);assert.equal((await store.attachments([item.id]))[0].status,'ready');
